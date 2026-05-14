@@ -80,6 +80,20 @@ def _first_matching_command(commands: list[str]) -> Optional[str]:
     return None
 
 
+
+def _running_process(names: list[str]) -> Optional[str]:
+    try:
+        result = _run(["ps", "-eo", "comm="], timeout=2.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    running = set(result.stdout.split())
+    for name in names:
+        if name in running:
+            return name
+    return None
+
 def _python_module_check(module: str, purpose: str, required: bool = False) -> Check:
     if importlib.util.find_spec(module) is not None:
         return Check(module, STATUS_OK, purpose, "python module is installed")
@@ -144,18 +158,11 @@ def _display_capture_check() -> Check:
         "xdg-desktop-portal",
         extra_paths=["/usr/libexec/xdg-desktop-portal", "/usr/lib/xdg-desktop-portal"],
     )
-    portal_kde = _find_binary(
+    portal_impl = _running_process([
         "xdg-desktop-portal-kde",
-        extra_paths=["/usr/libexec/xdg-desktop-portal-kde", "/usr/lib/xdg-desktop-portal-kde"],
-    )
-    portal_gnome = _find_binary(
         "xdg-desktop-portal-gnome",
-        extra_paths=["/usr/libexec/xdg-desktop-portal-gnome", "/usr/lib/xdg-desktop-portal-gnome"],
-    )
-    portal_wlr = _find_binary(
         "xdg-desktop-portal-wlr",
-        extra_paths=["/usr/libexec/xdg-desktop-portal-wlr", "/usr/lib/xdg-desktop-portal-wlr"],
-    )
+    ])
 
     if wayland and wf_recorder:
         return Check(
@@ -164,13 +171,12 @@ def _display_capture_check() -> Check:
             "Wayland capture path is available",
             f"WAYLAND_DISPLAY={wayland}; wf-recorder={wf_recorder}",
         )
-    if wayland and portal and (portal_kde or portal_gnome or portal_wlr):
-        backend = portal_kde or portal_gnome or portal_wlr
+    if wayland and portal and portal_impl:
         return Check(
             "screen capture",
             STATUS_OK,
             "Wayland portal stack is available",
-            f"WAYLAND_DISPLAY={wayland}; portal={portal}; backend={backend}",
+            f"WAYLAND_DISPLAY={wayland}; portal={portal}; backend={portal_impl}",
         )
     if x11 and xrandr:
         return Check(
@@ -183,6 +189,8 @@ def _display_capture_check() -> Check:
         detail = "Install wf-recorder or xdg-desktop-portal + desktop-specific backend."
         if not portal:
             detail = "xdg-desktop-portal not found; install portal stack for KDE/GNOME capture."
+        elif not portal_impl:
+            detail = "no running xdg-desktop-portal backend process found."
         return Check(
             "screen capture",
             STATUS_WARN,
@@ -324,9 +332,14 @@ def _python_check() -> Check:
 
 def run_diagnostics() -> DiagnosticReport:
     portal_bin_paths = ["/usr/libexec/xdg-desktop-portal", "/usr/lib/xdg-desktop-portal"]
-    portal_kde_bin_paths = ["/usr/libexec/xdg-desktop-portal-kde", "/usr/lib/xdg-desktop-portal-kde"]
-    portal_gnome_bin_paths = ["/usr/libexec/xdg-desktop-portal-gnome", "/usr/lib/xdg-desktop-portal-gnome"]
-    portal_wlr_bin_paths = ["/usr/libexec/xdg-desktop-portal-wlr", "/usr/lib/xdg-desktop-portal-wlr"]
+    portal_backend_names = [
+        "xdg-desktop-portal-kde",
+        "xdg-desktop-portal-gnome",
+        "xdg-desktop-portal-wlr",
+    ]
+    portal_impl = _running_process(portal_backend_names)
+    portal_impl_status = STATUS_OK if portal_impl else STATUS_WARN
+    portal_impl_detail = portal_impl or "no running xdg-desktop-portal backend process found"
 
     checks = [
         _python_check(),
@@ -337,20 +350,11 @@ def run_diagnostics() -> DiagnosticReport:
             "Wayland portal service for KDE/GNOME capture",
             extra_paths=portal_bin_paths,
         ),
-        _command_check(
-            "xdg-desktop-portal-kde",
-            "KDE Wayland portal backend",
-            extra_paths=portal_kde_bin_paths,
-        ),
-        _command_check(
-            "xdg-desktop-portal-gnome",
-            "GNOME Wayland portal backend",
-            extra_paths=portal_gnome_bin_paths,
-        ),
-        _command_check(
-            "xdg-desktop-portal-wlr",
-            "wlroots Wayland portal backend",
-            extra_paths=portal_wlr_bin_paths,
+        Check(
+            "xdg-desktop-portal-impl",
+            portal_impl_status,
+            "running Wayland portal backend process",
+            portal_impl_detail,
         ),
         _command_check("pactl", "PulseAudio/PipeWire-Pulse audio monitor detection"),
         _command_check("xrandr", "X11 monitor detection fallback"),
