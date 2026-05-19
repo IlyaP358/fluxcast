@@ -31,35 +31,35 @@ Current limitation:
 Default WFD run (interactive monitor/peer selection):
 
 ```bash
-python3 main.py
+python3 src/main.py
 ```
 
 WFD with latency/session JSONL log:
 
 ```bash
-python3 main.py --wfd-latency-log
+python3 src/main.py --wfd-latency-log
 ```
 
 DLNA fallback:
 
 ```bash
-python3 main.py --protocol dlna --transport hls
+python3 src/main.py --protocol dlna --transport hls
 ```
 
 Cast mode (optional, if your TV supports it):
 
 ```bash
-python3 main.py --protocol cast
+python3 src/main.py --protocol cast
 ```
 
 Force backend manually (if auto is not suitable on your session):
 
 ```bash
-python3 main.py --capture-backend wf-recorder
-python3 main.py --capture-backend x11grab
-python3 main.py --protocol wfd --wfd-capture-backend portal
-python3 main.py --protocol wfd --wfd-capture-backend wf-recorder
-python3 main.py --protocol wfd --wfd-capture-backend x11grab
+python3 src/main.py --capture-backend wf-recorder
+python3 src/main.py --capture-backend x11grab
+python3 src/main.py --protocol wfd --wfd-capture-backend portal
+python3 src/main.py --protocol wfd --wfd-capture-backend wf-recorder
+python3 src/main.py --protocol wfd --wfd-capture-backend x11grab
 ```
 
 ## What Works Best
@@ -97,7 +97,7 @@ git clone https://github.com/IlyaP358/fluxcast.git
 cd fluxcast
 python3 -m venv venv
 pip install -r requirements.txt
-python3 main.py # and flags as you need
+python3 src/main.py # and flags as you need
 ```
 
 DLNA/Cast features require additional packages listed in `requirements.txt`.
@@ -115,7 +115,7 @@ WFD mode also depends on system binaries, not only Python packages:
 Use:
 
 ```bash
-python3 main.py --doctor
+python3 src/main.py --doctor
 ```
 
 to check your machine before running WFD.
@@ -126,9 +126,7 @@ Note: on KDE/GNOME Wayland, WFD auto backend now prefers `portal` first.
 ## Documentation
 
 Detailed flags, modes, and usage examples:  
-[documentation/documentation.md](documentation/documentation.md)
-
-
+[documentation/DOCUMENTATION.md](documentation/DOCUMENTATION.md)
 
 ## Tested Environment
 

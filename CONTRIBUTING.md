@@ -8,7 +8,7 @@ actively developed, so contributions are very welcome.
 Run `--doctor` and make sure your environment is ready:
 
 ```bash
-python3 main.py --doctor
+python3 src/main.py --doctor
 ```
 
 Check open issues, maybe someone is already working on 
@@ -32,6 +32,6 @@ I don't have the hardware to verify it myself.
 ## Reporting Bugs
 
 Open an issue and include:
-- Output of `python3 main.py --doctor` and `tail -f /tmp/fluxcast-wfd-latency.jsonl  ` 
+- Output of `python3 src/main.py --doctor` and `tail -f /tmp/fluxcast-wfd-latency.jsonl  ` 
 - What you ran and what happened
 - OS, compositor, TV model
