@@ -5,7 +5,7 @@ Complete reference for modes, flags, and practical command combinations.
 ## Quick Start
 
 ```bash
-python3 main.py
+python3 src/main.py
 ```
 
 By default, FluxCast starts in `wfd` mode (Miracast/Wi-Fi Display).
@@ -13,7 +13,7 @@ By default, FluxCast starts in `wfd` mode (Miracast/Wi-Fi Display).
 If you prefer not to use a terminal, launch with `--tray` to get a system tray icon — no terminal window needed:
 
 ```bash
-python3 main.py --tray
+python3 src/main.py --tray
 ```
 
 ## Modes
@@ -25,9 +25,9 @@ python3 main.py --tray
 Mode selection:
 
 ```bash
-python3 main.py --protocol wfd
-python3 main.py --protocol dlna --transport hls
-python3 main.py --protocol cast
+python3 src/main.py --protocol wfd
+python3 src/main.py --protocol dlna --transport hls
+python3 src/main.py --protocol cast
 ```
 
 ## Full CLI Flags
@@ -172,8 +172,8 @@ python3 main.py --protocol cast
 Examples:
 
 ```bash
-python3 main.py --wfd-latency-log
-python3 main.py --wfd-latency-log /tmp/my-latency.jsonl
+python3 src/main.py --wfd-latency-log
+python3 src/main.py --wfd-latency-log /tmp/my-latency.jsonl
 ```
 
 ## Latency Log Events
@@ -196,50 +196,50 @@ python3 main.py --wfd-latency-log /tmp/my-latency.jsonl
 ### 1) Default WFD run (interactive)
 
 ```bash
-python3 main.py
+python3 src/main.py
 ```
 
 ### 2) WFD + telemetry latency log
 
 ```bash
-python3 main.py --wfd-latency-log
+python3 src/main.py --wfd-latency-log
 ```
 
 ### 3) WFD test-pattern smoke
 
 ```bash
-python3 main.py --protocol wfd --wfd-test-pattern --output-res 1280x720 --bitrate 3M
+python3 src/main.py --protocol wfd --wfd-test-pattern --output-res 1280x720 --bitrate 3M
 ```
 
 ### 4) WFD test-pattern video-only
 
 ```bash
-python3 main.py --protocol wfd --wfd-test-pattern --wfd-no-audio --output-res 1280x720 --bitrate 3M
+python3 src/main.py --protocol wfd --wfd-test-pattern --wfd-no-audio --output-res 1280x720 --bitrate 3M
 ```
 
 ### 5) WFD desktop stable baseline
 
 ```bash
-python3 main.py --protocol wfd --output-res 1280x720 --fps 30 --bitrate 3M --wfd-media-pipeline ffmpeg
+python3 src/main.py --protocol wfd --output-res 1280x720 --fps 30 --bitrate 3M --wfd-media-pipeline ffmpeg
 ```
 
 ### 6) WFD peer scan only
 
 ```bash
-python3 main.py --wfd-scan
+python3 src/main.py --wfd-scan
 ```
 
 ### 7) DLNA fallback (recommended for Samsung TVs)
 
 ```bash
-python3 main.py --protocol dlna --transport hls
+python3 src/main.py --protocol dlna --transport hls
 ```
 
 ### 8) Cast fallback (experimental, may not work on Samsung TVs)
 
 ```bash
-python3 main.py --protocol cast
-python3 main.py --protocol cast --tv-ip 192.168.1.50
+python3 src/main.py --protocol cast
+python3 src/main.py --protocol cast --tv-ip 192.168.1.50
 ```
 
 ## What "Healthy" Looks Like In Logs
