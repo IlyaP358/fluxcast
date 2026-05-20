@@ -984,19 +984,13 @@ class WFDMediaPipeline:
             raise WFDNotReady(f"portal capture setup failed: {exc}") from exc
 
         session = self.portal_session
-        if session.source_type is not None and session.source_type != 1:
+        # source_type: 1=MONITOR, 2=WINDOW, 4=VIRTUAL ("Share virtual screen")
+        if session.source_type is not None and session.source_type not in (1, 4):
             close_portal_capture(self.portal_session)
             self.portal_session = None
             raise WFDNotReady(
-                "Portal returned a non-monitor source (likely camera/window). "
-                "In the portal picker choose a full monitor/screen."
-            )
-        if session.source_type is None:
-            close_portal_capture(self.portal_session)
-            self.portal_session = None
-            raise WFDNotReady(
-                "Portal stream metadata has no source_type, cannot verify monitor capture safely. "
-                "In KDE portal picker select only a full screen and retry."
+                "Portal returned a window or camera source. "
+                "In the portal picker choose a full monitor or 'Share virtual screen'."
             )
 
         if session.size is not None:
