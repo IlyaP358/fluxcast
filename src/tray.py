@@ -280,6 +280,23 @@ def _show_about() -> None:
     if _about_thread is not None and _about_thread.is_alive():
         return
 
+    def _get_font_scale() -> float:
+        import configparser
+        for path in ["~/.config/gtk-4.0/settings.ini", "~/.config/gtk-3.0/settings.ini"]:
+            try:
+                cfg = configparser.ConfigParser(strict=False)
+                cfg.read(os.path.expanduser(path))
+                font_name = cfg.get("Settings", "gtk-font-name", fallback=None)
+                if font_name:
+                    size = float(font_name.replace(",", " ").split()[-1])
+                    if size > 0:
+                        return size / 10.0
+            except Exception:
+                continue
+        return 1.0
+
+    _scale = _get_font_scale()
+
     def _run():
         import tkinter as tk
         from PIL import ImageTk
@@ -304,13 +321,14 @@ def _show_about() -> None:
             photo = ImageTk.PhotoImage(img)
             tk.Label(frame, image=photo, bg=BG).pack(pady=(0, 8))
             root._photo = photo
+            root.iconphoto(True, photo)
         except Exception:
             pass
 
-        tk.Label(frame, text="FluxCast", font=("sans-serif", 16, "bold"),
+        tk.Label(frame, text="FluxCast", font=("sans-serif", int(16 * _scale), "bold"),
                  bg=BG, fg=FG).pack()
         tk.Label(frame, text="Desktop → Smart TV streaming for Linux",
-                 font=("sans-serif", 10), bg=BG, fg=ACCENT).pack(pady=(2, 14))
+                 font=("sans-serif", int(10 * _scale)), bg=BG, fg=ACCENT).pack(pady=(2, 14))
 
         tk.Frame(frame, bg=SEP, height=1).pack(fill="x", pady=(0, 12))
 
@@ -322,7 +340,7 @@ def _show_about() -> None:
             "full RTSP handshake, RTP media stream. ~1 second latency, "
             "video and audio. It actually works."
         )
-        tk.Label(frame, text=story, font=("sans-serif", 10), wraplength=360,
+        tk.Label(frame, text=story, font=("sans-serif", int(10 * _scale)), wraplength=360,
                  justify="left", bg=BG, fg=FG).pack(pady=(0, 14))
 
         tk.Frame(frame, bg=SEP, height=1).pack(fill="x", pady=(0, 10))
@@ -332,7 +350,7 @@ def _show_about() -> None:
             ("github.com/IlyaP358/fluxcast", "https://github.com/IlyaP358/fluxcast"),
         ]:
             lbl = tk.Label(frame, text=text, fg=LINK, cursor="hand2",
-                           font=("sans-serif", 10, "underline"), bg=BG)
+                           font=("sans-serif", int(10 * _scale), "underline"), bg=BG)
             lbl.pack(anchor="w")
             lbl.bind("<Button-1>", lambda _, u=url: webbrowser.open(u))
 
@@ -345,12 +363,12 @@ def _show_about() -> None:
             ("View Contributors", "https://fluxcast.secweb.cloud/contributors.html"),
         ]:
             lbl = tk.Label(frame, text=text, fg=FG_DIM, cursor="hand2",
-                           font=("sans-serif", 8, "underline"), bg=BG)
+                           font=("sans-serif", int(8 * _scale), "underline"), bg=BG)
             lbl.pack()
             lbl.bind("<Button-1>", lambda _, u=url: webbrowser.open(u))
 
         tk.Label(frame, text="Author: IlyaP358  |  Code licensed under GPL-3.0",
-                 font=("sans-serif", 7), bg=BG, fg=FG_DIM).pack(pady=(8, 0))
+                 font=("sans-serif", int(7 * _scale)), bg=BG, fg=FG_DIM).pack(pady=(8, 0))
 
         tk.Button(frame, text="Close", command=root.destroy, width=10,
                   bg=BTN_BG, fg=FG, activebackground="#253d2a",
