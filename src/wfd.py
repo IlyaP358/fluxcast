@@ -1004,6 +1004,7 @@ class WFDMediaPipeline:
         )
         bitrate_kbits = _bitrate_to_kbits(effective_bitrate)
         prog_map = "program_map,sink_4113=1"
+        has_h264parse = _gst_has_element("h264parse")
 
         def _gst_video_chain(video_caps: str, selector_args: list[str]) -> list[str]:
             # Use more buffers for high-res 1440p capture and move videorate early
@@ -1035,35 +1036,41 @@ class WFDMediaPipeline:
             # either has all VBV params or none of them.
             x264_props = _gst_x264enc_properties()
 
+            if "repeat-headers" in x264_props:
+                encoder_args.append("repeat-headers=true")
+
             if is_lg:
-                # LG Profile
-                # gracefully SKIP it if the installed x264enc doesn't support it.
+                # Limit VBV rate via GObject/fallback to prevent IDR spikes overflowing LG's buffer.
                 lg_vbv: list[str] = []
+                opt_parts: list[str] = []
+
                 if "rc-lookahead" in x264_props:
                     lg_vbv.append("rc-lookahead=0")
-                else:
-                    print(
-                        "[FluxCast WFD Media] LG profile: x264enc does not support "
-                        "rc-lookahead; skipping lookahead optimization."
-                    )
+
                 if "vbv-maxrate" in x264_props:
                     lg_vbv.insert(0, f"vbv-maxrate={bitrate_kbits}")
-                else:
-                    print(
-                        "[FluxCast WFD Media] LG profile: x264enc does not support "
-                        "vbv-maxrate; skipping hard rate cap."
-                    )
+                elif "option-string" in x264_props:
+                    opt_parts.append(f"vbv-maxrate={bitrate_kbits}")
+
                 if "vbv-buf-capacity" in x264_props:
                     lg_vbv.append("vbv-buf-capacity=100")
-                else:
-                    print(
-                        "[FluxCast WFD Media] LG profile: x264enc does not support "
-                        "vbv-buf-capacity; VBV buffer control unavailable."
-                    )
+                elif "option-string" in x264_props:
+                    opt_parts.append(f"vbv-bufsize={bitrate_kbits // 10}")
+
                 encoder_args += lg_vbv
+                if opt_parts:
+                    encoder_args.append("option-string=" + ":".join(opt_parts))
+                elif "vbv-maxrate" not in x264_props and "option-string" not in x264_props:
+                    print(
+                        "[FluxCast WFD Media] LG profile: VBV rate cap unavailable; "
+                        "update gst-plugins-ugly for better LG compatibility."
+                    )
             else:
                 if "vbv-buf-capacity" in x264_props:
                     encoder_args += ["vbv-buf-capacity=200"]
+
+            # Inject in-band SPS/PPS before every IDR (mirrors ffmpeg repeat-headers=1).
+            h264_parse_chain = ["!", "h264parse", "config-interval=-1"] if has_h264parse else []
 
             return [
                 "pipewiresrc",
@@ -1082,6 +1089,7 @@ class WFDMediaPipeline:
                 "!", "video/x-raw,format=I420",
                 "!", "x264enc",
                 *encoder_args,
+                *h264_parse_chain,
                 "!", "video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline",
                 "!", "queue",
                 "!", "mux.sink_4113",
@@ -1127,14 +1135,13 @@ class WFDMediaPipeline:
             f"video/x-raw,width={out_w},height={out_h},"
             f"framerate={self.config.fps}/1"
         )
+
         caps_no_fps = (
             f"video/x-raw,width={out_w},height={out_h}"
         )
-        caps_relaxed = "video/x-raw"
         caps_attempts = [
             ("strict", caps_strict),
             ("no-fps", caps_no_fps),
-            ("relaxed", caps_relaxed),
         ]
 
         print(f"[FluxCast WFD Media] Capturing via portal node : {session.pw_node_id}")

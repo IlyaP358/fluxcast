@@ -277,8 +277,9 @@ async def _start_portal_capture_async(
     session_handle = _as_string(session_handle_var)
 
     select_opts = {
-        # 1: Monitor (full screen). Let the portal UI pick the monitor.
-        "types": Variant("u", 1),
+        # 1=Monitor | 4=Virtual. Declaring both lets the compositor properly
+        # configure a virtual output stream when the user picks one.
+        "types": Variant("u", 5),
         "multiple": Variant("b", False),
         # 2: Embedded cursor.
         "cursor_mode": Variant("u", 2),
