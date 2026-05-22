@@ -1039,10 +1039,18 @@ class WFDMediaPipeline:
             if "repeat-headers" in x264_props:
                 encoder_args.append("repeat-headers=true")
 
+            opt_parts: list[str] = []
+            if "option-string" in x264_props:
+                opt_parts += ["scenecut=0", f"min-keyint={gop}"]
+            else:
+                print(
+                    "[FluxCast WFD Media] Portal: scenecut cannot be disabled "
+                    "(option-string unavailable); update gst-plugins-ugly to fix periodic artifacts."
+                )
+
             if is_lg:
                 # Limit VBV rate via GObject/fallback to prevent IDR spikes overflowing LG's buffer.
                 lg_vbv: list[str] = []
-                opt_parts: list[str] = []
 
                 if "rc-lookahead" in x264_props:
                     lg_vbv.append("rc-lookahead=0")
@@ -1058,16 +1066,20 @@ class WFDMediaPipeline:
                     opt_parts.append(f"vbv-bufsize={bitrate_kbits // 10}")
 
                 encoder_args += lg_vbv
-                if opt_parts:
-                    encoder_args.append("option-string=" + ":".join(opt_parts))
-                elif "vbv-maxrate" not in x264_props and "option-string" not in x264_props:
+                if "vbv-maxrate" not in x264_props and "option-string" not in x264_props:
                     print(
                         "[FluxCast WFD Media] LG profile: VBV rate cap unavailable; "
                         "update gst-plugins-ugly for better LG compatibility."
                     )
             else:
                 if "vbv-buf-capacity" in x264_props:
-                    encoder_args += ["vbv-buf-capacity=200"]
+                    encoder_args.append("vbv-buf-capacity=200")
+                # vbv-maxrate not exposed as GObject property; mirrors ffmpeg's -maxrate.
+                if "option-string" in x264_props:
+                    opt_parts.append(f"vbv-maxrate={bitrate_kbits}")
+
+            if opt_parts:
+                encoder_args.append("option-string=" + ":".join(opt_parts))
 
             # Inject in-band SPS/PPS before every IDR (mirrors ffmpeg repeat-headers=1).
             h264_parse_chain = ["!", "h264parse", "config-interval=-1"] if has_h264parse else []
