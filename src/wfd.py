@@ -690,6 +690,8 @@ class WFDMediaPipeline:
         self.tx_interface: Optional[str] = None
         self.tx_baseline: Optional[int] = None
         self.portal_session: Optional[PortalCaptureSession] = None
+        self._portal_gst_cmd: Optional[list[str]] = None
+        self._portal_pw_fd: Optional[int] = None
 
     def start(self) -> None:
         if self.processes:
@@ -738,6 +740,26 @@ class WFDMediaPipeline:
         self.processes.clear()
         close_portal_capture(self.portal_session)
         self.portal_session = None
+
+    def restart_video(self) -> None:
+        if self._portal_gst_cmd is None or self._portal_pw_fd is None:
+            return
+        for proc in self.processes:
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=1)
+        self.processes.clear()
+        new_proc = subprocess.Popen(
+            self._portal_gst_cmd,
+            stderr=None,
+            pass_fds=(self._portal_pw_fd,),
+        )
+        self.processes = [new_proc]
+        print("[FluxCast WFD Media] Pipeline restarted for IDR request.")
 
     def _rtp_output(self) -> str:
         return _rtp_url(self.tv_ip, self.sink_rtp_port, self.config.source_port, self.local_ip)
@@ -1207,6 +1229,8 @@ class WFDMediaPipeline:
                     continue
 
                 self.processes = [gst_proc]
+                self._portal_gst_cmd = gst_cmd
+                self._portal_pw_fd = session.pw_fd
                 return
 
         close_portal_capture(self.portal_session)
@@ -1768,13 +1792,9 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
 
         if method == "SET_PARAMETER":
             if "wfd_idr_request" in msg.body:
-                print(
-                    "[FluxCast WFD RTSP] Sink requested an IDR frame; "
-                    "next GOP is <= 1s"
-                )
-                # Forcing a small GOP helps LG, but some models might still need
-                # a direct signal to the encoder. For now, we rely on the
-                # LG Profile (frequent GOP) which is already active.
+                print("[FluxCast WFD RTSP] Sink requested IDR; restarting pipeline.")
+                if self.media is not None:
+                    self.media.restart_video()
             self._send_response(msg, headers=self._session_header())
             return
 
