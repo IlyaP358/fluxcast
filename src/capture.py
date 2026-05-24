@@ -5,7 +5,7 @@ import subprocess
 import shutil
 import sys
 import time
-from typing import Optional, NamedTuple
+from typing import Any, Optional, NamedTuple
 
 FFMPEG_PATH = shutil.which("ffmpeg") or "/usr/sbin/ffmpeg"
 
@@ -31,6 +31,12 @@ class SessionInfo(NamedTuple):
 
 class CaptureStartError(RuntimeError):
     pass
+
+
+class CaptureResult(NamedTuple):
+    process: "subprocess.Popen[bytes]"
+    aux_process: "Optional[subprocess.Popen[bytes]]" = None
+    portal_session: Any = None
 
 
 def detect_session() -> SessionInfo:
@@ -72,6 +78,18 @@ def _default_audio_monitor() -> str:
     return "default"
 
 
+def _gst_has_element(name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["gst-inspect-1.0", name],
+            capture_output=True,
+            timeout=10.0,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
 def _auto_capture_backend_order() -> list[str]:
     session = detect_session()
     if session.is_hyprland:
@@ -79,8 +97,7 @@ def _auto_capture_backend_order() -> list[str]:
     if session.is_x11:
         return ["x11grab", "wf-recorder"]
     if session.is_wayland:
-        # x11grab under Wayland often captures an empty Xwayland root and appears black.
-        return ["wf-recorder"]
+        return ["portal", "wf-recorder"]
     return ["x11grab", "wf-recorder"]
 
 
@@ -96,7 +113,9 @@ def describe_capture_selection(backend: str) -> None:
         "[FluxCast] Session detected: "
         f"type={session.session_type}, desktop={session.desktop}, wm={session.wm}"
     )
-    if backend == "wf-recorder" and session.is_wayland and not session.is_hyprland:
+    if backend == "portal":
+        print("[FluxCast] Capture backend: XDG portal (KDE/GNOME Wayland)")
+    elif backend == "wf-recorder" and session.is_wayland and not session.is_hyprland:
         print(
             "[FluxCast] Capture backend: wf-recorder (best-effort on this Wayland session). "
             "If capture fails, use an X11 session or install portal stack for KDE/GNOME."
@@ -210,28 +229,26 @@ def start_capture(
     bitrate: str = "4M",
     output_resolution: Optional[str] = None,
     backend: str = "auto",
-) -> "subprocess.Popen[bytes]":
+) -> "CaptureResult":
     backends = [backend] if backend != "auto" else _auto_capture_backend_order()
     errors: list[str] = []
 
     for idx, candidate in enumerate(backends):
         describe_capture_selection(candidate)
         try:
+            if candidate == "portal":
+                return _start_capture_portal(monitor, fps, bitrate, output_resolution)
             if candidate == "x11grab":
-                return _start_capture_x11grab(monitor, fps, bitrate, output_resolution)
-            return _start_capture_wf_recorder(monitor, fps, bitrate, output_resolution)
+                proc = _start_capture_x11grab(monitor, fps, bitrate, output_resolution)
+            else:
+                proc = _start_capture_wf_recorder(monitor, fps, bitrate, output_resolution)
+            return CaptureResult(process=proc)
         except CaptureStartError as exc:
             errors.append(f"{candidate}: {exc}")
             if idx < len(backends) - 1:
                 print(f"[FluxCast] Capture backend {candidate} failed, trying fallback...")
 
     detail = "; ".join(errors) if errors else "unknown capture error"
-    session = detect_session()
-    if session.is_wayland and not session.is_hyprland:
-        detail += (
-            "; KDE/GNOME Wayland desktop capture via portal is not enabled in this build yet. "
-            "Use X11 session for desktop capture or test WFD with --wfd-test-pattern."
-        )
     print(f"[FluxCast] ERROR: Could not start capture backend ({detail})")
     sys.exit(1)
 
@@ -291,15 +308,164 @@ def _start_capture_wf_recorder(
     return process
 
 
-def stop_capture(process: "Optional[subprocess.Popen[bytes]]") -> None:
-    if process is None:
+def stop_capture(result: "Optional[CaptureResult]") -> None:
+    if result is None:
         return
-    if process.poll() is None:
-        process.terminate()
+    for proc in (result.process, result.aux_process):
+        if proc is None or proc.poll() is not None:
+            continue
+        proc.terminate()
         try:
-            process.wait(timeout=5)
+            proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            process.kill()
+            proc.kill()
+    if result.portal_session is not None:
+        from portal_capture import close_portal_capture
+        close_portal_capture(result.portal_session)
+
+
+def _start_capture_portal(
+    monitor: Monitor,
+    fps: int = 30,
+    bitrate: str = "4M",
+    output_resolution: Optional[str] = None,
+) -> "CaptureResult":
+    if not shutil.which("gst-launch-1.0"):
+        raise CaptureStartError("portal backend requires gst-launch-1.0")
+
+    required = ("pipewiresrc", "videoconvert", "videoscale", "videorate",
+                "x264enc", "h264parse", "hlssink2")
+    missing = [e for e in required if not _gst_has_element(e)]
+    if missing:
+        raise CaptureStartError(
+            "portal backend requires missing GStreamer elements: " + ", ".join(missing)
+        )
+
+    from portal_capture import (
+        PortalCaptureError,
+        close_portal_capture,
+        start_portal_capture,
+    )
+
+    b = bitrate.upper().rstrip("B")
+    if b.endswith("M"):
+        bitrate_kbits = int(float(b[:-1]) * 1000)
+    elif b.endswith("K"):
+        bitrate_kbits = int(float(b[:-1]))
+    else:
+        bitrate_kbits = max(1, int(b) // 1000)
+
+    out_w, out_h = monitor.width, monitor.height
+    if output_resolution:
+        try:
+            ow, oh = output_resolution.lower().split("x")
+            out_w, out_h = int(ow), int(oh)
+        except (ValueError, AttributeError):
+            pass
+
+    hls_dir = "/tmp/fluxcast"
+    if os.path.exists(hls_dir):
+        shutil.rmtree(hls_dir)
+    os.makedirs(hls_dir, exist_ok=True)
+
+    audio_monitor = _default_audio_monitor()
+    audio_enc = (
+        "avenc_aac" if _gst_has_element("avenc_aac") else
+        "faac" if _gst_has_element("faac") else None
+    )
+    has_audio = audio_enc is not None and _gst_has_element("pulsesrc")
+
+    print("[FluxCast] Opening portal screen-share dialog (KDE/GNOME Wayland)...")
+    try:
+        session = start_portal_capture(
+            timeout=120.0,
+            preferred_position=(monitor.x, monitor.y),
+            preferred_size=(monitor.width, monitor.height),
+        )
+    except PortalCaptureError as exc:
+        raise CaptureStartError(f"portal capture setup failed: {exc}") from exc
+
+    if session.size is not None and not output_resolution:
+        out_w, out_h = session.size[0], session.size[1]
+
+    video_chain = [
+        "pipewiresrc",
+        f"fd={session.pw_fd}",
+        f"path={session.pw_node_id}",
+        "do-timestamp=true",
+        # always-copy=true!! immediately copy PipeWire buffer to CPU memory so
+        # x264enc doesn't stall waiting for DMA-buf download mid-pipeline
+        "always-copy=true",
+        "!", "queue", "max-size-buffers=8", "max-size-time=0", "leaky=downstream",
+        "!", "videorate", "skip-to-first=true",
+        "!", f"video/x-raw,framerate={fps}/1",
+        "!", "videoconvert",
+        "!", "videoscale",
+        "!", f"video/x-raw,width={out_w},height={out_h},format=I420",
+        "!", "x264enc",
+        "tune=zerolatency",
+        "speed-preset=ultrafast",
+        f"bitrate={bitrate_kbits}",
+        f"key-int-max={fps}",
+        "threads=0",
+        "bframes=0",
+        "byte-stream=true",
+        "aud=true",
+        "!", "h264parse", "config-interval=-1",
+        "!", "video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline",
+        "!", "sink.video",
+    ]
+
+    audio_chain: list[str] = []
+    if has_audio:
+        audio_chain = [
+            "pulsesrc", f"device={audio_monitor}", "do-timestamp=true",
+            "!", "audioconvert",
+            "!", "audioresample",
+            "!", "audio/x-raw,rate=48000,channels=2",
+            "!", audio_enc, "bitrate=128000",
+            "!", "aacparse",
+            "!", "sink.audio",
+        ]
+
+    gst_cmd = [
+        "gst-launch-1.0", "-e", "-q",
+        "hlssink2", "name=sink",
+        f"location={hls_dir}/stream%05d.ts",
+        f"playlist-location={hls_dir}/stream.m3u8",
+        "target-duration=2",
+        "playlist-length=6",
+        "max-files=8",
+        *video_chain,
+        *audio_chain,
+    ]
+
+    print(f"[FluxCast] Portal capture: node={session.pw_node_id}, output={out_w}x{out_h}@{fps}")
+    if session.position and session.size:
+        print(
+            f"[FluxCast] Portal source: "
+            f"pos={session.position[0]},{session.position[1]} "
+            f"size={session.size[0]}x{session.size[1]}"
+        )
+    if has_audio:
+        print(f"[FluxCast] Capturing audio: {audio_monitor}")
+
+    try:
+        gst_proc = subprocess.Popen(
+            gst_cmd,
+            stderr=subprocess.DEVNULL,
+            pass_fds=(session.pw_fd,),
+        )
+    except FileNotFoundError as exc:
+        close_portal_capture(session)
+        raise CaptureStartError(f"gst-launch-1.0 not found: {exc}") from exc
+
+    time.sleep(2.5)
+    if gst_proc.poll() is not None:
+        close_portal_capture(session)
+        raise CaptureStartError("portal GStreamer HLS pipeline exited immediately")
+
+    return CaptureResult(process=gst_proc, portal_session=session)
 
 
 def _start_capture_x11grab(

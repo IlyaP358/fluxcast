@@ -1047,7 +1047,7 @@ class WFDMediaPipeline:
                 "speed-preset=ultrafast",
                 f"bitrate={bitrate_kbits}",
                 f"key-int-max={gop}",
-                "intra-refresh=true",
+                #"intra-refresh=true",
                 "threads=0",
                 "bframes=0",
                 "byte-stream=true",
