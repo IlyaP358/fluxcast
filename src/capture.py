@@ -262,21 +262,31 @@ def _start_capture_wf_recorder(
     if not shutil.which("wf-recorder"):
         raise CaptureStartError("wf-recorder not found in PATH")
     src_res = f"{monitor.width}x{monitor.height}"
-    out_res = output_resolution or src_res
+
+    if output_resolution:
+        ow, oh = output_resolution.lower().split("x")
+        out_w, out_h = int(ow), int(oh)
+    else:
+        out_w, out_h = 1920, 1080
+
+    audio_monitor = _default_audio_monitor()
+
     cmd = [
         "wf-recorder",
         "-y",
         "-D",
         "-r", str(fps),
-        "-a",
+        f"--audio={audio_monitor}",
         "-C", "aac",
         "-P", "b:a=128k",
         "-c", "libx264",
         "-m", "hls",
+        # scale to target res and force SAR=1:1 so the TV sees 16:9, not 16:10
+        "-F", f"scale={out_w}:{out_h},setsar=1",
         "-p", "preset=ultrafast",
         "-p", "tune=zerolatency",
-        "-p", "hls_time=2",
-        "-p", "hls_list_size=6",
+        "-p", "hls_time=1",
+        "-p", "hls_list_size=3",
         "-p", "hls_flags=append_list",
         "-p", "pix_fmt=yuv420p",
         "-p", "profile=main",
@@ -285,8 +295,7 @@ def _start_capture_wf_recorder(
     ]
 
     print(f"[FluxCast] Capturing Wayland monitor : {monitor.name} ({src_res})")
-    if out_res != src_res:
-        print(f"[FluxCast] Scaling output to : {out_res}")
+    print(f"[FluxCast] Output: {out_w}x{out_h}, audio: {audio_monitor}")
 
     hls_dir = "/tmp/fluxcast"
     if os.path.exists(hls_dir):
