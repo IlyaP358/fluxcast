@@ -296,6 +296,7 @@ def _start_capture_wf_recorder(
     try:
         process = subprocess.Popen(
             cmd,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
     except FileNotFoundError as e:
@@ -433,9 +434,9 @@ def _start_capture_portal(
         "hlssink2", "name=sink",
         f"location={hls_dir}/stream%05d.ts",
         f"playlist-location={hls_dir}/stream.m3u8",
-        "target-duration=2",
-        "playlist-length=6",
-        "max-files=8",
+        "target-duration=1",
+        "playlist-length=3",
+        "max-files=4",
         *video_chain,
         *audio_chain,
     ]
@@ -453,6 +454,7 @@ def _start_capture_portal(
     try:
         gst_proc = subprocess.Popen(
             gst_cmd,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             pass_fds=(session.pw_fd,),
         )
@@ -539,7 +541,7 @@ def _start_capture_x11grab(
         print(f"[FluxCast] Scaling output to : {out_res}")
 
     try:
-        process = subprocess.Popen(cmd, stderr=subprocess.DEVNULL)
+        process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except FileNotFoundError as exc:
         raise CaptureStartError(f"required executable not found: {exc}") from exc
 
