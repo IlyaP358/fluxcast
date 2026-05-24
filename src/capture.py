@@ -389,6 +389,10 @@ def _start_capture_portal(
     if session.size is not None and not output_resolution:
         out_w, out_h = session.size[0], session.size[1]
 
+    # Normalize to 16:9
+    if not output_resolution:
+        out_w, out_h = 1920, 1080
+
     video_chain = [
         "pipewiresrc",
         f"fd={session.pw_fd}",
@@ -401,8 +405,8 @@ def _start_capture_portal(
         "!", "videorate", "skip-to-first=true",
         "!", f"video/x-raw,framerate={fps}/1",
         "!", "videoconvert",
-        "!", "videoscale",
-        "!", f"video/x-raw,width={out_w},height={out_h},format=I420",
+        "!", "videoscale", "add-borders=false",
+        "!", f"video/x-raw,width={out_w},height={out_h},format=I420,pixel-aspect-ratio=1/1",
         "!", "x264enc",
         "tune=zerolatency",
         "speed-preset=ultrafast",
