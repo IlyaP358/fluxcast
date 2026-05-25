@@ -1792,9 +1792,10 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
 
         if method == "SET_PARAMETER":
             if "wfd_idr_request" in msg.body:
-                print("[FluxCast WFD RTSP] Sink requested IDR; restarting pipeline.")
-                if self.media is not None:
-                    self.media.restart_video()
+                # IDR will arrive naturally within the next keyframe interval (~1s).
+                # restart_video() is only meaningful with intra-refresh=true (no IDR
+                # frames); with it removed, restarting kills a healthy pipeline.
+                print("[FluxCast WFD RTSP] Sink requested IDR; next keyframe satisfies it.")
             self._send_response(msg, headers=self._session_header())
             return
 
