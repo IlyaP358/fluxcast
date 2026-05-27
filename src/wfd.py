@@ -2423,7 +2423,6 @@ def _set_p2p_device_name(iface: Optional[str], name: str = "FluxCast") -> None:
     wpa_root = "/fi/w1/wpa_supplicant1"
     wpa_iface = "fi.w1.wpa_supplicant1.Interface"
 
-    print("[DBG p2p_name] step 1: Properties.Get Interfaces")
     try:
         list_result = _gdbus_call([
             "--dest", wpa_dest,
@@ -2431,22 +2430,15 @@ def _set_p2p_device_name(iface: Optional[str], name: str = "FluxCast") -> None:
             "--method", "org.freedesktop.DBus.Properties.Get",
             wpa_dest, "Interfaces",
         ], timeout=3.0)
-    except Exception as exc:
-        print(f"[DBG p2p_name] step 1 exception: {exc}")
+    except Exception:
         print("[FluxCast WFD] Warning: could not set P2P device name (cosmetic, connection will proceed).")
         return
-
-    print(f"[DBG p2p_name] step 1 rc={list_result.returncode}")
-    print(f"[DBG p2p_name] step 1 stdout={list_result.stdout!r}")
-    print(f"[DBG p2p_name] step 1 stderr={list_result.stderr!r}")
 
     if list_result.returncode != 0:
         print("[FluxCast WFD] Warning: could not set P2P device name (cosmetic, connection will proceed).")
         return
 
     iface_paths = _object_paths(list_result.stdout)
-    print(f"[DBG p2p_name] step 1 parsed paths={iface_paths}")
-
     if not iface_paths:
         print("[FluxCast WFD] Warning: could not set P2P device name (cosmetic, connection will proceed).")
         return
@@ -2463,24 +2455,19 @@ def _set_p2p_device_name(iface: Optional[str], name: str = "FluxCast") -> None:
         return 2
 
     for iface_path in sorted(iface_paths, key=_priority):
-        gvariant = f"<{{'DeviceName': <'{name}'>}}>"
-        print(f"[DBG p2p_name] step 2: Properties.Set on {iface_path!r} gvariant={gvariant!r}")
         try:
             result = _gdbus_call([
                 "--dest", wpa_dest,
                 "--object-path", iface_path,
                 "--method", "org.freedesktop.DBus.Properties.Set",
-                wpa_iface, "P2PDeviceConfig",
-                gvariant,
+                f"{wpa_iface}.P2PDevice", "P2PDeviceConfig",
+                f"<{{'DeviceName': <'{name}'>}}>",
             ], timeout=3.0)
-            print(f"[DBG p2p_name] step 2 rc={result.returncode}")
-            print(f"[DBG p2p_name] step 2 stdout={result.stdout!r}")
-            print(f"[DBG p2p_name] step 2 stderr={result.stderr!r}")
             if result.returncode == 0:
                 print(f"[FluxCast WFD] P2P device name set to '{name}'.")
                 return
-        except Exception as exc:
-            print(f"[DBG p2p_name] step 2 exception: {exc}")
+        except Exception:
+            pass
 
     print("[FluxCast WFD] Warning: could not set P2P device name (cosmetic, connection will proceed).")
 
