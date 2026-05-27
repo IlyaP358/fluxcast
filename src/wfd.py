@@ -2418,6 +2418,73 @@ def _connect_peer(
     return active
 
 
+def _set_p2p_device_name(iface: Optional[str], name: str = "FluxCast") -> None:
+    wpa_dest = "fi.w1.wpa_supplicant1"
+    wpa_root = "/fi/w1/wpa_supplicant1"
+    wpa_iface = "fi.w1.wpa_supplicant1.Interface"
+
+    print("[DBG p2p_name] step 1: Properties.Get Interfaces")
+    try:
+        list_result = _gdbus_call([
+            "--dest", wpa_dest,
+            "--object-path", wpa_root,
+            "--method", "org.freedesktop.DBus.Properties.Get",
+            wpa_dest, "Interfaces",
+        ], timeout=3.0)
+    except Exception as exc:
+        print(f"[DBG p2p_name] step 1 exception: {exc}")
+        print("[FluxCast WFD] Warning: could not set P2P device name (cosmetic, connection will proceed).")
+        return
+
+    print(f"[DBG p2p_name] step 1 rc={list_result.returncode}")
+    print(f"[DBG p2p_name] step 1 stdout={list_result.stdout!r}")
+    print(f"[DBG p2p_name] step 1 stderr={list_result.stderr!r}")
+
+    if list_result.returncode != 0:
+        print("[FluxCast WFD] Warning: could not set P2P device name (cosmetic, connection will proceed).")
+        return
+
+    iface_paths = _object_paths(list_result.stdout)
+    print(f"[DBG p2p_name] step 1 parsed paths={iface_paths}")
+
+    if not iface_paths:
+        print("[FluxCast WFD] Warning: could not set P2P device name (cosmetic, connection will proceed).")
+        return
+
+    physical = iface or _default_wifi_interface()
+    p2p_dev = f"p2p-dev-{physical}" if physical and not physical.startswith("p2p-dev-") else physical
+
+    def _priority(path: str) -> int:
+        ifname = _nm_get_string(path, wpa_iface, "Ifname")
+        if ifname == p2p_dev:
+            return 0
+        if ifname == physical:
+            return 1
+        return 2
+
+    for iface_path in sorted(iface_paths, key=_priority):
+        gvariant = f"<{{'DeviceName': <'{name}'>}}>"
+        print(f"[DBG p2p_name] step 2: Properties.Set on {iface_path!r} gvariant={gvariant!r}")
+        try:
+            result = _gdbus_call([
+                "--dest", wpa_dest,
+                "--object-path", iface_path,
+                "--method", "org.freedesktop.DBus.Properties.Set",
+                wpa_iface, "P2PDeviceConfig",
+                gvariant,
+            ], timeout=3.0)
+            print(f"[DBG p2p_name] step 2 rc={result.returncode}")
+            print(f"[DBG p2p_name] step 2 stdout={result.stdout!r}")
+            print(f"[DBG p2p_name] step 2 stderr={result.stderr!r}")
+            if result.returncode == 0:
+                print(f"[FluxCast WFD] P2P device name set to '{name}'.")
+                return
+        except Exception as exc:
+            print(f"[DBG p2p_name] step 2 exception: {exc}")
+
+    print("[FluxCast WFD] Warning: could not set P2P device name (cosmetic, connection will proceed).")
+
+
 def _disconnect_device(device_path: str) -> None:
     result = _gdbus_call([
         "--dest", NM_DEST,
@@ -2865,6 +2932,7 @@ def start_experimental_backend(args) -> None:
                 from capture import prompt_monitor
                 monitor = prompt_monitor()
 
+    _set_p2p_device_name(args.wfd_interface)
     peers = active_scan(interface=args.wfd_interface, timeout=args.wfd_timeout)
     peer = _select_peer(peers, getattr(args, "wfd_peer", None))
     device_path = _nm_p2p_device_path(args.wfd_interface)
