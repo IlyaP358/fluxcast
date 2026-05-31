@@ -36,7 +36,7 @@ _AP_NETMASK = "24"
 _DHCP_RANGE_START = "192.168.49.2"
 _DHCP_RANGE_END = "192.168.49.10"
 _AP_CHANNEL = 6          # 2.4 GHz channel 6 — widest TV compatibility
-_AP_SSID = "DIRECT-FC-FluxCast"
+_AP_SSID = "DIRECT-"
 
 
 # ── IE construction ───────────────────────────────────────────────────────────
@@ -258,7 +258,7 @@ class WFDSoftAPDriver:
 
         hostapd_log = os.path.join(self._tmpdir, "hostapd.log")
         self._hostapd = subprocess.Popen(
-            [_hostapd_bin(), hostapd_conf_path],
+            [_hostapd_bin(), "-d", hostapd_conf_path],
             stdout=open(hostapd_log, "w"),
             stderr=subprocess.STDOUT,
         )
