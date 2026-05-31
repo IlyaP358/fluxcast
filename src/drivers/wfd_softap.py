@@ -35,7 +35,7 @@ _AP_IP = "192.168.49.1"
 _AP_NETMASK = "24"
 _DHCP_RANGE_START = "192.168.49.2"
 _DHCP_RANGE_END = "192.168.49.10"
-_AP_CHANNEL = 6          # 2.4 GHz channel 6 — widest TV compatibility
+_AP_CHANNEL = 36         # 5 GHz channel 36 — matches router/TV 5GHz connection
 _AP_SSID = "DIRECT-"
 
 
@@ -93,9 +93,10 @@ def _hostapd_conf(iface: str, ctrl_path: str, vendor_hex: str) -> str:
         f"interface={iface}",
         "driver=nl80211",
         f"ssid={_AP_SSID}",
-        "hw_mode=g",
+        "hw_mode=a",
         f"channel={_AP_CHANNEL}",
         "ieee80211n=1",
+        "ieee80211ac=1",
         "wmm_enabled=1",
         "wpa=2",
         "wpa_key_mgmt=WPA-PSK",
