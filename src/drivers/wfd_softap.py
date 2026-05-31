@@ -36,7 +36,7 @@ _AP_NETMASK = "24"
 _DHCP_RANGE_START = "192.168.49.2"
 _DHCP_RANGE_END = "192.168.49.10"
 _AP_CHANNEL = 6          # 2.4 GHz channel 6 — widest TV compatibility
-_AP_SSID = "DIRECT-"
+_AP_SSID = "DIRECT-FC-FluxCast"
 
 
 # ── IE construction ───────────────────────────────────────────────────────────
@@ -97,6 +97,10 @@ def _hostapd_conf(iface: str, ctrl_path: str, vendor_hex: str) -> str:
         f"channel={_AP_CHANNEL}",
         "ieee80211n=1",
         "wmm_enabled=1",
+        "wpa=2",
+        "wpa_key_mgmt=WPA-PSK",
+        "rsn_pairwise=CCMP",
+        "wpa_passphrase=fluxcast1",
         "wps_state=2",
         "eap_server=1",
         "device_name=FluxCast",
@@ -106,7 +110,8 @@ def _hostapd_conf(iface: str, ctrl_path: str, vendor_hex: str) -> str:
         "serial_number=1",
         "device_type=10-0050F204-5",
         "os_version=01020300",
-        "config_methods=push_button",
+        "config_methods=push_button virtual_push_button",
+        "manage_p2p=1",
         f"ctrl_interface={ctrl_path}",
         "ctrl_interface_group=0",
         f"vendor_elements={vendor_hex}",
@@ -129,6 +134,15 @@ def _dnsmasq_conf(iface: str) -> str:
     ])
 
 _VIRTUAL_AP_IFACE = "fluxcast_ap0"
+
+_PATCHED_HOSTAPD = os.path.join(os.path.dirname(__file__), "bin", "hostapd")
+
+
+def _hostapd_bin() -> str:
+    """Use patched binary if available, fall back to system hostapd."""
+    if os.path.isfile(_PATCHED_HOSTAPD) and os.access(_PATCHED_HOSTAPD, os.X_OK):
+        return _PATCHED_HOSTAPD
+    return "hostapd"
 
 
 def _run(cmd: list[str], check: bool = True, timeout: float = 10.0) -> subprocess.CompletedProcess:
@@ -245,7 +259,7 @@ class WFDSoftAPDriver:
 
         hostapd_log = os.path.join(self._tmpdir, "hostapd.log")
         self._hostapd = subprocess.Popen(
-            ["hostapd", hostapd_conf_path],
+            [_hostapd_bin(), hostapd_conf_path],
             stdout=open(hostapd_log, "w"),
             stderr=subprocess.STDOUT,
         )

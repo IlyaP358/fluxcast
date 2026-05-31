@@ -1,0 +1,8 @@
+--- a/src/ap/beacon.c
++++ b/src/ap/beacon.c
+@@ -1,6 +1,7 @@
+-		if ((hapd->conf->p2p & P2P_GROUP_OWNER) &&
++		if ((hapd->conf->p2p & (P2P_GROUP_OWNER | P2P_MANAGE)) &&
+ 		    elems.ssid_len == P2P_WILDCARD_SSID_LEN &&
+ 		    os_memcmp(elems.ssid, P2P_WILDCARD_SSID,
+ 			     P2P_WILDCARD_SSID_LEN) == 0) {
