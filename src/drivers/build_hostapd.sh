@@ -43,24 +43,24 @@ cd "hostapd-${VERSION}"
 BEACON="src/ap/beacon.c"
 echo "[build_hostapd] Applying P2P wildcard probe patch to $BEACON..."
 
-if ! grep -q "P2P_GROUP_OWNER" "$BEACON"; then
-    echo "[build_hostapd] ERROR: expected pattern not found in $BEACON."
-    echo "  The hostapd source layout may have changed. Check patches/hostapd_p2p_wildcard.patch."
+if ! grep -q "ssid_match(hapd" "$BEACON"; then
+    echo "[build_hostapd] ERROR: ssid_match pattern not found in $BEACON."
+    echo "  The hostapd source layout may have changed."
     exit 1
 fi
 
 sed -i \
-    's/& P2P_GROUP_OWNER) \&\&/\& (P2P_GROUP_OWNER | P2P_MANAGE)) \&\&/' \
+    's/\tres = ssid_match(hapd, elems\.ssid, elems\.ssid_len,/\tif (elems.ssid_len == 7 \&\& os_memcmp(elems.ssid, "DIRECT-", 7) == 0) elems.ssid_len = 0;\n\tres = ssid_match(hapd, elems.ssid, elems.ssid_len,/' \
     "$BEACON"
 
-if ! grep -q "P2P_MANAGE" "$BEACON"; then
-    echo "[build_hostapd] ERROR: patch did not apply — pattern not found."
-    echo "  Expected '& P2P_GROUP_OWNER) &&' in $BEACON"
-    grep -n "P2P_GROUP_OWNER" "$BEACON" | head -5
+if ! grep -q '"DIRECT-"' "$BEACON"; then
+    echo "[build_hostapd] ERROR: patch did not apply."
+    echo "  Expected 'res = ssid_match(hapd, elems.ssid, elems.ssid_len,' in $BEACON"
+    grep -n "ssid_match" "$BEACON" | head -5
     exit 1
 fi
 echo "[build_hostapd] Patch applied:"
-grep -n "P2P_MANAGE\|P2P_GROUP_OWNER" "$BEACON" | head -3
+grep -n "DIRECT-" "$BEACON" | head -3
 
 # Build
 cd hostapd
@@ -70,7 +70,6 @@ CONFIG_DRIVER_NL80211=y
 CONFIG_WPS=y
 CONFIG_WPS2=y
 CONFIG_IEEE80211N=y
-CONFIG_P2P=y
 EOFCFG
 
 echo "[build_hostapd] Compiling..."

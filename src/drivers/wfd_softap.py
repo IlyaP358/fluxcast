@@ -111,7 +111,6 @@ def _hostapd_conf(iface: str, ctrl_path: str, vendor_hex: str) -> str:
         "device_type=10-0050F204-5",
         "os_version=01020300",
         "config_methods=push_button virtual_push_button",
-        "manage_p2p=1",
         f"ctrl_interface={ctrl_path}",
         "ctrl_interface_group=0",
         f"vendor_elements={vendor_hex}",
