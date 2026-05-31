@@ -73,6 +73,47 @@ def _command_check(
     return Check(binary, status, purpose, "not found in PATH")
 
 
+def _gst_element_check(element: str, purpose: str, install_hint: str) -> Check:
+    gst_inspect = shutil.which("gst-inspect-1.0")
+    if not gst_inspect:
+        return Check(
+            f"gst element {element}",
+            STATUS_WARN,
+            f"{purpose} could not be verified",
+            f"gst-inspect-1.0 not found; {install_hint}",
+        )
+
+    try:
+        result = _run([gst_inspect, element], timeout=5.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return Check(
+            f"gst element {element}",
+            STATUS_WARN,
+            f"{purpose} could not be verified",
+            str(exc),
+        )
+
+    if result.returncode == 0:
+        return Check(
+            f"gst element {element}",
+            STATUS_OK,
+            purpose,
+            element,
+        )
+
+    detail = (result.stderr or result.stdout).strip()
+    if detail:
+        detail = detail.replace("\n", " | ") + "; " + install_hint
+    else:
+        detail = install_hint
+    return Check(
+        f"gst element {element}",
+        STATUS_WARN,
+        f"{purpose} is missing",
+        detail,
+    )
+
+
 def _first_matching_command(commands: list[str]) -> Optional[str]:
     for command in commands:
         if shutil.which(command):
@@ -389,6 +430,18 @@ def run_diagnostics() -> DiagnosticReport:
         _command_check("gdbus", "passive wpa_supplicant D-Bus capability checks"),
         _command_check("gst-launch-1.0", "optional future WFD GStreamer pipeline"),
         _command_check("gst-inspect-1.0", "optional future WFD codec inspection"),
+        _gst_element_check(
+            "pipewiresrc",
+            "Wayland portal GStreamer capture source",
+            "install the GStreamer PipeWire plugin "
+            "(Debian/Ubuntu: gstreamer1.0-pipewire; Arch/Fedora: gst-plugin-pipewire)",
+        ),
+        _gst_element_check(
+            "x264enc",
+            "Wayland portal GStreamer H.264 encoder",
+            "install the GStreamer x264 plugin "
+            "(Debian/Ubuntu: gstreamer1.0-plugins-ugly; Arch/Fedora: gst-plugins-ugly)",
+        ),
         _python_module_check("dbus_next", "WFD portal capture control plane for KDE/GNOME Wayland"),
         _ffmpeg_encoders(),
         _display_capture_check(),
