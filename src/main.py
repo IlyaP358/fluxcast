@@ -4,7 +4,9 @@ FluxCast entry point
 Usage:
     python main.py [OPTIONS]
 
-    --protocol dlna|cast|wfd wfd = Miracast/Wi-Fi Display (default)
+    --protocol dlna|cast|wfd|wfd-softap
+                             wfd = Miracast/Wi-Fi Direct P2P (default)
+                             wfd-softap = Miracast via hostapd AP (for Broadcom/Asahi)
                              dlna = UPnP native screening fallback
                              cast = pychromecast (needs Chromecast built-in)
     --host HOST              LAN IP to advertise to the TV (default: auto-detect)
@@ -53,7 +55,7 @@ def parse_args() -> argparse.Namespace:
         description="FluxCast — stream your Arch Linux desktop to a Smart TV"
     )
     parser.add_argument("--protocol", default="wfd",
-                        choices=["dlna", "cast", "wfd"],
+                        choices=["dlna", "cast", "wfd", "wfd-softap"],
                         help="Connection protocol: wfd (Miracast, default), "
                              "dlna (UPnP fallback), or cast (Chromecast built-in)")
     parser.add_argument("--tv-ip", default=None, dest="tv_ip",
@@ -209,6 +211,16 @@ def main() -> None:
             start_experimental_backend(args)
         except WFDNotReady as exc:
             print(f"[FluxCast WFD] ERROR: {exc}")
+            sys.exit(1)
+        return
+
+    if args.protocol == "wfd-softap":
+        from drivers.wfd_softap import run_softap_session
+        from wfd import WFDNotReady
+        try:
+            run_softap_session(args)
+        except (WFDNotReady, RuntimeError) as exc:
+            print(f"[FluxCast WFD SoftAP] ERROR: {exc}")
             sys.exit(1)
         return
 
