@@ -242,17 +242,24 @@ class WFDSoftAPDriver:
 
         _ip_addr_add(self._ap_iface)
 
+        hostapd_log = os.path.join(self._tmpdir, "hostapd.log")
         self._hostapd = subprocess.Popen(
             ["hostapd", hostapd_conf_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=open(hostapd_log, "w"),
+            stderr=subprocess.STDOUT,
         )
         time.sleep(2.0)
         if self._hostapd.poll() is not None:
+            try:
+                with open(hostapd_log) as f:
+                    detail = f.read().strip()[-600:]
+            except OSError:
+                detail = "(no log)"
             raise RuntimeError(
-                f"hostapd exited immediately — check that {self._ap_iface} supports AP mode "
-                "and that no other process is using it."
+                f"hostapd exited immediately.\n{detail}\n"
+                f"Check that {self._ap_iface} supports AP mode and no other process uses it."
             )
+        print(f"[WFD SoftAP] hostapd log: {hostapd_log}")
 
         self._dnsmasq = subprocess.Popen(
             ["dnsmasq", "--no-daemon", f"--conf-file={dnsmasq_conf_path}",
