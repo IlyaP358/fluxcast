@@ -96,7 +96,6 @@ def _hostapd_conf(iface: str, ctrl_path: str, vendor_hex: str) -> str:
         "hw_mode=a",
         f"channel={_AP_CHANNEL}",
         "ieee80211n=1",
-        "ieee80211ac=1",
         "wmm_enabled=1",
         "wpa=2",
         "wpa_key_mgmt=WPA-PSK",
