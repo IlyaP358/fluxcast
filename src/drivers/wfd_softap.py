@@ -36,7 +36,7 @@ _AP_NETMASK = "24"
 _DHCP_RANGE_START = "192.168.49.2"
 _DHCP_RANGE_END = "192.168.49.10"
 _AP_CHANNEL = 6          # 2.4 GHz channel 6 — widest TV compatibility
-_AP_SSID = "DIRECT-FC-FluxCast"
+_AP_SSID = "DIRECT-"
 
 
 # ── IE construction ───────────────────────────────────────────────────────────
@@ -227,6 +227,7 @@ class WFDSoftAPDriver:
             _nm_set_managed(self._iface, managed=False)
 
         self._tmpdir = tempfile.mkdtemp(prefix="fluxcast_softap_")
+        os.chmod(self._tmpdir, 0o755)   # allow non-root to read logs
         self._ctrl_path = os.path.join(self._tmpdir, "ctrl")
         os.makedirs(self._ctrl_path, exist_ok=True)
 
