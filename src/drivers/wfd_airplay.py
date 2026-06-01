@@ -128,7 +128,8 @@ class HLSStreamServer:
         class _H(http.server.SimpleHTTPRequestHandler):
             def __init__(self, *a, **kw):
                 super().__init__(*a, directory=tmpdir, **kw)
-            def log_message(self, *_): pass
+            def log_message(self, fmt, *args):
+                print(f"[AirPlay HTTP] {self.address_string()} {fmt % args}")
 
         self._http = http.server.HTTPServer(("", self._port), _H)
         self._http_thread = threading.Thread(
@@ -170,8 +171,17 @@ class AirPlayClient:
         self._conn = http.client.HTTPConnection(self._ip, self._port, timeout=10)
         try:
             info = self._get("/info")
-            name = info.get("name", self._ip) if isinstance(info, dict) else self._ip
-            print(f"[AirPlay] Connected to: {name}")
+            if isinstance(info, dict):
+                name = info.get("name", self._ip)
+                feats = info.get("features", 0)
+                model = info.get("model", "?")
+                print(f"[AirPlay] Connected to: {name} ({model})")
+                print(f"[AirPlay] features=0x{feats:08x}  "
+                      f"pin_required={bool(feats & 0x800)}  "
+                      f"screen_mirror={bool(feats & 0x20000)}  "
+                      f"video={bool(feats & 0x2)}")
+            else:
+                print(f"[AirPlay] Connected to: {self._ip}")
         except RuntimeError:
             raise
         except Exception as e:
@@ -227,7 +237,15 @@ class AirPlayClient:
             "POST", path, body=body,
             headers=self._headers(len(body), ctype)
         )
-        self._conn.getresponse().read()
+        resp = self._conn.getresponse()
+        data = resp.read()
+        print(f"[AirPlay] {path} → HTTP {resp.status}")
+        if data:
+            try:
+                parsed = plistlib.loads(data)
+                print(f"[AirPlay] response: {parsed}")
+            except Exception:
+                print(f"[AirPlay] response raw: {data[:200]}")
 
 def _get_local_ip() -> Optional[str]:
     import socket as _sock
