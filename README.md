@@ -96,7 +96,7 @@ desktop capture -> HTTP stream -> DLNA/UPnP AVTransport -> native TV player
 git clone https://github.com/IlyaP358/fluxcast.git
 cd fluxcast
 pip install -r requirements.txt
-sudo ./install.sh
+sudo meta/install.sh
 sudo systemctl reload dbus
 gtk-update-icon-cache
 ```

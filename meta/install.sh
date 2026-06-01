@@ -25,6 +25,6 @@ install -Dm644 "$SRCDIR/src/assets/flcast_logo_512x512.png" -t "$DESTDIR/opt/flu
 install -Dm644 "$SRCDIR/meta/fluxcast.desktop" -t "$DESTDIR/usr/share/applications/"
 install -Dm644 "$SRCDIR/src/assets/flcast_logo_512x512.png" "$DESTDIR/usr/share/icons/hicolor/512x512/apps/fluxcast.png"
 install -Dm644 "$SRCDIR/meta/dev.fluxcast.wpa-supplicant.conf" -t "$DESTDIR/usr/share/dbus-1/system.d/"
-install -Dm755 "$SRCDIR/meta/fluxcast.sh" "$DESTDIR/usr/bin/fluxcast"
+install -Dm755 "$SRCDIR/meta/fluxcast" "$DESTDIR/usr/bin/fluxcast"
 
 echo -e "\e[1m\e[32m>>>\e[0m Installation completed successfully!"
