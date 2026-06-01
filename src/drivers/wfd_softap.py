@@ -93,7 +93,7 @@ def _hostapd_conf(iface: str, ctrl_path: str, vendor_hex: str) -> str:
         f"interface={iface}",
         "driver=nl80211",
         f"ssid={_AP_SSID}",
-        "hw_mode=a",
+        "hw_mode=g",
         f"channel={_AP_CHANNEL}",
         "ieee80211n=1",
         "wmm_enabled=1",
@@ -123,9 +123,9 @@ def _dnsmasq_conf(iface: str) -> str:
         f"interface={iface}",
         "bind-interfaces",
         "except-interface=lo",
+        "port=0",
         f"dhcp-range={_DHCP_RANGE_START},{_DHCP_RANGE_END},255.255.255.0,1h",
         f"dhcp-option=3,{_AP_IP}",   # default gateway
-        f"dhcp-option=6,{_AP_IP}",   # DNS (ourselves, unresolved is fine)
         "no-resolv",
         "no-poll",
         "log-dhcp",
@@ -275,12 +275,21 @@ class WFDSoftAPDriver:
             )
         print(f"[WFD SoftAP] hostapd log: {hostapd_log}")
 
+        dnsmasq_log = os.path.join(self._tmpdir, "dnsmasq.log")
         self._dnsmasq = subprocess.Popen(
             ["dnsmasq", "--no-daemon", f"--conf-file={dnsmasq_conf_path}",
              f"--pid-file={dnsmasq_pid_path}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=open(dnsmasq_log, "w"),
+            stderr=subprocess.STDOUT,
         )
+        time.sleep(0.5)
+        if self._dnsmasq.poll() is not None:
+            try:
+                detail = open(dnsmasq_log).read().strip()[-400:]
+            except OSError:
+                detail = "(no log)"
+            raise RuntimeError(f"dnsmasq failed to start.\n{detail}")
+        print(f"[WFD SoftAP] dnsmasq log: {dnsmasq_log}")
 
         self._pbc_thread = threading.Thread(target=self._pbc_loop, daemon=True)
         self._pbc_thread.start()
