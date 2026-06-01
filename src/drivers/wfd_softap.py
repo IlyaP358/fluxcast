@@ -35,8 +35,8 @@ _AP_IP = "192.168.49.1"
 _AP_NETMASK = "24"
 _DHCP_RANGE_START = "192.168.49.2"
 _DHCP_RANGE_END = "192.168.49.10"
-_AP_CHANNEL = 36         # 5 GHz channel 36 — matches router/TV 5GHz connection
-_AP_SSID = "DIRECT-"
+_AP_CHANNEL = 6 # 2.4 GHz channel 6
+_AP_SSID = "DIRECT-FC"
 
 
 # ── IE construction ───────────────────────────────────────────────────────────
