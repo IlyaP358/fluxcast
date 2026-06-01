@@ -55,8 +55,10 @@ def parse_args() -> argparse.Namespace:
         description="FluxCast — stream your Arch Linux desktop to a Smart TV"
     )
     parser.add_argument("--protocol", default="wfd",
-                        choices=["dlna", "cast", "wfd", "wfd-softap", "wfd-lan"],
+                        choices=["dlna", "cast", "wfd", "wfd-softap", "wfd-lan", "airplay"],
                         help="Connection protocol: wfd (Miracast, default), "
+                             "wfd-softap (Broadcom/Asahi fallback), "
+                             "airplay (Samsung AirPlay 2 via LAN), "
                              "dlna (UPnP fallback), or cast (Chromecast built-in)")
     parser.add_argument("--tv-ip", default=None, dest="tv_ip",
                         help="TV IP address (only applicable for --protocol cast)")
@@ -231,6 +233,16 @@ def main() -> None:
             run_lan_session(args)
         except (WFDNotReady, RuntimeError) as exc:
             print(f"[FluxCast WFD LAN] ERROR: {exc}")
+            sys.exit(1)
+        return
+
+    if args.protocol == "airplay":
+        from drivers.wfd_airplay import run_airplay_session
+        from wfd import WFDNotReady
+        try:
+            run_airplay_session(args)
+        except (WFDNotReady, RuntimeError) as exc:
+            print(f"[FluxCast AirPlay] ERROR: {exc}")
             sys.exit(1)
         return
 
