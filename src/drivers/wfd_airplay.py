@@ -180,8 +180,14 @@ class AirPlayClient:
                       f"pin_required={bool(feats & 0x800)}  "
                       f"screen_mirror={bool(feats & 0x20000)}  "
                       f"video={bool(feats & 0x2)}")
+                print("[AirPlay] Full /info keys:")
+                for k, v in info.items():
+                    if isinstance(v, bytes):
+                        print(f"  {k}: <bytes len={len(v)}>")
+                    else:
+                        print(f"  {k}: {v!r}")
             else:
-                print(f"[AirPlay] Connected to: {self._ip}")
+                print(f"[AirPlay] /info raw: {info!r}")
         except RuntimeError:
             raise
         except Exception as e:
