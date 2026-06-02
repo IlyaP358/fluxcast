@@ -98,10 +98,10 @@ cd fluxcast
 pip install -r requirements.txt
 sudo meta/install.sh
 sudo systemctl reload dbus
-gtk-update-icon-cache
+sudo gtk-update-icon-cache /usr/share/icons/hicolor
 ```
 
-[!WARNING]
+> [!WARNING]
 If `PIP` refuses to install the required libraries to your system, you will need to do that yourself using your distro's package manager.
 
 DLNA/Cast features require additional packages listed in `requirements.txt`.
