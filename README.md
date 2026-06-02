@@ -90,19 +90,23 @@ desktop capture -> HTTP stream -> DLNA/UPnP AVTransport -> native TV player
 
 ## Installation
 
-### Python packages
+### FluxCast itself
 
 ```bash
 git clone https://github.com/IlyaP358/fluxcast.git
 cd fluxcast
-python3 -m venv venv
 pip install -r requirements.txt
-python3 src/main.py # and flags as you need
+sudo meta/install.sh
+sudo systemctl reload dbus
+gtk-update-icon-cache
 ```
+
+[!WARNING]
+If `PIP` refuses to install the required libraries to your system, you will need to do that yourself using your distro's package manager.
 
 DLNA/Cast features require additional packages listed in `requirements.txt`.
 
-### System tools (important)
+### System tools (just as important)
 
 WFD mode also depends on system binaries, not only Python packages:
 
@@ -130,18 +134,35 @@ Detailed flags, modes, and usage examples:
 
 ## Tested Environment
 
-Hardware:
+### Hardware:
 
-- PC: ThinkBook 14 G4+ IAP
+<details>
+<summary>ThinkBook 14 G4+ IAP</summary>
+
 - CPU: Intel i5-1240P (16 threads) up to 4.40 GHz
 - GPU: Intel Iris Xe Graphics
 - RAM: 16 GB
 
-Software:
+</details>
 
-- OS: Arch Linux
-- Kernel: 7.0.8-arch1-1
-- WM: Hyprland 0.55.2
-- DE (for testing): KDE Plasma 6.6.5 | GNOME 50.1
-- Shell: zsh 5.9
-- Terminal: kitty 0.46.2
+<details>
+<summary>Dell XPS 13 Plus</summary>
+
+- CPU: Intel i5-1260P (16 threads) up to 4.70 GHz
+- GPU: Intel Iris Xe Graphics
+- RAM: 16 GB LPDDR5
+
+</details>
+
+### Software:
+
+<details>
+<summary>Arch Linux</summary>
+
+- Kernels: 7.0.8-arch1-1, 6.12.91-1-lts612
+- WMs: Hyprland (0.55.2)
+- DEs (for testing): KDE Plasma (6.6.5) | GNOME (50.1)
+- Shell: zsh (5.9), fish (4.7.1)
+- Terminal: kitty (0.46.2, 0.47.1)
+
+</details>
