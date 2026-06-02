@@ -20,7 +20,7 @@ rm -r "$DESTDIR/opt/fluxcast"
 # Uninstall system integration
 rm "$DESTDIR/usr/share/applications/fluxcast.desktop"
 rm "$DESTDIR/usr/share/icons/hicolor/512x512/apps/fluxcast.png"
-rm "$DESTDIR/usr/share/dbus-1/system.d/dev.fluxcast.wpa-supplicant.conf"
+rm "$DESTDIR/etc/dbus-1/system.d/dev.fluxcast.wpa-supplicant.conf"
 rm "$DESTDIR/usr/bin/fluxcast"
 
 echo -e "\e[1m\e[32m>>>\e[0m Uninstalled fluxcast successfully!"
