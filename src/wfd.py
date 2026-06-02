@@ -17,6 +17,10 @@ from portal_capture import PortalCaptureError, PortalCaptureSession, close_porta
 
 
 WFD_RTSP_PORT = 7236
+try:
+    _DEVICE_NAME: str = re.sub(r"[^a-zA-Z0-9\-]", "", socket.gethostname().split(".")[0])[:32] or "FluxCast"
+except OSError:
+    _DEVICE_NAME = "FluxCast"
 
 # WFD CEA resolution bitmask. The current backend intentionally negotiates
 # only the !common! HD modes that Samsung TVs usually accept reliably.
@@ -2355,9 +2359,7 @@ def _wfd_source_ie(rtsp_port: int) -> bytes:
     if rtsp_port <= 0 or rtsp_port > 65535:
         raise WFDNotReady(f"Invalid WFD RTSP port: {rtsp_port}")
     # Build WFD IE with Device Info and Device Name subelements.
-    # I use a static name "FluxCast" to ensure consistency during P2P negotiation.
-    # Some TVs like LG might be sensitive to hostname changes or special characters.
-    return _wfd_ie_device_info(rtsp_port) + _wfd_ie_device_name("FluxCast")
+    return _wfd_ie_device_info(rtsp_port) + _wfd_ie_device_name(_DEVICE_NAME)
 
 
 def _connection_settings(peer: WFDPeer, rtsp_port: int) -> str:
@@ -2418,7 +2420,7 @@ def _connect_peer(
     return active
 
 
-def _set_p2p_device_name(iface: Optional[str], name: str = "FluxCast") -> None:
+def _set_p2p_device_name(iface: Optional[str], name: str = _DEVICE_NAME) -> None:
     wpa_dest = "fi.w1.wpa_supplicant1"
     wpa_root = "/fi/w1/wpa_supplicant1"
     wpa_iface = "fi.w1.wpa_supplicant1.Interface"
