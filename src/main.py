@@ -4,26 +4,50 @@ FluxCast entry point
 Usage:
     python main.py [OPTIONS]
 
+General Options:
     --protocol dlna|cast|wfd wfd = Miracast/Wi-Fi Display (default)
                              dlna = UPnP native screening fallback
                              cast = pychromecast (needs Chromecast built-in)
-    --host HOST              LAN IP to advertise to the TV (default: auto-detect)
-    --port PORT              HTTP server port (default: 8080)
+    --tray                   Launch system tray interface (no terminal needed)
+    --doctor                 Print passive system capability diagnostics and exit
+    --doctor-json            Print diagnostics as JSON and exit
+
+Streaming & Encoding Options:
     --output-res WxH         Scale output (e.g. 1920x1080); default: native
     --fps N                  Frames per second (default: 30)
     --bitrate Xm             Video bitrate (default: 4M)
-    --discover-timeout N     mDNS/UPnP scan timeout (default: 5)
+
+DLNA / Cast Options:
+    --host HOST              LAN IP to advertise in the stream URL (default: auto)
+    --port PORT              HTTP server port (default: 8080)
+    --discover-timeout N     Discovery timeout in seconds (default: 5)
     --transport progressive-ts|hls|live-ts
                              progressive-ts = low-latency Samsung mode (default)
                              hls = stable Samsung HLS fallback
                              live-ts = experimental MPEG-TS mode
-    --doctor                 Print passive Linux/WFD capability diagnostics
-    --wfd-scan               Run an active Wi-Fi Direct peer scan via wpa_cli
-    --wfd-peer PEER          WFD peer selector for --protocol wfd (index, MAC, name)
-    --wfd-dry-run            Print WFD connection D-Bus call without activating it
-    --wfd-test-pattern       Stream a generated test pattern instead of the desktop
-    --wfd-latency-log PATH   Write WFD latency/session events to JSONL log file
-    --tv-ip IP               (For cast protocol only: direct IP connection)
+    --capture-backend auto|wf-recorder|x11grab
+                             Desktop capture backend for dlna/cast (default: auto)
+    --device-name NAME       Pre-select DLNA/Cast device by friendly name
+    --monitor NAME           Pre-select monitor by name, e.g. eDP-1
+    --tv-ip IP               Direct IP connection (cast protocol only)
+
+Wi-Fi Display (Miracast) Options:
+    --wfd-scan               Run active Wi-Fi Direct discovery and exit
+    --wfd-peer PEER          Peer selector: index, MAC, or name
+    --wfd-dry-run            Print D-Bus call without activating connection
+    --wfd-test-pattern       Stream generated test video instead of the desktop
+    --wfd-media-pipeline auto|ffmpeg|gst
+                             RTP media sender (default: auto)
+    --wfd-capture-backend auto|portal|wf-recorder|x11grab
+                             Desktop capture backend for wfd (default: auto)
+    --wfd-latency-log PATH   Write latency/session events to JSONL log file
+    --wfd-no-audio           Stream video only
+    --wfd-audio-device DEV   Pulse/PipeWire monitor source for audio
+    --wfd-rtsp-port PORT     RTSP port advertised in WFD IEs (default: 7236)
+    --wfd-rtp-source-port P  Local RTP source port (default: 19002)
+    --wfd-interface IFACE    Wi-Fi interface to use, e.g. wlan0
+    --wfd-timeout N          Wi-Fi Direct scan timeout in seconds (default: 8)
+    --wfd-monitor NAME       Pre-select monitor by name, e.g. eDP-1
 """
 
 import argparse
@@ -59,36 +83,47 @@ def parse_args() -> argparse.Namespace:
                          choices=["dlna", "cast", "wfd"],
                          help="Connection protocol: wfd (Miracast, default), "
                               "dlna (UPnP fallback), or cast (Chromecast built-in)")
+    general.add_argument("--tray", action="store_true",
+                         help="Launch system tray interface (no terminal needed)")
+    general.add_argument("--doctor", action="store_true",
+                         help="Print passive system capability diagnostics and exit")
+    general.add_argument("--doctor-json", action="store_true", dest="doctor_json",
+                         help="Print diagnostics as JSON and exit")
+
+    # Streaming & Encoding Options
+    stream_opts = parser.add_argument_group("Streaming & Encoding Options")
+    stream_opts.add_argument("--output-res", default=None, dest="output_res",
+                             help="Scale output to WxH, e.g. 1920x1080 (default: native)")
+    stream_opts.add_argument("--fps", type=int, default=30,
+                             help="Frames per second (default: 30)")
+    stream_opts.add_argument("--bitrate", default="4M",
+                             help="Video bitrate (default: 4M)")
+
     # DLNA / Cast Options
     dlna_cast = parser.add_argument_group("DLNA / Cast Options")
-    dlna_cast.add_argument("--tv-ip", default=None, dest="tv_ip",
-                           help="TV IP address (only applicable for --protocol cast)")
     dlna_cast.add_argument("--host", default=None,
                            help="LAN IP to advertise in the stream URL (default: auto)")
     dlna_cast.add_argument("--port", type=int, default=8080,
                            help="HTTP server port (default: 8080)")
-    dlna_cast.add_argument("--output-res", default=None, dest="output_res",
-                           help="Scale output to WxH, e.g. 1920x1080 (default: native)")
-    dlna_cast.add_argument("--fps", type=int, default=30,
-                           help="Frames per second (default: 30)")
-    dlna_cast.add_argument("--bitrate", default="4M",
-                           help="Video bitrate (default: 4M)")
     dlna_cast.add_argument("--discover-timeout", type=int, default=5,
                            dest="discover_timeout",
                            help="Discovery timeout in seconds (default: 5)")
-    dlna_cast.add_argument("--capture-backend", default="auto", dest="capture_backend",
-                           choices=["auto", "wf-recorder", "x11grab"],
-                           help="Desktop capture backend for dlna/cast: auto (default), wf-recorder, or x11grab")
     dlna_cast.add_argument("--transport", default="progressive-ts",
                            choices=["progressive-ts", "hls", "live-ts"],
                            help="DLNA stream transport: progressive-ts for low latency "
                                 "(default), hls as a stable fallback, or live-ts experimental")
+    dlna_cast.add_argument("--capture-backend", default="auto", dest="capture_backend",
+                           choices=["auto", "wf-recorder", "x11grab"],
+                           help="Desktop capture backend for dlna/cast: auto (default), wf-recorder, or x11grab")
+    dlna_cast.add_argument("--tv-ip", default=None, dest="tv_ip",
+                           help="TV IP address (only applicable for --protocol cast)")
+    dlna_cast.add_argument("--device-name", default=None, dest="device_name",
+                           help="Pre-select DLNA/Cast device by friendly name (skips interactive picker)")
+    dlna_cast.add_argument("--monitor", default=None, dest="monitor_name",
+                           help="Pre-select monitor by name for DLNA/Cast capture, e.g. eDP-1 (skips picker)")
+
     # Wi-Fi Display (Miracast) Options
     wfd = parser.add_argument_group("Wi-Fi Display (Miracast) Options")
-    wfd.add_argument("--doctor", action="store_true",
-                     help="Print passive Linux/WFD capability diagnostics and exit")
-    wfd.add_argument("--doctor-json", action="store_true", dest="doctor_json",
-                     help="Print diagnostics as JSON and exit")
     wfd.add_argument("--wfd-scan", action="store_true", dest="wfd_scan",
                      help="Run active Wi-Fi Direct discovery and exit")
     wfd.add_argument("--wfd-peer", default=None, dest="wfd_peer",
@@ -122,12 +157,7 @@ def parse_args() -> argparse.Namespace:
                      help="Wi-Fi Direct scan timeout in seconds (default: 8)")
     wfd.add_argument("--wfd-monitor", default=None, dest="wfd_monitor",
                      help="Monitor name for WFD capture, e.g. eDP-1 (skips interactive picker)")
-    dlna_cast.add_argument("--device-name", default=None, dest="device_name",
-                           help="Pre-select DLNA/Cast device by friendly name (skips interactive picker)")
-    dlna_cast.add_argument("--monitor", default=None, dest="monitor_name",
-                           help="Pre-select monitor by name for DLNA/Cast capture, e.g. eDP-1 (skips picker)")
-    general.add_argument("--tray", action="store_true",
-                         help="Launch system tray interface (no terminal needed)")
+
     return parser.parse_args()
 
 
