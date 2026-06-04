@@ -1,0 +1,85 @@
+version: 1
+
+AppDir:
+  path: ./AppDir
+  app_info:
+    id: fluxcast
+    name: FluxCast
+    icon: fluxcast
+    version: 0.1.0
+    exec: usr/bin/fluxcast-launcher
+    exec_args: "$@"
+
+  apt:
+    arch: amd64
+    sources:
+      - sourceline: 'deb [trusted=yes] http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse'
+      - sourceline: 'deb [trusted=yes] http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse'
+      - sourceline: 'deb [trusted=yes] http://archive.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse'
+    include:
+      # Python runtime
+      - python3
+      - python3-pip
+      - python3-gi
+      - python3-tk
+
+      # GDK Pixbuf
+      - libgdk-pixbuf2.0-bin
+
+      # GObject Introspection typelibs
+      - libgirepository-1.0-1
+      - gir1.2-glib-2.0
+      - gir1.2-gstreamer-1.0
+      - gir1.2-appindicator3-0.1 # pystray appindicator backend
+
+      # GStreamer stack
+      - ffmpeg
+      - gstreamer1.0-tools
+      - gstreamer1.0-plugins-base
+      - gstreamer1.0-plugins-good
+      - gstreamer1.0-plugins-bad
+      - gstreamer1.0-plugins-ugly  # x264enc and other patent-encumbered codecs
+      - gstreamer1.0-libav
+      - gstreamer1.0-pipewire # PipeWire/Portal capture on Wayland
+      - libglib2.0-bin
+      - libnotify-bin
+      - x11-xserver-utils
+
+    exclude:
+      - libasound2
+      - libdbus-1-3
+      - libx11-6
+      - libgl1
+      - libpulse0
+      - wpa-supplicant
+
+  files:
+    exclude:
+      - usr/lib/python3*/dist-packages/tests
+      - usr/share/doc
+      - usr/share/man
+
+  runtime:
+    env:
+      GI_TYPELIB_PATH: '${APPDIR}/usr/lib/x86_64-linux-gnu/girepository-1.0:${APPDIR}/usr/lib/girepository-1.0'
+      GST_PLUGIN_SYSTEM_PATH: '${APPDIR}/usr/lib/x86_64-linux-gnu/gstreamer-1.0:${APPDIR}/usr/lib/gstreamer-1.0'
+      GST_PLUGIN_SCANNER: '${APPDIR}/usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner'
+      # Registry rebuilt at first run with correct LD_LIBRARY_PATH from AppRun
+      GST_REGISTRY: '${HOME}/.cache/fluxcast/gstreamer-registry.bin'
+      PYTHONPATH: '${APPDIR}/usr/lib/python3/dist-packages'
+      PATH: '${APPDIR}/usr/bin:${PATH}'
+
+  after_bundle:
+    - |
+      APPDIR="$(realpath ./AppDir)"
+      "${APPDIR}/usr/bin/python3" -m pip install \
+        --target="${APPDIR}/usr/lib/python3/dist-packages" \
+        -r /project/appimage/requirements-appimage.txt
+      # Remove stale registry built without bundled libs in LD_LIBRARY_PATH.
+      # GStreamer will rebuild it fresh at first run via GST_REGISTRY.
+      rm -f "${APPDIR}/usr/lib/x86_64-linux-gnu/gstreamer-1.0/registry.bin"
+
+AppImage:
+  update-information: 'none'
+  sign-key: 'None'
+  arch: x86_64

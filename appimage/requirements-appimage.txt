@@ -1,0 +1,5 @@
+upnpclient>=1.0.3
+pychromecast>=13.0.0,<14.0.0
+dbus-next>=0.2.3
+Pillow>=10.0.0
+pystray>=0.19.0
