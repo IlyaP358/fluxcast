@@ -67,7 +67,49 @@ AppDir:
         --target="${APPDIR}/usr/lib/python3/dist-packages" \
         -r /project/appimage/requirements-appimage.txt
 
-      for _tool in wf-recorder ffmpeg gst-launch-1.0 gst-inspect-1.0; do
+      # --- Static ffmpeg -------------------------------------------------------
+      _cache="/project/appimage/.build-cache/ffmpeg-static"
+      _dest="${APPDIR}/usr/lib/fluxcast/ffmpeg-static"
+      mkdir -p "${APPDIR}/usr/lib/fluxcast"
+
+      if [ ! -x "${_cache}" ]; then
+        echo "[FluxCast Build] Downloading static ffmpeg (one-time, ~70 MB)..."
+        mkdir -p "/project/appimage/.build-cache"
+        _td="$(mktemp -d)"
+        _url="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+        _ok=0
+        if command -v wget >/dev/null 2>&1; then
+          wget -q --show-progress -O "${_td}/ffmpeg.tar.xz" "${_url}" && _ok=1
+        elif command -v curl >/dev/null 2>&1; then
+          curl -L --progress-bar -o "${_td}/ffmpeg.tar.xz" "${_url}" && _ok=1
+        fi
+        if [ "${_ok}" = "1" ]; then
+          tar -xf "${_td}/ffmpeg.tar.xz" -C "${_td}"
+          _ff="$(find "${_td}" -maxdepth 2 -name "ffmpeg" -type f -executable | head -1)"
+          if [ -n "${_ff}" ]; then
+            mv "${_ff}" "${_cache}"
+            chmod +x "${_cache}"
+            echo "[FluxCast Build] Static ffmpeg cached."
+          else
+            echo "[FluxCast Build] WARNING: ffmpeg binary not found in archive." >&2
+          fi
+        else
+          echo "[FluxCast Build] WARNING: Download failed — system ffmpeg will be required." >&2
+        fi
+        rm -rf "${_td}"
+      fi
+
+      if [ -x "${_cache}" ]; then
+        cp "${_cache}" "${_dest}"
+        echo "[FluxCast Build] Static ffmpeg bundled ($(du -sh "${_dest}" | cut -f1))."
+      fi
+      # -------------------------------------------------------------------------
+
+      # ffmpeg: smart wrapper
+      cp /project/appimage/ffmpeg_wrapper.sh "${APPDIR}/usr/bin/ffmpeg"
+      chmod +x "${APPDIR}/usr/bin/ffmpeg"
+
+      for _tool in wf-recorder gst-launch-1.0 gst-inspect-1.0; do
         cp /project/appimage/sysbin_wrapper.sh "${APPDIR}/usr/bin/${_tool}"
         chmod +x "${APPDIR}/usr/bin/${_tool}"
       done
