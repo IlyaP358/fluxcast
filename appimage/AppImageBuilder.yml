@@ -29,18 +29,8 @@ AppDir:
       # GObject Introspection typelibs
       - libgirepository-1.0-1
       - gir1.2-glib-2.0
-      - gir1.2-gstreamer-1.0
       - gir1.2-appindicator3-0.1 # pystray appindicator backend
 
-      # GStreamer stack
-      - ffmpeg
-      - gstreamer1.0-tools
-      - gstreamer1.0-plugins-base
-      - gstreamer1.0-plugins-good
-      - gstreamer1.0-plugins-bad
-      - gstreamer1.0-plugins-ugly  # x264enc and other patent-encumbered codecs
-      - gstreamer1.0-libav
-      - gstreamer1.0-pipewire # PipeWire/Portal capture on Wayland
       - libglib2.0-bin
       - libnotify-bin
       - x11-xserver-utils
@@ -52,6 +42,9 @@ AppDir:
       - libgl1
       - libpulse0
       - wpa-supplicant
+      - libgstreamer1.0-0
+      - libgstreamer-plugins-base1.0-0
+      - libgstreamer-plugins-bad1.0-0
 
   files:
     exclude:
@@ -61,11 +54,9 @@ AppDir:
 
   runtime:
     env:
-      GI_TYPELIB_PATH: '${APPDIR}/usr/lib/x86_64-linux-gnu/girepository-1.0:${APPDIR}/usr/lib/girepository-1.0'
-      GST_PLUGIN_SYSTEM_PATH: '${APPDIR}/usr/lib/x86_64-linux-gnu/gstreamer-1.0:${APPDIR}/usr/lib/gstreamer-1.0'
-      GST_PLUGIN_SCANNER: '${APPDIR}/usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner'
-      # Registry rebuilt at first run with correct LD_LIBRARY_PATH from AppRun
-      GST_REGISTRY: '${HOME}/.cache/fluxcast/gstreamer-registry.bin'
+      GI_TYPELIB_PATH: '${APPDIR}/usr/lib/x86_64-linux-gnu/girepository-1.0:${APPDIR}/usr/lib/girepository-1.0:/usr/lib/x86_64-linux-gnu/girepository-1.0:/usr/lib/girepository-1.0'
+      TCL_LIBRARY: '${APPDIR}/usr/share/tcltk/tcl8.6'
+      TK_LIBRARY: '${APPDIR}/usr/share/tcltk/tk8.6'
       PYTHONPATH: '${APPDIR}/usr/lib/python3/dist-packages'
       PATH: '${APPDIR}/usr/bin:${PATH}'
 
@@ -75,9 +66,11 @@ AppDir:
       "${APPDIR}/usr/bin/python3" -m pip install \
         --target="${APPDIR}/usr/lib/python3/dist-packages" \
         -r /project/appimage/requirements-appimage.txt
-      # Remove stale registry built without bundled libs in LD_LIBRARY_PATH.
-      # GStreamer will rebuild it fresh at first run via GST_REGISTRY.
-      rm -f "${APPDIR}/usr/lib/x86_64-linux-gnu/gstreamer-1.0/registry.bin"
+
+      for _tool in wf-recorder ffmpeg gst-launch-1.0 gst-inspect-1.0; do
+        cp /project/appimage/sysbin_wrapper.sh "${APPDIR}/usr/bin/${_tool}"
+        chmod +x "${APPDIR}/usr/bin/${_tool}"
+      done
 
 AppImage:
   update-information: 'none'
