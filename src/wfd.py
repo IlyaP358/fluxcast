@@ -1673,6 +1673,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             return
         self.m3_sent = True
         body = (
+            "wfd_content_protection\r\n"
             "wfd_video_formats\r\n"
             "wfd_audio_codecs\r\n"
             "wfd_client_rtp_ports\r\n"
@@ -1689,6 +1690,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             raise WFDNotReady("TV did not provide a valid RTP port in M3.")
         sink_rtcp_port = self.sink_rtcp_port if self.sink_rtcp_port > 0 else 0
         body = (
+            "wfd_content_protection: none\r\n"
             f"wfd_video_formats: {self._video_format()}\r\n"
             f"wfd_audio_codecs: {self._audio_codecs()}\r\n"
             f"wfd_presentation_URL: {self._rtsp_presentation_uri()}/streamid=0 none\r\n"
@@ -2761,7 +2763,7 @@ def _active_rtsp_probe(
 
                     if name == "M1_OPTIONS":
                         _send("M3_GET_PARAMETER", "GET_PARAMETER", local_uri,
-                              body="wfd_video_formats\r\nwfd_audio_codecs\r\nwfd_client_rtp_ports\r\n")
+                              body="wfd_content_protection\r\nwfd_video_formats\r\nwfd_audio_codecs\r\nwfd_client_rtp_ports\r\n")
 
                     elif name == "M3_GET_PARAMETER":
                         params = _parse_parameters(msg.body)
@@ -2780,6 +2782,7 @@ def _active_rtsp_probe(
                         afmt = "none" if st["no_audio"] else WFD_AUDIO_AAC
                         rtcp = st["sink_rtcp_port"] if st["sink_rtcp_port"] > 0 else 0
                         m4 = (
+                            "wfd_content_protection: none\r\n"
                             f"wfd_video_formats: {vfmt}\r\n"
                             f"wfd_audio_codecs: {afmt}\r\n"
                             f"wfd_presentation_URL: {local_uri}/streamid=0 none\r\n"
