@@ -4,18 +4,22 @@
 
 FluxCast streams a Linux desktop to a TV.
 
+[![Release](https://img.shields.io/github/v/release/IlyaP358/fluxcast?style=flat-square)](https://github.com/IlyaP358/fluxcast/releases)
+[![Python](https://img.shields.io/badge/python-3.10+-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey?style=flat-square&logo=linux)](https://www.linux.org/)
+[![Issues](https://img.shields.io/github/issues/IlyaP358/fluxcast?style=flat-square)](https://github.com/IlyaP358/fluxcast/issues)
+[![PRs](https://img.shields.io/github/issues-pr/IlyaP358/fluxcast?style=flat-square)](https://github.com/IlyaP358/fluxcast/pulls)
+
 ## Demo
 
 https://github.com/user-attachments/assets/ce01804c-2f86-4a5d-8ecf-d6f2a72f55d1
 
 ## Project Status
 
-FluxCast is currently in **early $\mathbf{\color{red}!!!BETA!!!}$ testing**. 
-
 Current validated scope:
 
-- `wfd` is the primary path and the only mode tested as "release-ready".
-- `dlna` works as fallback, using `--transport hls`.
+- `wfd` is the primary path and the only mode tested as release-ready.
+- `dlna` works as fallback.
 - `cast` is experimental and currently not working in the tested Samsung setup.
 
 The project currently focuses on **WFD/Miracast on Linux (Hyprland/wlroots class setups)**.  
@@ -23,7 +27,7 @@ DLNA and Cast are available, but they are best treated as fallback or experiment
 
 Current limitation:
 
-- KDE/GNOME Wayland desktop capture now uses `xdg-desktop-portal` in WFD mode.
+- KDE/GNOME Wayland desktop capture uses `xdg-desktop-portal` in WFD mode.
 - For portal mode, install Python dependency `dbus-next` and allow screen-share in the desktop picker dialog.
 
 ## Quick Start
@@ -90,7 +94,30 @@ desktop capture -> HTTP stream -> DLNA/UPnP AVTransport -> native TV player
 
 ## Installation
 
-### FluxCast itself
+### AppImage
+
+Download the latest `FluxCast-x86_64.AppImage` from the [Releases](https://github.com/IlyaP358/fluxcast/releases) page, then:
+
+```bash
+chmod +x FluxCast-x86_64.AppImage
+./FluxCast-x86_64.AppImage
+```
+
+On first launch FluxCast will ask for your password once to install a system file for Wi-Fi Direct.
+
+Depending on your desktop environment, you may need to install:
+- Hyprland / Sway: `wf-recorder`, `ffmpeg`
+- KDE / GNOME: `gst-plugins-ugly` (package name varies by distro)
+
+### Arch Linux - AUR
+
+```bash
+yay -S fluxcast-git
+# or
+paru -S fluxcast-git
+```
+
+### From source
 
 ```bash
 git clone https://github.com/IlyaP358/fluxcast.git
@@ -154,6 +181,16 @@ Detailed flags, modes, and usage examples:
 
 </details>
 
+<details>
+<summary>ThinkPad T14 Gen 4</summary>
+
+- CPU: Intel i7-1355U (12 threads) up to 5.00 GHz
+- GPU: Intel Iris Xe Graphics
+- RAM: 32 GB
+
+</details>
+
+
 ### Software:
 
 <details>
@@ -164,5 +201,15 @@ Detailed flags, modes, and usage examples:
 - DEs (for testing): KDE Plasma (6.6.5) | GNOME (50.1)
 - Shell: zsh (5.9), fish (4.7.1)
 - Terminal: kitty (0.46.2, 0.47.1)
+
+</details>
+
+<details>
+<summary>CachyOS</summary>
+
+- Kernels: 7.0.3-1-cachyos
+- DEs (for testing): KDE Plasma (6.6.4)
+- Shell: bash (5.3.9)
+- Terminal: konsole (26.4.0)
 
 </details>
