@@ -4,10 +4,10 @@
 
 FluxCast streams a Linux desktop to a TV.
 
-[![Release](https://img.shields.io/github/v/release/IlyaP358/fluxcast?style=flat-square)](https://github.com/IlyaP358/fluxcast/releases)
+[![Release](https://img.shields.io/github/v/release/IlyaP358/fluxcast?style=flat-square&color=green)](https://github.com/IlyaP358/fluxcast/releases)
 [![Python](https://img.shields.io/badge/python-3.10+-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux-lightgrey?style=flat-square&logo=linux)](https://www.linux.org/)
-[![Issues](https://img.shields.io/github/issues/IlyaP358/fluxcast?style=flat-square)](https://github.com/IlyaP358/fluxcast/issues)
+[![Issues](https://img.shields.io/github/issues/IlyaP358/fluxcast?style=flat-square&color=red)](https://github.com/IlyaP358/fluxcast/issues)
 [![PRs](https://img.shields.io/github/issues-pr/IlyaP358/fluxcast?style=flat-square)](https://github.com/IlyaP358/fluxcast/pulls)
 
 ## Demo
