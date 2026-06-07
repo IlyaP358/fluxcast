@@ -34,8 +34,11 @@ _sys_path="${_sys_path//${_appbin}/}"
 _real="$(PATH="${_sys_path}" command -v "ffmpeg" 2>/dev/null)"
 
 if [ -z "${_real}" ]; then
-    printf '[FluxCast] ffmpeg: not found on this system.\n' >&2
-    printf '[FluxCast] Install it with: sudo pacman -S ffmpeg\n' >&2
+    printf '[FluxCast] ffmpeg not found. Install it:\n' >&2
+    printf '  Arch:     sudo pacman -S ffmpeg\n' >&2
+    printf '  Ubuntu:   sudo apt install ffmpeg\n' >&2
+    printf '  Fedora:   sudo dnf install ffmpeg   (requires RPM Fusion)\n' >&2
+    printf '  openSUSE: sudo zypper install ffmpeg\n' >&2
     exit 127
 fi
 

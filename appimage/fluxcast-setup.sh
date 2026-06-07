@@ -21,6 +21,9 @@ _ok=0
 
 # GUI elevation (tray / desktop launcher context)
 if [ -n "${DISPLAY}${WAYLAND_DISPLAY}" ] && command -v pkexec >/dev/null 2>&1; then
+    notify-send "FluxCast — First-time setup" \
+        "FluxCast needs to install a system file to enable Wi-Fi Direct device naming on your TV.\n\nYou will be asked for your password once." \
+        --icon=dialog-information --urgency=normal 2>/dev/null || true
     if pkexec /bin/sh -c "install -Dm644 '${TMP_CONF}' '${DBUS_CONF_DEST}' && systemctl reload dbus" 2>/dev/null; then
         _ok=1
     fi
