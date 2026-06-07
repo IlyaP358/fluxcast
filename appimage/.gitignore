@@ -1,6 +1,5 @@
 AppDir
 appimage-build
-build_appimage.sh
 FluxCast-0.1.0-x86_64.AppImage
 FluxCast-0.1.0-x86_64.AppImage.zsync
 .build-cache/
