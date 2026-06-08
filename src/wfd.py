@@ -1755,6 +1755,16 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                     "[FluxCast WFD RTSP] TV did not advertise AAC; "
                     "falling back to video-only WFD."
                 )
+            if (
+                not self.negotiated_no_audio
+                and not self.media_config.no_audio
+                and "microsoft" in self.media_config.peer_name.lower()
+            ):
+                self.negotiated_no_audio = True
+                print(
+                    "[FluxCast WFD RTSP] Microsoft adapter detected — "
+                    "using video-only mode (LPCM audio not yet implemented)."
+                )
             mode = self._cea_mode()
             print(
                 f"[FluxCast WFD RTSP] TV RTP port: {self.sink_rtp_port}; "
@@ -1851,7 +1861,11 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             # on the portal dialog (8-13 s). LG WebOS resets the TCP connection
             # ~40-45 s after PLAY. Starting the 20 seconds timer here gives a safe
             # 20 second head start regardless of portal dialog speed.
-            self._schedule_rtsp_keepalive(20.0)
+            # Microsoft adapter sends TEARDOWN in response to M16 GET_PARAMETER.
+            if "microsoft" not in self.media_config.peer_name.lower():
+                self._schedule_rtsp_keepalive(20.0)
+            else:
+                print("[FluxCast WFD RTSP] Microsoft adapter detected — M16 keepalive disabled.")
             self._start_media()
             return
 
@@ -2774,6 +2788,16 @@ def _active_rtsp_probe(
                         audio = params.get("wfd_audio_codecs", "")
                         if audio and not media_config.no_audio and "AAC" not in audio.upper():
                             st["no_audio"] = True
+                        if (
+                            not st["no_audio"]
+                            and not media_config.no_audio
+                            and "microsoft" in media_config.peer_name.lower()
+                        ):
+                            st["no_audio"] = True
+                            print(
+                                "[FluxCast WFD RTSP] Microsoft adapter detected — "
+                                "using video-only mode (LPCM audio not yet implemented)."
+                            )
                         st["src_port"] = _safe_source_port(
                             media_config.source_port, st["sink_rtp_port"], st["sink_rtcp_port"])
                         vfmt = _selected_video_format(media_config, st["sink_vfmt"])
