@@ -1763,8 +1763,6 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             print(f"[FluxCast WFD RTSP] Negotiated media mode: {mode.name}")
             print(f"[FluxCast WFD RTSP] Selected video format: {self._video_format()}")
             self._send_m4_set_parameters()
-        elif name == "M1_OPTIONS":
-            self._send_m3_get_parameters()
         elif name == "M4_SET_PARAMETER":
             self._send_m5_trigger_setup()
 
