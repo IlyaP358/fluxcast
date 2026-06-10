@@ -1,0 +1,3 @@
+__pycache__
+test_lpcm_mux_loopback.py
+test_pcr_jitter.py

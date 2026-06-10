@@ -696,6 +696,7 @@ class WFDMediaPipeline:
         self.portal_session: Optional[PortalCaptureSession] = None
         self._portal_gst_cmd: Optional[list[str]] = None
         self._portal_pw_fd: Optional[int] = None
+        self._lpcm_muxer = None   # WFDLPCMMuxer instance for Microsoft adapter
 
     def start(self) -> None:
         if self.processes:
@@ -742,6 +743,9 @@ class WFDMediaPipeline:
                 proc.kill()
                 proc.wait(timeout=1)
         self.processes.clear()
+        if self._lpcm_muxer is not None:
+            self._lpcm_muxer.stop()
+            self._lpcm_muxer = None
         close_portal_capture(self.portal_session)
         self.portal_session = None
 
@@ -1206,6 +1210,75 @@ class WFDMediaPipeline:
             f"[FluxCast WFD Media] RTP target           : "
             f"{self.tv_ip}:{self.sink_rtp_port} from local port {self.config.source_port}"
         )
+        # ====== Microsoft Wireless Display Adapter: LPCM muxer ====================
+        # Microsoft adapter requires MPEG-TS stream_type=0x83 (WFD LPCM) with a
+        # 4-byte WIDI PES header. GStreamer mpegtsmux hardcodes 0x8b (Blu-ray LPCM)
+        # and cannot be changed at runtime, so we use a pure-Python MPEG-TS muxer.
+        if "microsoft" in self.config.peer_name.lower() and not self.config.no_audio:
+            print("[FluxCast WFD Media] Microsoft adapter detected — using LPCM MPEG-TS muxer")
+            try:
+                from drivers.wfd_lpcm_mux import WFDLPCMMuxer
+            except ImportError as _ie:
+                print(f"[FluxCast WFD Media] WFDLPCMMuxer import failed ({_ie}); "
+                      "falling back to standard gst-launch pipeline (no LPCM audio)")
+            else:
+                for selector_name, selector_args in selector_attempts:
+                    for attempt_name, attempt_caps in caps_attempts:
+                        print(
+                            f"[FluxCast WFD Media] LPCM muxer attempt   : "
+                            f"selector={selector_name}, caps={attempt_name}"
+                        )
+
+                        vid_chain = _gst_video_chain(attempt_caps, selector_args)
+                        vid_chain[-1] = "appsink name=sink sync=false"
+                        vid_pipeline = " ".join(vid_chain)
+
+                        aud_pipeline = (
+                            f"pulsesrc device={audio_monitor} do-timestamp=true ! "
+                            "audioconvert ! audioresample ! "
+                            "audio/x-raw,format=S16BE,rate=48000,channels=2,"
+                            "layout=interleaved ! appsink name=sink sync=false"
+                        )
+
+                        muxer = WFDLPCMMuxer(self.tv_ip, self.sink_rtp_port)
+                        try:
+                            muxer.start(vid_pipeline, aud_pipeline)
+                        except Exception as exc:
+                            print(
+                                f"[FluxCast WFD Media] LPCM muxer attempt failed ({exc}); "
+                                "trying next combination..."
+                            )
+                            continue
+                        # Brief probe: give GStreamer a moment then check mux thread alive
+                        time.sleep(2.5)
+                        if not muxer._mux_thread or not muxer._mux_thread.is_alive():
+                            print(
+                                "[FluxCast WFD Media] LPCM muxer thread died; "
+                                "trying next combination..."
+                            )
+                            muxer.stop()
+                            continue
+
+                        time.sleep(3.0)
+                        if not muxer._mux_thread.is_alive():
+                            print(
+                                "[FluxCast WFD Media] LPCM muxer died during TX probe; "
+                                "trying next combination..."
+                            )
+                            muxer.stop()
+                            continue
+
+                        self._lpcm_muxer = muxer
+                        self._portal_pw_fd = session.pw_fd
+                        print("[FluxCast WFD Media] LPCM muxer running with MPEG-TS stream_type=0x83")
+                        return
+
+                close_portal_capture(self.portal_session)
+                self.portal_session = None
+                raise WFDNotReady(
+                    "portal LPCM muxer pipeline failed to start for Microsoft adapter."
+                )
+
         gst_proc = None
         probe_alive_seconds = 3.0
         for selector_name, selector_args in selector_attempts:
