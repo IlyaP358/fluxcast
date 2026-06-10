@@ -33,6 +33,7 @@ WFD_LEVEL_32 = 0x02
 WFD_LEVEL_40 = 0x04
 WFD_LEVEL_42 = 0x10
 WFD_AUDIO_AAC = "AAC 00000001 00"
+WFD_AUDIO_LPCM_48K  = "LPCM 00000002 00"
 NM_DEST = "org.freedesktop.NetworkManager"
 NM_PATH = "/org/freedesktop/NetworkManager"
 
@@ -1666,6 +1667,8 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
     def _audio_codecs(self) -> str:
         if self.media_config.no_audio or self.negotiated_no_audio:
             return "none"
+        if "microsoft" in self.media_config.peer_name.lower():
+            return WFD_AUDIO_LPCM_48K
         return WFD_AUDIO_AAC
 
     def _send_bytes(self, text: str) -> None:
@@ -1818,16 +1821,20 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 params.get("wfd_video_formats", "")
             )
             audio = params.get("wfd_audio_codecs", "")
+            _is_microsoft = "microsoft" in self.media_config.peer_name.lower()
             if (
                 audio
                 and not self.media_config.no_audio
                 and "AAC" not in audio.upper()
+                and not _is_microsoft
             ):
                 self.negotiated_no_audio = True
                 print(
                     "[FluxCast WFD RTSP] TV did not advertise AAC; "
                     "falling back to video-only WFD."
                 )
+            if _is_microsoft and audio:
+                print(f"[FluxCast WFD RTSP] Microsoft adapter audio caps: {audio}")
             mode = self._cea_mode()
             print(
                 f"[FluxCast WFD RTSP] TV RTP port: {self.sink_rtp_port}; "
@@ -2849,12 +2856,23 @@ def _active_rtsp_probe(
                         st["sink_rtp_port"], st["sink_rtcp_port"] = ports
                         st["sink_vfmt"] = _parse_sink_video_format(params.get("wfd_video_formats", ""))
                         audio = params.get("wfd_audio_codecs", "")
-                        if audio and not media_config.no_audio and "AAC" not in audio.upper():
+                        _probe_microsoft = "microsoft" in media_config.peer_name.lower()
+                        if (
+                            audio
+                            and not media_config.no_audio
+                            and "AAC" not in audio.upper()
+                            and not _probe_microsoft
+                        ):
                             st["no_audio"] = True
                         st["src_port"] = _safe_source_port(
                             media_config.source_port, st["sink_rtp_port"], st["sink_rtcp_port"])
                         vfmt = _selected_video_format(media_config, st["sink_vfmt"])
-                        afmt = "none" if st["no_audio"] else WFD_AUDIO_AAC
+                        if st["no_audio"]:
+                            afmt = "none"
+                        elif _probe_microsoft:
+                            afmt = WFD_AUDIO_LPCM_48K
+                        else:
+                            afmt = WFD_AUDIO_AAC
                         rtcp = st["sink_rtcp_port"] if st["sink_rtcp_port"] > 0 else 0
                         m4 = (
                             "wfd_content_protection: none\r\n"

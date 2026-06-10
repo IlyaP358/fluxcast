@@ -396,8 +396,8 @@ class WFDLPCMMuxer:
             buf = sample.get_buffer()
             ok, mapinfo = buf.map(Gst.MapFlags.READ)
             if ok:
-                pts_ns = buf.pts if buf.pts != Gst.CLOCK_TIME_NONE else 0
-                self._audio_q.put((bytes(mapinfo.data), pts_ns), block=False)
+                arrival = time.monotonic()
+                self._audio_q.put((bytes(mapinfo.data), arrival), block=False)
                 buf.unmap(mapinfo)
             return Gst.FlowReturn.OK
 
@@ -425,9 +425,9 @@ class WFDLPCMMuxer:
 
         pat_pmt_interval = 30   # PAT+PMT every 30 video frames (~1 s at 30 fps)
         frame_counter    = 0
-        wall_start       = time.monotonic()   # epoch for PCR (wall clock)
-        pts_offset_90k: Optional[int] = None  # normalise GStreamer PTS to same epoch
-        prev_send_time   = wall_start         # for PCR jitter measurement
+        wall_start:      Optional[float] = None
+        pts_offset_90k:  Optional[int]   = None
+        prev_send_time:  float           = time.monotonic()
 
         try:
             while self._running:
@@ -441,9 +441,13 @@ class WFDLPCMMuxer:
                 except queue.Empty:
                     continue
 
-                #PCR: wall clock computed RIGHT NOW (before building packets)
-                now      = time.monotonic()
-                pcr_90k  = int((now - wall_start) * RTP_CLOCK_HZ) & 0x1FFFFFFFF
+                # PCR: wall clock computed RIGHT NOW, epoch = first frame arrival
+                now = time.monotonic()
+                if wall_start is None:
+                    wall_start     = now
+                    pts_offset_90k = self._ns_to_90k(vid_pts_ns)
+                    prev_send_time = now
+                pcr_90k = int((now - wall_start) * RTP_CLOCK_HZ) & 0x1FFFFFFFF
 
                 # PCR jitter: deviation from expected inter-frame interval
                 frame_interval_ms = 1000.0 / 30.0   # assume 30 fps
@@ -483,12 +487,16 @@ class WFDLPCMMuxer:
                 # Drain pending audio
                 while not self._audio_q.empty():
                     try:
-                        aud_data, aud_pts_ns = self._audio_q.get_nowait()
+                        aud_data, aud_arrival = self._audio_q.get_nowait()
                     except queue.Empty:
                         break
 
-                    gst_aud_90k = self._ns_to_90k(aud_pts_ns)
-                    aud_pts_90k = (gst_aud_90k - (pts_offset_90k or 0)) & 0x1FFFFFFFF
+                    if aud_arrival < wall_start:
+                        # Frame captured before the first video frame — discard
+                        self.audio_frames_sent += 1
+                        continue
+                    aud_elapsed_90k = int((aud_arrival - wall_start) * RTP_CLOCK_HZ)
+                    aud_pts_90k = (aud_elapsed_90k + 9000) & 0x1FFFFFFFF
                     aud_payload = WIDI_LPCM_HEADER + aud_data
 
                     ts_out += _packetize_pes(
