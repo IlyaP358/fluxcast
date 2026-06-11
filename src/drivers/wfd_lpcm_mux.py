@@ -577,12 +577,12 @@ def make_video_pipeline(node_id: int, width: int, height: int,
 
 def make_audio_pipeline(node_id: int) -> str:
     """
-    Build a GStreamer pipeline string for S16BE 48kHz stereo capture via PipeWire.
+    Build a GStreamer pipeline string for S16LE 48kHz stereo capture via PipeWire.
     """
     return (
         f"pipewiresrc target-object={node_id} ! "
         f"audioconvert ! "
         f"audioresample ! "
-        f"audio/x-raw,format=S16BE,rate=48000,channels=2,layout=interleaved ! "
+        f"audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved ! "
         f"appsink name=sink"
     )

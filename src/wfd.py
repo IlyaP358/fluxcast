@@ -1237,7 +1237,7 @@ class WFDMediaPipeline:
                         aud_pipeline = (
                             f"pulsesrc device={audio_monitor} do-timestamp=true ! "
                             "audioconvert ! audioresample ! "
-                            "audio/x-raw,format=S16BE,rate=48000,channels=2,"
+                            "audio/x-raw,format=S16LE,rate=48000,channels=2,"
                             "layout=interleaved ! appsink name=sink sync=false"
                         )
 
