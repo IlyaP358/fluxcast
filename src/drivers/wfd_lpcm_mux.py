@@ -36,9 +36,11 @@ STREAM_TYPE_LPCM = 0x83   # WFD / WIDI LPCM (NOT 0x8b which is Blu-ray)
 
 PMT_PROG_NUM = 0x0001
 
-# 4-byte WIDI LPCM PES header that precedes raw PCM samples
-# Documented in WFD/WIDI specification; Microsoft adapter REQUIRES it.
-WIDI_LPCM_HEADER = bytes([0xA0, 0x06, 0x00, 0x09])
+# WIDI LPCM sub-stream header (4 bytes) + DVD-PCM audio frame header (3 bytes).
+# first_access_unit_pointer == 7: 4 bytes sub-stream header + 3 bytes frame header.
+# Audio frame header: 16-bit quantization, 48 kHz, stereo (2ch), DRC off.
+WIDI_LPCM_HEADER  = bytes([0xA0, 0x06, 0x00, 0x07])
+LPCM_FRAME_HEADER = bytes([0x00, 0x01, 0x80])
 
 # RTP
 RTP_PT_MP2T  = 33 # RFC 2250 — MPEG-TS over RTP
@@ -198,15 +200,16 @@ def _pes_header(stream_id: int, pts_90k: int,
 
     def _encode_ts(ts: int) -> bytes:
         ts &= 0x1FFFFFFFF
-        b  = ((ts >> 30) & 0x07) << 1
+        b  = ((ts >> 30) & 0x07) << 1 | 0x01
         b1 = (ts >> 22) & 0xFF
-        b2 = ((ts >> 15) & 0x7F) << 1
+        b2 = ((ts >> 15) & 0x7F) << 1 | 0x01
         b3 = (ts >>  7) & 0xFF
-        b4 = (ts & 0x7F) << 1
+        b4 = (ts & 0x7F) << 1 | 0x01
         return bytes([b, b1, b2, b3, b4])
 
     pts_bytes = _encode_ts(pts_90k)
-    pts_flag  = 0xC0 if has_dts else 0x80    # '10' or '11'
+    # Marker nibble: 0x20 = '0010' for PTS-only, 0x30 = '0011' for PTS+DTS.
+    pts_flag  = 0x30 if has_dts else 0x20
     pts_bytes = bytes([pts_flag | pts_bytes[0]]) + pts_bytes[1:]
 
     optional = pts_bytes
@@ -497,7 +500,7 @@ class WFDLPCMMuxer:
                         continue
                     aud_elapsed_90k = int((aud_arrival - wall_start) * RTP_CLOCK_HZ)
                     aud_pts_90k = (aud_elapsed_90k + 9000) & 0x1FFFFFFFF
-                    aud_payload = WIDI_LPCM_HEADER + aud_data
+                    aud_payload = WIDI_LPCM_HEADER + LPCM_FRAME_HEADER + aud_data
 
                     ts_out += _packetize_pes(
                         PID_AUD, PES_SID_AUDIO, aud_pts_90k,
@@ -577,12 +580,12 @@ def make_video_pipeline(node_id: int, width: int, height: int,
 
 def make_audio_pipeline(node_id: int) -> str:
     """
-    Build a GStreamer pipeline string for S16LE 48kHz stereo capture via PipeWire.
+    Build a GStreamer pipeline string for S16BE 48kHz stereo capture via PipeWire.
     """
     return (
         f"pipewiresrc target-object={node_id} ! "
         f"audioconvert ! "
         f"audioresample ! "
-        f"audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved ! "
+        f"audio/x-raw,format=S16BE,rate=48000,channels=2,layout=interleaved ! "
         f"appsink name=sink"
     )
