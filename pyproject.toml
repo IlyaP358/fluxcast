@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fluxcast"
+version = "0.1.0"
+description = "Stream your Linux desktop to a Smart TV via Miracast/WFD, DLNA, or Chromecast"
+readme = "README.md"
+license = {text = "GPL-3.0-or-later"}
+authors = [
+    {name = "IlyaP358"},
+]
+requires-python = ">=3.10"
+dependencies = [
+    "upnpclient>=1.0.3",
+    "pychromecast>=14.0.5",
+    "dbus-next>=0.2.3",
+    "Pillow>=10.0.0",
+    "pystray>=0.19.0",
+    "pygobject>=3.42.0",
+]
+keywords = [
+    "miracast", "wfd", "dlna", "chromecast",
+    "streaming", "tv", "linux", "wireless-display", "screen-cast",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video :: Display",
+    "Topic :: System :: Networking",
+]
+
+[project.urls]
+Homepage = "https://fluxcast.secweb.cloud"
+Repository = "https://github.com/IlyaP358/fluxcast"
+Issues = "https://github.com/IlyaP358/fluxcast/issues"
+
+[project.scripts]
+fluxcast = "main:main"
+fluxcast-install-system = "pypi_sysinstall:main"
+
+[tool.hatch.build.targets.wheel]
+sources = {"src" = ""}
+include = [
+    "src/*.py",
+    "src/drivers/",
+    "src/assets/*.png",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+"meta/pypi/pypi_sysinstall.py"             = "pypi_sysinstall.py"
+"meta/fluxcast.desktop"                    = "_fluxcast_data/fluxcast.desktop"
+"meta/zz-dev.fluxcast.wpa-supplicant.conf" = "_fluxcast_data/zz-dev.fluxcast.wpa-supplicant.conf"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/",
+    "meta/",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]

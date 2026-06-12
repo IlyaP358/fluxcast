@@ -9,3 +9,5 @@ debug_issue#11.md
 debug_issue#12.md
 tray_test.py
 tray_test_2.py
+build/
+*.egg-info/
