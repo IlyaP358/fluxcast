@@ -32,6 +32,7 @@ _DEPS: dict[str, list[str]] = {
     "arch": [
         "pacman", "-S", "--noconfirm", "--needed",
         "networkmanager", "wpa_supplicant",
+        "iw", "wf-recorder", "xorg-xrandr",
         "gstreamer", "gst-plugins-base", "gst-plugins-good",
         "gst-plugins-bad", "gst-plugins-ugly",
         "python-gobject", "python-cairo",
@@ -41,7 +42,8 @@ _DEPS: dict[str, list[str]] = {
     "debian": [
         "apt-get", "install", "-y",
         "network-manager", "wpasupplicant",
-        "gstreamer1.0-tools",
+        "iw", "wf-recorder", "pulseaudio-utils", "x11-xserver-utils",
+        "gstreamer1.0-tools", "gstreamer1.0-pipewire",
         "gstreamer1.0-plugins-base", "gstreamer1.0-plugins-good",
         "gstreamer1.0-plugins-bad", "gstreamer1.0-plugins-ugly",
         "gstreamer1.0-libav",
@@ -52,6 +54,7 @@ _DEPS: dict[str, list[str]] = {
     "fedora": [
         "dnf", "install", "-y",
         "NetworkManager", "wpa_supplicant",
+        "iw", "wf-recorder", "pulseaudio-utils", "xorg-x11-server-utils",
         "gstreamer1", "gstreamer1-plugins-base", "gstreamer1-plugins-good",
         "gstreamer1-plugins-bad-free",
         "python3-gobject", "python3-cairo",
@@ -89,6 +92,30 @@ def _ask(prompt: str) -> bool:
         return False
 
 
+_DEPS_HUMAN = [
+    ("Networking (Wi-Fi Direct / Miracast)",
+     "NetworkManager, wpa_supplicant, iw"),
+    ("Screen capture",
+     "wf-recorder (wlroots/Hyprland), xrandr (X11 fallback)"),
+    ("Audio",
+     "PipeWire, WirePlumber, pactl (PulseAudio/PipeWire-Pulse)"),
+    ("GStreamer pipeline",
+     "gstreamer core + plugins (base/good/bad/ugly), PipeWire source, tools"),
+    ("Video/audio encoding",
+     "ffmpeg (H.264, AAC)"),
+    ("Python / GTK bindings",
+     "PyGObject, python-cairo, GTK3 introspection data"),
+]
+
+_PORTAL_NOTE = """\
+  NOTE (KDE Plasma / GNOME Wayland portal capture):
+    xdg-desktop-portal backend is usually pre-installed with your desktop
+    environment. If portal screen capture does not work, install manually:
+      Arch:   sudo pacman -S xdg-desktop-portal-kde      # or -gnome
+      Debian: sudo apt install xdg-desktop-portal-kde    # or -gnome
+      Fedora: sudo dnf install xdg-desktop-portal-kde    # or -gnome"""
+
+
 def _install_deps() -> None:
     family = _detect_distro()
     print(f"  Detected distro family: {family}")
@@ -100,13 +127,23 @@ def _install_deps() -> None:
         return
 
     if family == "fedora":
+        print()
         print("  NOTE: ffmpeg, gstreamer1-libav and gstreamer1-plugins-ugly require RPM Fusion.")
         print("  To enable RPM Fusion, run first:")
         print("    sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm")
         print("  Then re-run: sudo fluxcast-install-system")
         print("  Installing available packages now (RPM Fusion packages will be skipped)...")
 
-    cmd = _DEPS[family]
+    print()
+    cmd = list(_DEPS[family])
+    if family == "arch":
+        _arch_skip = {"pipewire", "wireplumber"}
+        cmd = [
+            p for p in cmd
+            if p not in _arch_skip
+            or subprocess.run(["pacman", "-Q", p], capture_output=True).returncode != 0
+        ]
+
     if not shutil.which(cmd[0]):
         print(f"  ERROR: package manager '{cmd[0]}' not found in PATH.")
         return
@@ -115,6 +152,8 @@ def _install_deps() -> None:
     try:
         subprocess.run(cmd, check=True)
         print("  System dependencies installed successfully.")
+        print()
+        print(_PORTAL_NOTE)
     except subprocess.CalledProcessError as e:
         print(f"  ERROR: installation failed (exit code {e.returncode}).")
 
@@ -151,7 +190,12 @@ def main() -> None:
     _post_install()
 
     print()
-    if _ask("Install system dependencies (GStreamer, ffmpeg, NetworkManager, etc.)?"):
+    print("The following system packages will be installed if you proceed:")
+    for category, packages in _DEPS_HUMAN:
+        print(f"  • {category}")
+        print(f"      {packages}")
+    print()
+    if _ask("Install system dependencies?"):
         _install_deps()
 
 
