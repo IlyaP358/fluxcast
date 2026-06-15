@@ -109,6 +109,15 @@ Depending on your desktop environment, you may need to install:
 - Hyprland / Sway: `wf-recorder`, `ffmpeg`
 - KDE / GNOME: `gst-plugins-ugly` (package name varies by distro)
 
+### PyPI
+
+```bash
+pip install fluxcast
+sudo fluxcast-install-system
+```
+
+`fluxcast-install-system` installs the D-Bus policy, desktop entry, and system packages (GStreamer, ffmpeg, NetworkManager, etc.). Run it once after the pip install.
+
 ### Arch Linux - AUR
 
 ```bash
