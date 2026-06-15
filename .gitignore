@@ -11,3 +11,4 @@ tray_test.py
 tray_test_2.py
 build/
 *.egg-info/
+dist/
