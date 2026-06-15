@@ -15,7 +15,7 @@ from typing import Optional
 from diagnostics import print_report, run_diagnostics
 from portal_capture import PortalCaptureError, PortalCaptureSession, close_portal_capture, start_portal_capture
 
-
+ 
 WFD_RTSP_PORT = 7236
 try:
     _DEVICE_NAME: str = re.sub(r"[^a-zA-Z0-9\-]", "", socket.gethostname().split(".")[0])[:32] or "FluxCast"
