@@ -2739,11 +2739,35 @@ def _get_peer_ip_from_arp(peer_mac: str) -> Optional[str]:
     return None
 
 
+def _get_peer_ip_from_p2p_iface() -> Optional[str]:
+    """Fallback: find TV IP from ARP on any active P2P group interface.
+
+    Some TVs (LG webOS in issue #44) randomize their MAC between the P2P discovery phase and
+    the actual group connection, so. the scanned MAC never matches the ARP entry.
+    Scanning the p2p-* group interface directly avoids the MAC comparison entirely.
+    """
+    try:
+        result = _run(["ip", "neigh", "show"], timeout=3.0)
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
+            # Format: IP dev IFACE lladdr MAC STATE
+            parts = line.split()
+            if len(parts) >= 3 and parts[1] == "dev":
+                iface = parts[2]
+                if iface.startswith("p2p-") and not iface.startswith("p2p-dev-"):
+                    if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", parts[0]):
+                        return parts[0]
+    except Exception:
+        pass
+    return None
+
+
 def _wait_for_peer_ip(peer_mac: str, timeout: float = 12.0) -> Optional[str]:
     """Poll ARP until the peer's IP appears (DHCP may take a few seconds)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        ip = _get_peer_ip_from_arp(peer_mac)
+        ip = _get_peer_ip_from_arp(peer_mac) or _get_peer_ip_from_p2p_iface()
         if ip:
             return ip
         time.sleep(0.75)
@@ -2755,8 +2779,9 @@ def _active_rtsp_probe(
     peer: WFDPeer,
     media_config: WFDMediaConfig,
 ) -> None:
-    # 7 s: P2P group up + DHCP (~3 s) + TV RTSP-initiation attempt (~3-4 s).
-    time.sleep(7.0)
+    # 4s: give passive-RTSP TVs a window to connect first, without burning too
+    # much of the cca 15 s timeout that some TVs enforce after P2P activation.
+    time.sleep(4.0)
     if rtsp_server.has_connected_client:
         return
 
@@ -2770,6 +2795,9 @@ def _active_rtsp_probe(
         )
         return
 
+    if rtsp_server.has_connected_client:
+        return
+    
     tv_port = peer.rtsp_port if 0 < peer.rtsp_port <= 65535 else 7236
     print(f"[FluxCast WFD RTSP] Active probe: TV={tv_ip}; connecting to RTSP port {tv_port}...")
 
