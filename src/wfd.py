@@ -24,14 +24,22 @@ except OSError:
 
 # WFD CEA resolution bitmask. The current backend intentionally negotiates
 # only the !common! HD modes that Samsung TVs usually accept reliably.
-WFD_CEA_720P30 = 0x00000020   # bit 5: 1280x720p30, mandatory HD mode
-WFD_CEA_720P60 = 0x00000040   # bit 6: 1280x720p60
+WFD_CEA_640P60  = 0x00000001  # bit 0: 640x480p60
+WFD_CEA_720P30  = 0x00000020  # bit 5: 1280x720p30, mandatory HD mode
+WFD_CEA_720P60  = 0x00000040  # bit 6: 1280x720p60
 WFD_CEA_1080P30 = 0x00000080  # bit 7: 1920x1080p30
 WFD_CEA_1080P60 = 0x00000100  # bit 8: 1920x1080p60
+
+# VESA resolution bitmasks (Table 5-11 / AOSP VideoFormats.cpp)
+WFD_VESA_1200P30 = 0x10000000  # bit 28: 1920x1200p30
+WFD_VESA_1200P60 = 0x20000000  # bit 29: 1920x1200p60
+
 WFD_LEVEL_31 = 0x01
 WFD_LEVEL_32 = 0x02
 WFD_LEVEL_40 = 0x04
 WFD_LEVEL_42 = 0x10
+WFD_LEVEL_50 = 0x20
+WFD_LEVEL_51 = 0x40
 WFD_AUDIO_AAC = "AAC 00000001 00"
 NM_DEST = "org.freedesktop.NetworkManager"
 NM_PATH = "/org/freedesktop/NetworkManager"
@@ -171,6 +179,7 @@ class WFDCEAMode:
     width: int
     height: int
     fps: int
+    table: str = "cea"  # "cea" or "vesa"
 
     @property
     def resolution(self) -> str:
@@ -178,10 +187,16 @@ class WFDCEAMode:
 
 
 WFD_CEA_MODES: dict[int, WFDCEAMode] = {
-    WFD_CEA_720P30: WFDCEAMode("1280x720p30", WFD_CEA_720P30, "28", 1280, 720, 30),
-    WFD_CEA_720P60: WFDCEAMode("1280x720p60", WFD_CEA_720P60, "30", 1280, 720, 60),
-    WFD_CEA_1080P30: WFDCEAMode("1920x1080p30", WFD_CEA_1080P30, "38", 1920, 1080, 30),
-    WFD_CEA_1080P60: WFDCEAMode("1920x1080p60", WFD_CEA_1080P60, "40", 1920, 1080, 60),
+    WFD_CEA_640P60:  WFDCEAMode("640x480p60",    WFD_CEA_640P60,  "08", 640,  480, 60),
+    WFD_CEA_720P30:  WFDCEAMode("1280x720p30",   WFD_CEA_720P30,  "28", 1280, 720, 30),
+    WFD_CEA_720P60:  WFDCEAMode("1280x720p60",   WFD_CEA_720P60,  "30", 1280, 720, 60),
+    WFD_CEA_1080P30: WFDCEAMode("1920x1080p30",  WFD_CEA_1080P30, "38", 1920, 1080, 30),
+    WFD_CEA_1080P60: WFDCEAMode("1920x1080p60",  WFD_CEA_1080P60, "40", 1920, 1080, 60),
+}
+
+WFD_VESA_MODES: dict[int, WFDCEAMode] = {
+    WFD_VESA_1200P30: WFDCEAMode("1920x1200p30", WFD_VESA_1200P30, "00", 1920, 1200, 30, table="vesa"),
+    WFD_VESA_1200P60: WFDCEAMode("1920x1200p60", WFD_VESA_1200P60, "00", 1920, 1200, 60, table="vesa"),
 }
 
 
@@ -531,25 +546,47 @@ def _desired_resolution(config: WFDMediaConfig) -> Optional[tuple[int, int]]:
     return None
 
 
+_mode_force_warned = False
+
+
 def _choose_cea_mode(
     config: WFDMediaConfig,
     sink_format: Optional[WFDVideoFormat],
 ) -> WFDCEAMode:
-    supported = sink_format.cea_mask if sink_format else (
+    cea_supported = sink_format.cea_mask if sink_format else (
         WFD_CEA_720P30 | WFD_CEA_720P60 | WFD_CEA_1080P30 | WFD_CEA_1080P60
     )
+    vesa_supported = sink_format.vesa_mask if sink_format else 0
     max_level = _max_wfd_level(sink_format.level) if sink_format else WFD_LEVEL_42
     resolution = _desired_resolution(config)
     wants_720 = resolution is None or (resolution[0] <= 1280 and resolution[1] <= 720)
+    wants_1200 = resolution is not None and resolution[0] >= 1920 and resolution[1] > 1080
     wants_60 = config.fps > 30
 
+    all_modes = {**WFD_CEA_MODES, **WFD_VESA_MODES}
+
     def supports(bit: int) -> bool:
-        if not (supported & bit):
-            return False
-        mode = WFD_CEA_MODES[bit]
+        mode = all_modes[bit]
+        if mode.table == "vesa":
+            if not (vesa_supported & bit):
+                return False
+        else:
+            if not (cea_supported & bit):
+                return False
         return max_level is None or _wfd_level_for_mode(mode) <= max_level
 
-    if wants_720:
+    # Build preference order: if monitor is 1200p, prefer VESA 1200p modes first
+    if wants_1200:
+        preferred = (
+            [WFD_VESA_1200P60, WFD_VESA_1200P30,
+             WFD_CEA_1080P60, WFD_CEA_1080P30, WFD_CEA_720P60, WFD_CEA_720P30]
+            if wants_60 else [
+                WFD_VESA_1200P30, WFD_VESA_1200P60,
+                WFD_CEA_1080P30, WFD_CEA_1080P60,
+                WFD_CEA_720P30, WFD_CEA_720P60,
+            ]
+        )
+    elif wants_720:
         preferred = (
             [WFD_CEA_720P60, WFD_CEA_720P30]
             if wants_60 else [WFD_CEA_720P30, WFD_CEA_720P60]
@@ -567,22 +604,49 @@ def _choose_cea_mode(
 
     for bit in preferred:
         if supports(bit):
-            return WFD_CEA_MODES[bit]
+            return all_modes[bit]
 
+    # Fallback: try any supported mode
     for bit in (
-        WFD_CEA_720P30,
-        WFD_CEA_1080P30,
-        WFD_CEA_720P60,
-        WFD_CEA_1080P60,
+        WFD_CEA_720P30, WFD_CEA_1080P30, WFD_CEA_720P60, WFD_CEA_1080P60,
     ):
         if supports(bit):
-            return WFD_CEA_MODES[bit]
+            return all_modes[bit]
 
-    raise WFDNotReady(
-        "The sink did not advertise a supported 720p/1080p CEA WFD mode. "
-        f"CEA mask was 0x{supported:08x}, "
-        f"H.264 level was {sink_format.level if sink_format else 'unknown'}."
-    )
+    # Nothing advertised — force the best mode for the source monitor.
+    # Modern sinks (Samsung tablets etc.) accept modes beyond what they
+    # advertise; Windows Miracast does the same.
+    if wants_1200:
+        forced = (
+            [WFD_VESA_1200P60, WFD_VESA_1200P30,
+             WFD_CEA_1080P60, WFD_CEA_1080P30]
+            if wants_60 else [
+                WFD_VESA_1200P30, WFD_VESA_1200P60,
+                WFD_CEA_1080P30, WFD_CEA_1080P60,
+            ]
+        )
+    elif wants_720:
+        forced = (
+            [WFD_CEA_720P60, WFD_CEA_720P30]
+            if wants_60 else [WFD_CEA_720P30, WFD_CEA_720P60]
+        )
+    else:
+        forced = (
+            [WFD_CEA_1080P60, WFD_CEA_1080P30, WFD_CEA_720P60, WFD_CEA_720P30]
+            if wants_60 else [
+                WFD_CEA_1080P30, WFD_CEA_1080P60,
+                WFD_CEA_720P30, WFD_CEA_720P60,
+            ]
+        )
+    mode = all_modes[forced[0]]
+    global _mode_force_warned
+    if not _mode_force_warned:
+        _mode_force_warned = True
+        print(
+            f"[FluxCast WFD RTSP] WARNING: Sink lacks advertised support for "
+            f"{mode.name}; forcing it (most sinks accept it)."
+        )
+    return mode
 
 
 def _selected_video_format(
@@ -592,10 +656,23 @@ def _selected_video_format(
     mode = _choose_cea_mode(config, sink_format)
 
     profile = _choose_profile(sink_format.profile) if sink_format else "01"
-    level = f"{_wfd_level_for_mode(mode):02x}"
+    wfd_level = _wfd_level_for_mode(mode)
+    # Bump level for resolutions exceeding standard 1080p limits
+    if mode.width * mode.height > 1920 * 1080:
+        wfd_level = WFD_LEVEL_50 if mode.fps <= 30 else WFD_LEVEL_51
+    level = f"{wfd_level:02x}"
+
+    # Place the mode bit in the correct mask field (CEA vs VESA)
+    if mode.table == "vesa":
+        cea_mask = 0
+        vesa_mask = mode.bit
+    else:
+        cea_mask = mode.bit
+        vesa_mask = 0
+
     return (
-        f"{mode.native} 00 {profile} {level} {mode.bit:08x} "
-        "00000000 00000000 00 0000 0000 00 none none"
+        f"{mode.native} 00 {profile} {level} {cea_mask:08x} "
+        f"{vesa_mask:08x} 00000000 00 0000 0000 00 none none"
     )
 
 
@@ -604,6 +681,10 @@ def _h264_level_for_mode(config: WFDMediaConfig) -> str:
     width, height = resolution
     if width <= 1280 and height <= 720:
         return "3.1" if config.fps <= 30 else "3.2"
+    # 1920x1200@60fps: 120x75 = 9000 MBs > level 4.2 limit (8704 MBs),
+    # MB rate 540000 > 4.2 limit (522240). Need level 5.0+.
+    if width * height > 1920 * 1080:
+        return "5.0" if config.fps <= 30 else "5.1"
     return "4.0" if config.fps <= 30 else "4.2"
 
 
