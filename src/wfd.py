@@ -396,7 +396,8 @@ def _vbv_bufsize(bitrate_text: str, config: WFDMediaConfig) -> str:
     suffix = match.group(2)
     
     is_lg = "LG" in config.peer_name.upper()
-    # For LG, use 0.5x bitrate (500ms buffer) for others and my samsung 2x (2s buffer).
+    # For LG, use 0.5x bitrate (500ms buffer); for Samsung/others use 2x.
+    # Tighter values cause VBV underflow with ultrafast at high resolutions.
     multiplier = 0.5 if is_lg else 2.0
     
     amount *= multiplier
@@ -436,8 +437,9 @@ def _quality_floor_kbits(width: int, height: int, fps: int) -> int:
     if pixels <= 1280 * 720:
         return 5000 if fps <= 30 else 7000
     if pixels <= 1920 * 1080:
-        return 8000 if fps <= 30 else 12000
-    return 12000 if fps <= 30 else 16000
+        return 8000 if fps <= 30 else 14000
+    # 1200p+ at ultrafast needs headroom to avoid compression artifacts
+    return 14000 if fps <= 30 else 20000
 
 
 def _calculate_gop(config: WFDMediaConfig) -> int:
@@ -1302,7 +1304,7 @@ class WFDMediaPipeline:
 
         ffmpeg_cmd += [
             "-c:v", "libx264",
-            "-preset", "veryfast",
+            "-preset", "ultrafast",
             "-tune", "zerolatency",
             "-profile:v", "baseline",
             "-level:v", _h264_level_for_mode(self.config),
@@ -1406,7 +1408,7 @@ class WFDMediaPipeline:
 
         ffmpeg_cmd += [
             "-c:v", "libx264",
-            "-preset", "veryfast",
+            "-preset", "ultrafast",
             "-tune", "zerolatency",
             "-profile:v", "baseline",
             "-level:v", _h264_level_for_mode(self.config),
