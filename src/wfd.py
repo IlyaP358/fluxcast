@@ -883,6 +883,7 @@ class WFDMediaPipeline:
 
         resolution = self.config.output_resolution or "1280x720"
         gop = _calculate_gop(self.config)
+        _tp_h = (_parse_resolution(resolution) or (1280, 720))[1]
         cmd = [
             "ffmpeg", "-hide_banner", "-y",
             "-loglevel", "warning",
@@ -904,7 +905,7 @@ class WFDMediaPipeline:
 
         cmd += [
             "-c:v", "libx264",
-            "-preset", "ultrafast",
+            "-preset", "ultrafast" if _tp_h > 1080 else "veryfast",
             "-tune", "zerolatency",
             "-profile:v", "baseline",
             "-level:v", _h264_level_for_mode(self.config),
@@ -980,7 +981,7 @@ class WFDMediaPipeline:
             "!", "videoconvert",
             "!", "x264enc",
             "tune=zerolatency",
-            "speed-preset=ultrafast",
+            f"speed-preset={'ultrafast' if height > 1080 else 'veryfast'}",
             f"bitrate={bitrate_kbits}",
             f"key-int-max={gop}",
             "bframes=0",
@@ -1136,7 +1137,7 @@ class WFDMediaPipeline:
             # x264enc configuration
             encoder_args = [
                 "tune=zerolatency",
-                "speed-preset=ultrafast",
+                f"speed-preset={'ultrafast' if parsed_out[1] > 1080 else 'veryfast'}",
                 f"bitrate={bitrate_kbits}",
                 f"key-int-max={gop}",
                 #"intra-refresh=true",
@@ -1459,7 +1460,7 @@ class WFDMediaPipeline:
 
         ffmpeg_cmd += [
             "-c:v", "libx264",
-            "-preset", "ultrafast",
+            "-preset", "ultrafast" if parsed_out[1] > 1080 else "veryfast",
             "-tune", "zerolatency",
             "-profile:v", "baseline",
             "-level:v", _h264_level_for_mode(self.config),
@@ -1563,7 +1564,7 @@ class WFDMediaPipeline:
 
         ffmpeg_cmd += [
             "-c:v", "libx264",
-            "-preset", "ultrafast",
+            "-preset", "ultrafast" if parsed_out[1] > 1080 else "veryfast",
             "-tune", "zerolatency",
             "-profile:v", "baseline",
             "-level:v", _h264_level_for_mode(self.config),
