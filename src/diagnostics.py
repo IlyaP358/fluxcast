@@ -14,6 +14,9 @@ STATUS_WARN = "warn"
 STATUS_FAIL = "fail"
 STATUS_SKIP = "skip"
 
+# RTSP port advertised in the WFD IEs; must reach the receiver for streaming.
+WFD_RTSP_PORT = 7236
+
 
 @dataclass
 class Check:
@@ -407,6 +410,98 @@ def _supplicant_wfd_check() -> Check:
     )
 
 
+def _ufw_check() -> Optional[Check]:
+    if not shutil.which("ufw"):
+        return None
+
+    try:
+        result = _run(["ufw", "status"], timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return Check("firewall (ufw)", STATUS_WARN, "could not query ufw status", str(exc))
+
+    output = (result.stdout + result.stderr).strip()
+    if result.returncode != 0:
+        # ufw status needs root; skip rather than warn when privileges are missing.
+        if re.search(r"need to be root|permission denied", output, re.IGNORECASE):
+            return None
+        return Check("firewall (ufw)", STATUS_WARN, "ufw status query failed", output)
+
+    if re.search(r"Status:\s*inactive", output, re.IGNORECASE):
+        return Check("firewall (ufw)", STATUS_OK, "ufw is inactive; port not blocked", output)
+
+    # Only treat the port as open when an explicit ALLOW rule covers its TCP
+    # entry; a bare port match would also accept DENY/REJECT or udp-only rules.
+    if re.search(rf"\b{WFD_RTSP_PORT}/tcp\b[^\n]*\bALLOW\b", output, re.IGNORECASE):
+        return Check(
+            "firewall (ufw)",
+            STATUS_OK,
+            f"ufw is active and allows port {WFD_RTSP_PORT}",
+            output,
+        )
+    return Check(
+        "firewall (ufw)",
+        STATUS_WARN,
+        f"ufw is active but port {WFD_RTSP_PORT} is not allowed",
+        f"open it with: sudo ufw allow {WFD_RTSP_PORT}/tcp",
+    )
+
+
+def _firewalld_check() -> Optional[Check]:
+    if not shutil.which("firewall-cmd"):
+        return None
+
+    try:
+        state = _run(["firewall-cmd", "--state"], timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return Check("firewall (firewalld)", STATUS_WARN, "could not query firewalld state", str(exc))
+
+    if state.returncode != 0 or "running" not in (state.stdout + state.stderr).lower():
+        return Check(
+            "firewall (firewalld)",
+            STATUS_OK,
+            "firewalld is not running; port not blocked",
+            (state.stdout + state.stderr).strip(),
+        )
+
+    try:
+        query = _run(["firewall-cmd", "--query-port", f"{WFD_RTSP_PORT}/tcp"], timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return Check("firewall (firewalld)", STATUS_WARN, "could not query firewalld port", str(exc))
+
+    if query.returncode == 0 and "yes" in query.stdout.lower():
+        return Check(
+            "firewall (firewalld)",
+            STATUS_OK,
+            f"firewalld is running and allows port {WFD_RTSP_PORT}",
+            query.stdout.strip(),
+        )
+    return Check(
+        "firewall (firewalld)",
+        STATUS_WARN,
+        f"firewalld is running but port {WFD_RTSP_PORT} is not allowed",
+        f"open it with: sudo firewall-cmd --add-port={WFD_RTSP_PORT}/tcp --permanent && sudo firewall-cmd --reload",
+    )
+
+
+def _firewall_check() -> Check:
+    """Warn when a host firewall is active but the WFD RTSP port is closed.
+
+    A host may run more than one front-end (e.g. ufw inactive while firewalld
+    is active and blocking), so every available probe is consulted and the
+    worst-case result is reported rather than the first one found.
+    """
+    severity = {STATUS_OK: 0, STATUS_WARN: 1, STATUS_FAIL: 2}
+    results = [check for probe in (_ufw_check, _firewalld_check) if (check := probe()) is not None]
+    if results:
+        return max(results, key=lambda c: severity.get(c.status, 0))
+    return Check(
+        "firewall",
+        STATUS_SKIP,
+        "no supported firewall front-end detected",
+        f"checked ufw and firewall-cmd; open port {WFD_RTSP_PORT}/tcp manually if a firewall blocks it",
+    )
+
+
 def _python_check() -> Check:
     return Check(
         "python",
@@ -450,6 +545,7 @@ def run_diagnostics() -> DiagnosticReport:
         _iw_p2p_check(),
         _supplicant_capability_check(),
         _supplicant_wfd_check(),
+        _firewall_check(),
     ]
 
     by_name = {check.name: check for check in checks}
