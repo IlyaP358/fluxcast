@@ -66,6 +66,34 @@ class FirewallCheckTest(unittest.TestCase):
             check = diagnostics._firewall_check()
         self.assertEqual(check.status, diagnostics.STATUS_WARN)
 
+    def test_ufw_port_denied_is_not_ok(self):
+        status = f"Status: active\n{diagnostics.WFD_RTSP_PORT}/tcp  DENY  Anywhere"
+        with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/sbin/ufw" if b == "ufw" else None), \
+                mock.patch("diagnostics._run", return_value=_completed(status)):
+            check = diagnostics._firewall_check()
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+
+    def test_ufw_without_root_is_skipped(self):
+        err = "ERROR: You need to be root to run this script"
+        with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/sbin/ufw" if b == "ufw" else None), \
+                mock.patch("diagnostics._run", return_value=_completed("", returncode=1, stderr=err)):
+            check = diagnostics._ufw_check()
+        self.assertIsNone(check)
+
+    def test_returns_worst_case_across_front_ends(self):
+        def fake_run(args, timeout=3.0):
+            if args[0] == "ufw":
+                return _completed("Status: inactive")
+            if "--state" in args:
+                return _completed("running")
+            return _completed("no", returncode=1)
+
+        with mock.patch("diagnostics.shutil.which", side_effect=lambda b: f"/usr/bin/{b}" if b in ("ufw", "firewall-cmd") else None), \
+                mock.patch("diagnostics._run", side_effect=fake_run):
+            check = diagnostics._firewall_check()
+        self.assertEqual(check.name, "firewall (firewalld)")
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+
 
 if __name__ == "__main__":
     unittest.main()

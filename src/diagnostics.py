@@ -421,12 +421,17 @@ def _ufw_check() -> Optional[Check]:
 
     output = (result.stdout + result.stderr).strip()
     if result.returncode != 0:
+        # ufw status needs root; skip rather than warn when privileges are missing.
+        if re.search(r"need to be root|permission denied", output, re.IGNORECASE):
+            return None
         return Check("firewall (ufw)", STATUS_WARN, "ufw status query failed", output)
 
     if re.search(r"Status:\s*inactive", output, re.IGNORECASE):
         return Check("firewall (ufw)", STATUS_OK, "ufw is inactive; port not blocked", output)
 
-    if re.search(rf"\b{WFD_RTSP_PORT}\b", output):
+    # Only treat the port as open when an explicit ALLOW rule covers its TCP
+    # entry; a bare port match would also accept DENY/REJECT or udp-only rules.
+    if re.search(rf"\b{WFD_RTSP_PORT}/tcp\b[^\n]*\bALLOW\b", output, re.IGNORECASE):
         return Check(
             "firewall (ufw)",
             STATUS_OK,
@@ -479,11 +484,16 @@ def _firewalld_check() -> Optional[Check]:
 
 
 def _firewall_check() -> Check:
-    """Warn when a host firewall is active but the WFD RTSP port is closed."""
-    for probe in (_ufw_check, _firewalld_check):
-        check = probe()
-        if check is not None:
-            return check
+    """Warn when a host firewall is active but the WFD RTSP port is closed.
+
+    A host may run more than one front-end (e.g. ufw inactive while firewalld
+    is active and blocking), so every available probe is consulted and the
+    worst-case result is reported rather than the first one found.
+    """
+    severity = {STATUS_OK: 0, STATUS_WARN: 1, STATUS_FAIL: 2}
+    results = [check for probe in (_ufw_check, _firewalld_check) if (check := probe()) is not None]
+    if results:
+        return max(results, key=lambda c: severity.get(c.status, 0))
     return Check(
         "firewall",
         STATUS_SKIP,
