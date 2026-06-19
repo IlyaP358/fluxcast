@@ -1,5 +1,4 @@
 import sys
-import time
 from typing import Optional
 
 try:
@@ -10,11 +9,23 @@ except ImportError:
     sys.exit(1)
 
 
-def discover_devices(timeout: int = 10) -> list:
+def discover_devices(timeout: int = 10) -> tuple[list, object]:
     print(f"[FluxCast] Searching for Cast devices (timeout={timeout}s)…")
     chromecasts, browser = pychromecast.get_chromecasts(timeout=timeout)
-    pychromecast.discovery.stop_discovery(browser)
-    return chromecasts
+    # Do NOT stop the browser here, its Zeroconf instance must stay alive
+    # until after device.wait() in start_cast. Stopping it early causes
+    # pychromecast's socket_client to raise:
+    # like, AssertionError: Zeroconf instance loop must be running, was it already stopped?
+    return chromecasts, browser
+
+def stop_browser(browser) -> None: 
+    """Stop the mDNS discovery browser. Always safe to call, even if None or already stopped."""
+    if browser is None:
+        return
+    try:
+        pychromecast.discovery.stop_discovery(browser)
+    except Exception:
+        pass
 
 
 def connect_by_ip(ip: str, port: int = 8009):
@@ -22,7 +33,6 @@ def connect_by_ip(ip: str, port: int = 8009):
     try:
         known = [f"{ip}:{port}"] if port != 8009 else [ip]
         chromecasts, browser = pychromecast.get_listed_chromecasts(known_hosts=known)
-        pychromecast.discovery.stop_discovery(browser)
     except Exception as exc:
         print(f"[FluxCast] ERROR: Discovery failed — {exc}")
         sys.exit(1)
@@ -35,6 +45,7 @@ def connect_by_ip(ip: str, port: int = 8009):
 
     cast = chromecasts[0]
     cast.wait(timeout=10)
+    stop_browser(browser)
     print(f"[FluxCast] Connected: {cast.cast_info.friendly_name}")
     return cast
 
@@ -75,10 +86,14 @@ def prompt_device(devices: list, device_name: Optional[str] = None):
         return devices[default_idx]
 
 
-def start_cast(device, stream_url: str) -> None:
+def start_cast(device, stream_url: str, browser=None) -> None:
     device.wait()
+    stop_browser(browser)
     mc = device.media_controller
-    mc.play_media(stream_url, "video/mp2t")
+    content_type = (
+        "application/x-mpegURL" if stream_url.endswith(".m3u8") else "video/mpeg"
+    )
+    mc.play_media(stream_url, content_type)
     mc.block_until_active(timeout=15)
     print(f"[FluxCast] Cast started → {device.cast_info.friendly_name}")
 
