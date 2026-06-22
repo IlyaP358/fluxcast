@@ -265,7 +265,6 @@ def main() -> None:
     ffmpeg_procs = None
     stream_server = None
     tv = None
-    _cast_browser = None
 
     def shutdown(signum=None, frame=None):
         print("\n[FluxCast] Stopping…")
@@ -277,12 +276,6 @@ def main() -> None:
                 else:
                     import cast as cast_backend
                     cast_backend.stop_cast(tv)
-            except Exception:
-                pass
-        if _cast_browser is not None:
-            try:
-                import cast as cast_backend
-                cast_backend.stop_browser(_cast_browser)
             except Exception:
                 pass
         if stream_server:
@@ -345,11 +338,10 @@ def main() -> None:
             tv = connect_by_ip(args.tv_ip)
             start_cast(tv, stream_url)
         else:
-            print("[FluxCast] Searching for Cast devices on the network…")
-            devices, _cast_browser = discover_devices(timeout=args.discover_timeout)
+            devices = discover_devices(timeout=args.discover_timeout)
             tv = prompt_device(devices, args.device_name)
             print(f"[FluxCast] Found: {tv.cast_info.friendly_name}")
-            start_cast(tv, stream_url, _cast_browser)
+            start_cast(tv, stream_url)
 
     print("[FluxCast] Casting started. Press Ctrl+C to stop.")
     signal.pause()
