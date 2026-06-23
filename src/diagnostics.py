@@ -520,6 +520,11 @@ def run_diagnostics() -> DiagnosticReport:
         _command_check("pactl", "PulseAudio/PipeWire-Pulse audio monitor detection"),
         _command_check("xrandr", "X11 monitor detection fallback"),
         _command_check("nmcli", "NetworkManager Wi-Fi Direct control"),
+        _command_check(
+            "dnsmasq",
+            "NetworkManager P2P DHCP server",
+            extra_paths=["/usr/sbin/dnsmasq"],
+        ),
         _command_check("iw", "kernel Wi-Fi interface inspection"),
         _command_check("wpa_cli", "active Wi-Fi Direct scan/control"),
         _command_check("gdbus", "passive wpa_supplicant D-Bus capability checks"),
@@ -557,7 +562,8 @@ def run_diagnostics() -> DiagnosticReport:
         by_name.get("ffmpeg encoders", Check("", STATUS_SKIP, "")).status == STATUS_OK
         and by_name.get("screen capture", Check("", STATUS_SKIP, "")).status == STATUS_OK
     )
-    wfd_candidate = network_hw_ok and media_ok
+    dnsmasq_ok = by_name.get("dnsmasq", Check("", STATUS_WARN, "")).status == STATUS_OK
+    wfd_candidate = network_hw_ok and media_ok and dnsmasq_ok
 
     if wfd_candidate:
         summary = (
