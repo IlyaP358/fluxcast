@@ -305,6 +305,7 @@ def _start_capture_wf_recorder(
     try:
         process = subprocess.Popen(
             cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -467,6 +468,7 @@ def _start_capture_portal(
     try:
         gst_proc = subprocess.Popen(
             gst_cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             pass_fds=(session.pw_fd,),
@@ -554,7 +556,7 @@ def _start_capture_x11grab(
         print(f"[FluxCast] Scaling output to : {out_res}")
 
     try:
-        process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except FileNotFoundError as exc:
         raise CaptureStartError(f"required executable not found: {exc}") from exc
 
