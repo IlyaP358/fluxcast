@@ -692,10 +692,39 @@ class HLSRequestHandler(http.server.BaseHTTPRequestHandler):
         self._serve_file(send_body=True)
 
 
+class CorsHLSRequestHandler(HLSRequestHandler):
+    """HLSRequestHandler plus CORS headers, used ONLY for the cast protocol.
+    """
+
+    def end_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header(
+            "Access-Control-Expose-Headers",
+            "Content-Length, Content-Range, Accept-Ranges",
+        )
+        super().end_headers()
+
+    def do_OPTIONS(self):
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def _send_empty(self, status: int) -> None:
+        if status == 404:
+            print(f"[FluxCast Server] 404 {self.client_address[0]} -> {self.path}")
+        super()._send_empty(status)
+
+
 class StreamServer:
-    def __init__(self, host: str = "0.0.0.0", port: int = 8080):
+    def __init__(self, host: str = "0.0.0.0", port: int = 8080,
+                 handler_class=HLSRequestHandler):
         self.host = host
         self.port = port
+        self.handler_class = handler_class
         self._server: Optional[socketserver.TCPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -703,7 +732,7 @@ class StreamServer:
         os.makedirs(HLS_DIR, exist_ok=True)
         _progressive_ts.reset()
         self._server = http.server.ThreadingHTTPServer(
-            (self.host, self.port), HLSRequestHandler
+            (self.host, self.port), self.handler_class
         )
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()

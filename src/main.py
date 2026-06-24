@@ -60,7 +60,7 @@ import sys
 import termios
 
 from capture import prompt_monitor, start_capture, stop_capture
-from server import HLS_DIR, StreamServer
+from server import HLS_DIR, CorsHLSRequestHandler, HLSRequestHandler, StreamServer
 
 
 def get_local_ip() -> str:
@@ -108,10 +108,10 @@ def parse_args() -> argparse.Namespace:
     dlna_cast.add_argument("--discover-timeout", type=int, default=5,
                            dest="discover_timeout",
                            help="Discovery timeout in seconds (default: 5)")
-    dlna_cast.add_argument("--transport", default="progressive-ts",
+    dlna_cast.add_argument("--transport", default=None,
                            choices=["progressive-ts", "hls", "live-ts"],
-                           help="DLNA stream transport: progressive-ts for low latency "
-                                "(default), hls as a stable fallback, or live-ts experimental")
+                           help="Stream transport (default: hls for cast, progressive-ts "
+                                "for dlna); live-ts is experimental")
     dlna_cast.add_argument("--capture-backend", default="auto", dest="capture_backend",
                            choices=["auto", "wf-recorder", "x11grab"],
                            help="Desktop capture backend for dlna/cast: auto (default), wf-recorder, or x11grab")
@@ -216,6 +216,9 @@ def _wait_for_hls_segments(required_segments: int = 2, timeout: float = 15.0) ->
 def main() -> None:
     args = parse_args()
 
+    if args.transport is None:
+        args.transport = "hls" if args.protocol == "cast" else "progressive-ts"
+
     if args.tray:
         from tray import run_tray
         run_tray()
@@ -314,7 +317,10 @@ def main() -> None:
     print("[FluxCast] Screen capture started.")
 
     # HTTP server serves the HLS playlist and MPEG-TS segments from /tmp/fluxcast.
-    stream_server = StreamServer(host="0.0.0.0", port=args.port)
+    # Cast uses a CORS-enabled handler (Chromecast needs it for HLS); dlna keeps
+    # the plain handler so its responses stay byte-identical to before.
+    handler_class = CorsHLSRequestHandler if args.protocol == "cast" else HLSRequestHandler
+    stream_server = StreamServer(host="0.0.0.0", port=args.port, handler_class=handler_class)
     stream_server.start()
     print(f"[FluxCast] HTTP server: {stream_url}")
     print(f"[FluxCast] Session: {session_id}")
