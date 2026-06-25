@@ -657,19 +657,21 @@ class HLSRequestHandler(http.server.BaseHTTPRequestHandler):
         request_range = self.headers.get("Range")
         self._log_file_response(local_path, status, length, request_range)
 
-        if playlist_body is not None:
-            self.wfile.write(playlist_body[start:start + length])
-            return
-
-        with open(local_path, "rb") as file:
-            file.seek(start)
-            remaining = length
-            while remaining > 0:
-                chunk = file.read(min(64 * 1024, remaining))
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                remaining -= len(chunk)
+        try:
+            if playlist_body is not None:
+                self.wfile.write(playlist_body[start:start + length])
+                return
+            with open(local_path, "rb") as file:
+                file.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = file.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_HEAD(self):
         path = _url_path(self.path)
