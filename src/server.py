@@ -368,13 +368,13 @@ class HLSRequestHandler(http.server.BaseHTTPRequestHandler):
                 continue
             rewritten.append(line)
             if line.startswith("#EXT-X-INDEPENDENT-SEGMENTS"):
-                rewritten.append("#EXT-X-START:TIME-OFFSET=-1.0,PRECISE=YES")
+                rewritten.append("#EXT-X-START:TIME-OFFSET=-2.0,PRECISE=YES")
                 inserted_start = True
 
         if not inserted_start:
             for idx, line in enumerate(rewritten):
                 if line.startswith("#EXT-X-TARGETDURATION:"):
-                    rewritten.insert(idx + 1, "#EXT-X-START:TIME-OFFSET=-1.0,PRECISE=YES")
+                    rewritten.insert(idx + 1, "#EXT-X-START:TIME-OFFSET=-2.0,PRECISE=YES")
                     break
 
         return ("\n".join(rewritten) + "\n").encode("utf-8")
