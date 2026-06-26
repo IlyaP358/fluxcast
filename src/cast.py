@@ -25,6 +25,12 @@ class _MediaListener:
         self._last = key
         if status.player_state == "IDLE" and status.idle_reason:
             print(f"[FluxCast] TV playback: IDLE (reason={status.idle_reason})")
+            if status.idle_reason == "ERROR":
+                print("[FluxCast] The TV stopped playback with an error. The receiver "
+                      "doesn't report why, but this usually means a video segment "
+                      "arrived late because the encoder couldn't keep up under load.")
+                print("[FluxCast] Try a lighter setting, e.g. --fps 20 or "
+                      "--output-res 960x540, then restart the cast (Ctrl+C to stop).")
         else:
             print(f"[FluxCast] TV playback: {status.player_state}")
 
