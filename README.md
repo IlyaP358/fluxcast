@@ -162,6 +162,8 @@ to check your machine before running WFD.
 
 Note: on KDE/GNOME Wayland, WFD auto backend now prefers `portal` first.
 
+Note: on **firewalld** systems, FluxCast opens the WFD RTSP port (`7236/tcp`) for the duration of a session and closes it on exit (no-op without firewalld; disable with `--wfd-no-firewall`). See [DOCUMENTATION.md](documentation/DOCUMENTATION.md) -> "WFD and firewalld".
+
 
 ## Documentation
 
