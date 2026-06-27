@@ -327,7 +327,7 @@ def main() -> None:
     print(f"[FluxCast] Transport: {args.transport}")
 
     print("[FluxCast] Waiting for HLS source to start…", end="", flush=True)
-    if not _wait_for_hls_segments(required_segments=2, timeout=15.0):
+    if not _wait_for_hls_segments(required_segments=2, timeout=30.0):
         print("[FluxCast] ERROR: ffmpeg produced no playable HLS segments.")
         shutdown()
     print("[FluxCast] HLS source is producing segments ✓")
