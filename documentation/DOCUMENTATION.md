@@ -64,6 +64,7 @@ python3 src/main.py --protocol cast
 - `--wfd-audio-device DEVICE`
 - `--wfd-rtsp-port PORT`
 - `--wfd-rtp-source-port PORT`
+- `--wfd-no-firewall`
 - `--wfd-interface IFACE`
 - `--wfd-timeout SEC`
 - `--wfd-monitor NAME` pre-select monitor by name for WFD capture (skips interactive picker)
@@ -161,6 +162,25 @@ python3 src/main.py --protocol cast
   - RTSP port in WFD source IE (usually does not need changes).
 - `--wfd-rtp-source-port`
   - Local RTP source port.
+- `--wfd-no-firewall`
+  - Disables the automatic firewall handling described below.
+
+### WFD and firewalld
+
+On **firewalld** systems the temporary Wi-Fi Direct interface (`p2p-wlan0-X`)
+lands in the default zone where the RTSP port (`7236/tcp`) is closed, so the TV
+can't connect back and the session never starts. To avoid this, FluxCast opens
+the port while a session is active and closes it on exit:
+
+- Only happens when **firewalld is installed and running**, otherwise it is a
+  no-op (no firewall is ever touched).
+- The change is **runtime only** (no `--permanent`): it disappears on a
+  firewalld reload or reboot, and is removed automatically when FluxCast exits.
+- A port you already opened yourself is left untouched.
+- Other firewalls (`nftables`, `iptables`, `ufw`) are not modified — open the
+  RTSP port manually there, e.g. `sudo ufw allow 7236/tcp`.
+
+Pass `--wfd-no-firewall` to skip this entirely and manage the firewall yourself.
 
 ### WFD Latency Log
 

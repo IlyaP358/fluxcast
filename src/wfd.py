@@ -2261,6 +2261,54 @@ def _run(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[s
     )
 
 
+def _firewalld_active() -> bool:
+    if not shutil.which("firewall-cmd"):
+        return False
+    try:
+        result = _run(["firewall-cmd", "--state"], timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and "running" in (result.stdout + result.stderr).lower()
+
+
+def _open_wfd_firewall_port(port: int) -> bool:
+    """
+    firewalld drops the transient ``p2p-wlanX`` interface into the default zone,
+    where the RTSP port is closed, so the sink's connection back to us is silently
+    dropped and the session never starts. ISSUE #53
+
+    Runtime-only (no ``--permanent``): cleared on reload/reboot, and removed on
+    exit. Returns True only if WE opened it, so the caller knows to undo it; a
+    port the user already had open is left untouched.
+    """
+    if not _firewalld_active():
+        return False
+    try:
+        if _run(["firewall-cmd", f"--query-port={port}/tcp"], timeout=3.0).returncode == 0:
+            return False  # already open, leave the user's setup exactly as-is
+        result = _run(["firewall-cmd", f"--add-port={port}/tcp"], timeout=5.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"[FluxCast WFD] Note: could not adjust firewalld for port {port}/tcp "
+              f"({exc}); if the TV can't connect, open it manually or stop firewalld.")
+        return False
+    if result.returncode == 0:
+        print(f"[FluxCast WFD] Opened firewalld port {port}/tcp for this session "
+              "(removed on exit).")
+        return True
+    print(f"[FluxCast WFD] Note: firewall-cmd could not open {port}/tcp: "
+          f"{(result.stdout + result.stderr).strip()}")
+    return False
+
+
+def _close_wfd_firewall_port(port: int) -> None:
+    """Undo _open_wfd_firewall_port (best-effort)."""
+    try:
+        _run(["firewall-cmd", f"--remove-port={port}/tcp"], timeout=5.0)
+        print(f"[FluxCast WFD] Closed firewalld port {port}/tcp.")
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def _object_paths(text: str) -> list[str]:
     return re.findall(r"'(/[^']+)'", text)
 
@@ -3169,11 +3217,13 @@ def start_experimental_backend(args) -> None:
     if media_config.latency_log_path:
         print(f"[FluxCast WFD] Latency log file: {media_config.latency_log_path}")
 
+    rtsp_port = getattr(args, "wfd_rtsp_port", WFD_RTSP_PORT)
     rtsp = WFDRTSPServer(
         media_config=media_config,
-        port=getattr(args, "wfd_rtsp_port", WFD_RTSP_PORT),
+        port=rtsp_port,
     )
     connected = False
+    firewall_opened = False
     active_path = ""
     try:
         # Clear stale P2P device state from previous runs before new activation.
@@ -3182,10 +3232,15 @@ def start_experimental_backend(args) -> None:
         except Exception:
             pass
         rtsp.start()
+        # firewalld parks the transient p2p-wlanX interface in the default zone,
+        # which blocks the sink's inbound RTSP connection. Open the port for the
+        # session (no-op without firewalld; skip with --wfd-no-firewall).
+        if not getattr(args, "wfd_no_firewall", False):
+            firewall_opened = _open_wfd_firewall_port(rtsp_port)
         active_path = _connect_peer(
             device_path,
             peer,
-            rtsp_port=getattr(args, "wfd_rtsp_port", WFD_RTSP_PORT),
+            rtsp_port=rtsp_port,
         )
         connected = True
         _wait_for_nm_activation(active_path)
@@ -3207,6 +3262,8 @@ def start_experimental_backend(args) -> None:
     finally:
         rtsp.stop_all_media()
         rtsp.stop()
+        if firewall_opened:
+            _close_wfd_firewall_port(rtsp_port)
         if connected:
             _deactivate_connection(active_path)
             _disconnect_device(device_path)

@@ -149,6 +149,9 @@ def parse_args() -> argparse.Namespace:
                      help="Pulse/PipeWire monitor source for --protocol wfd audio")
     wfd.add_argument("--wfd-rtsp-port", type=int, default=7236, dest="wfd_rtsp_port",
                      help="RTSP port advertised in WFD IEs (default: 7236)")
+    wfd.add_argument("--wfd-no-firewall", action="store_true", dest="wfd_no_firewall",
+                     help="Do not auto-open the WFD RTSP port via firewalld for the "
+                          "session (use if you manage the firewall yourself)")
     wfd.add_argument("--wfd-rtp-source-port", type=int, default=19002, dest="wfd_rtp_source_port",
                      help="Local RTP source port for --protocol wfd (default: 19002)")
     wfd.add_argument("--wfd-interface", default=None, dest="wfd_interface",
