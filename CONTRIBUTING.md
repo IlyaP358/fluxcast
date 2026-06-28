@@ -1,7 +1,6 @@
 # Contributing to FluxCast
 
-Thanks for your interest! The project is in early alpha and 
-actively developed, so contributions are very welcome.
+Thanks for your interest! The project is actively developed, so contributions are very welcome.
 
 ## Before You Start
 

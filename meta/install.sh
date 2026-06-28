@@ -27,4 +27,13 @@ install -Dm644 "$SRCDIR/src/assets/flcast_logo_512x512.png" "$DESTDIR/usr/share/
 install -Dm644 "$SRCDIR/meta/zz-dev.fluxcast.wpa-supplicant.conf" -t "$DESTDIR/usr/share/dbus-1/system.d/"
 install -Dm755 "$SRCDIR/meta/fluxcast" "$DESTDIR/usr/bin/fluxcast"
 
+# Restore SELinux context on the installed system files (Fedora/RHEL)
+if [[ -z "$DESTDIR" ]] && command -v restorecon >/dev/null 2>&1; then
+    restorecon -F \
+        /usr/share/applications/fluxcast.desktop \
+        /usr/share/icons/hicolor/512x512/apps/fluxcast.png \
+        /usr/share/dbus-1/system.d/zz-dev.fluxcast.wpa-supplicant.conf \
+        2>/dev/null || true
+fi
+
 echo -e "\e[1m\e[32m>>>\e[0m Installation completed successfully!"

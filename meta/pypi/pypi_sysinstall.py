@@ -158,6 +158,17 @@ def _install_deps() -> None:
         print(f"  ERROR: installation failed (exit code {e.returncode}).")
 
 
+def _restore_selinux_context(path: str) -> None:
+    restorecon = shutil.which("restorecon")
+    if not restorecon:
+        return
+    try:
+        subprocess.run([restorecon, "-F", path], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
 def _post_install() -> None:
     cmds = [
         ["gtk-update-icon-cache", "-f", "/usr/share/icons/hicolor/"],
@@ -185,6 +196,7 @@ def main() -> None:
             continue
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(src, dst)
+        _restore_selinux_context(dst)
         print(f"  installed {dst}")
 
     _post_install()
