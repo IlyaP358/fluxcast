@@ -118,12 +118,6 @@ sudo fluxcast-install-system
 
 `fluxcast-install-system` installs the D-Bus policy, desktop entry, and system packages (GStreamer, ffmpeg, NetworkManager, etc.). Run it once after the pip install.
 
-> [!WARNING]
-> **Fedora / SELinux users:** `fluxcast-install-system` copies a D-Bus policy file to `/usr/share/dbus-1/system.d/` without restoring its SELinux label. On SELinux-enforcing systems the file can end up mislabeled, which **blocks `dbus-broker.service` and may hang boot**. Until this is fixed in the installer, relabel it once right after running `fluxcast-install-system`:
-> ```bash
-> sudo restorecon -Fv /usr/share/dbus-1/system.d/zz-dev.fluxcast.wpa-supplicant.conf
-> ```
-> If you already hit the boot hang, boot from a live USB, delete that file from your installed system, then reboot normally. If you reinstall later, run the `restorecon` command above **immediately after the install and before rebooting** — otherwise the installer recreates the mislabeled file and the next boot hangs again.
 
 ### Arch Linux - AUR
 

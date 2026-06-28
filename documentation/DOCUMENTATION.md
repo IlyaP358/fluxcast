@@ -19,8 +19,8 @@ python3 src/main.py --tray
 ## Modes
 
 - `wfd`: **Primary recommended path** - low-latency via Wi-Fi Direct + RTSP/RTP. Works excellently on Samsung TVs.
-- `dlna`: **Legacy fallback path** - via HTTP + DLNA/UPnP TV player. Use `--transport hls` for better stability on Samsung TVs.
-- `cast`: **Experimental/NOT TESTED** - Chromecast via `pychromecast`. Not supported on many Samsung TV models.
+- `dlna`: **Fallback path** - via HTTP + DLNA/UPnP TV player. Use `--transport hls` for better stability on Samsung TVs.
+- `cast`: **Experimental** - Chromecast via `pychromecast`. Not supported on many Samsung TV models.
 
 Mode selection:
 
