@@ -6,7 +6,7 @@ AppDir:
     id: fluxcast
     name: FluxCast
     icon: fluxcast
-    version: 0.1.3
+    version: 0.1.4
     exec: usr/bin/fluxcast-launcher
     exec_args: "$@"
 
