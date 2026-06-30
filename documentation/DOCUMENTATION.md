@@ -47,7 +47,7 @@ python3 src/main.py --protocol cast
 - `--doctor-json`
 - `--tv-ip IP` (for `cast` only)
 - `--device-name NAME` pre-select DLNA/Cast device by friendly name
-- `--monitor NAME` pre-select monitor by name for DLNA/Cast capture
+- `--monitor NAME` pre-select monitor by name for any protocol (wfd/dlna/cast)
 - `--tray` launch system tray interface (no terminal needed)
 
 ### WFD Flags
@@ -67,7 +67,7 @@ python3 src/main.py --protocol cast
 - `--wfd-no-firewall`
 - `--wfd-interface IFACE`
 - `--wfd-timeout SEC`
-- `--wfd-monitor NAME` pre-select monitor by name for WFD capture (skips interactive picker)
+- `--wfd-monitor NAME` **deprecated** alias for `--monitor` (kept for compatibility)
 
 ## Flag Details
 
@@ -112,7 +112,8 @@ python3 src/main.py --protocol cast
   - Skip the interactive device picker and connect directly to the named DLNA or Chromecast device. Match is by friendly name (exact string as reported by the device).
   - Example: `--device-name "Samsung TV"`
 - `--monitor NAME`
-  - Skip the interactive monitor picker and capture the named monitor for DLNA/Cast streams. Use the output name as shown by `xrandr` or `wlr-randr` (e.g. `eDP-1`, `HDMI-A-1`).
+  - Skip the interactive monitor picker and capture the named monitor for any protocol (wfd/dlna/cast). Use the output name as shown by `xrandr` or `wlr-randr` (e.g. `eDP-1`, `HDMI-A-1`).
+  - Has no effect when WFD capture uses the xdg-desktop-portal (KDE/GNOME Wayland), where the portal dialog handles monitor selection itself.
   - Example: `--monitor eDP-1`
 
 ### Diagnostics
@@ -136,8 +137,7 @@ python3 src/main.py --protocol cast
 - `--wfd-timeout`
   - Active peer discovery timeout.
 - `--wfd-monitor NAME`
-  - Skip the interactive monitor picker for WFD capture. Accepts the output name (e.g. `eDP-1`). Has no effect when WFD capture uses the xdg-desktop-portal (KDE/GNOME Wayland), where the portal dialog handles monitor selection itself.
-  - Example: `--wfd-monitor eDP-1`
+  - **Deprecated** alias for `--monitor`, kept for backward compatibility. Use `--monitor` instead.
 
 ### WFD Media
 

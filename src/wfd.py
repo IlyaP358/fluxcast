@@ -3163,7 +3163,7 @@ def start_experimental_backend(args) -> None:
                 "in the desktop portal dialog."
             )
         else:
-            wfd_monitor_name = getattr(args, "wfd_monitor", None)
+            wfd_monitor_name = getattr(args, "monitor_name", None)
             if wfd_monitor_name:
                 from capture import gather_monitors
                 all_monitors = gather_monitors()

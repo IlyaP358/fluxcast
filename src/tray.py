@@ -247,7 +247,7 @@ def _start_wfd(peer, monitor) -> None:
     cmd = [_PY, _MAIN, "--protocol", "wfd", "--wfd-peer", peer.address]
     # On non-Hyprland Wayland the WFD backend uses xdg-portal and shows its
     if monitor is not None and not _wfd_uses_portal():
-        cmd += ["--wfd-monitor", monitor.name]
+        cmd += ["--monitor", monitor.name]
     _launch(cmd, peer.name or peer.address)
 
 

@@ -28,7 +28,7 @@ DLNA / Cast Options:
     --capture-backend auto|wf-recorder|x11grab
                              Desktop capture backend for dlna/cast (default: auto)
     --device-name NAME       Pre-select DLNA/Cast device by friendly name
-    --monitor NAME           Pre-select monitor by name, e.g. eDP-1
+    --monitor NAME           Pre-select monitor by name for any protocol, e.g. eDP-1
     --tv-ip IP               Direct IP connection (cast protocol only)
 
 Wi-Fi Display (Miracast) Options:
@@ -47,7 +47,7 @@ Wi-Fi Display (Miracast) Options:
     --wfd-rtp-source-port P  Local RTP source port (default: 19002)
     --wfd-interface IFACE    Wi-Fi interface to use, e.g. wlan0
     --wfd-timeout N          Wi-Fi Direct scan timeout in seconds (default: 8)
-    --wfd-monitor NAME       Pre-select monitor by name, e.g. eDP-1
+    --wfd-monitor NAME       Deprecated alias for --monitor
 """
 
 import argparse
@@ -74,7 +74,7 @@ def get_local_ip() -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="FluxCast — stream your Arch Linux desktop to a Smart TV"
+        description="FluxCast — stream your Linux desktop to a Smart TV"
     )
 
     # General Options
@@ -120,7 +120,7 @@ def parse_args() -> argparse.Namespace:
     dlna_cast.add_argument("--device-name", default=None, dest="device_name",
                            help="Pre-select DLNA/Cast device by friendly name (skips interactive picker)")
     dlna_cast.add_argument("--monitor", default=None, dest="monitor_name",
-                           help="Pre-select monitor by name for DLNA/Cast capture, e.g. eDP-1 (skips picker)")
+                           help="Pre-select monitor by name for any protocol (wfd/dlna/cast), e.g. eDP-1 (skips picker)")
 
     # Wi-Fi Display (Miracast) Options
     wfd = parser.add_argument_group("Wi-Fi Display (Miracast) Options")
@@ -158,8 +158,8 @@ def parse_args() -> argparse.Namespace:
                      help="Wi-Fi interface to use for --wfd-scan, e.g. wlan0")
     wfd.add_argument("--wfd-timeout", type=int, default=8, dest="wfd_timeout",
                      help="Wi-Fi Direct scan timeout in seconds (default: 8)")
-    wfd.add_argument("--wfd-monitor", default=None, dest="wfd_monitor",
-                     help="Monitor name for WFD capture, e.g. eDP-1 (skips interactive picker)")
+    wfd.add_argument("--wfd-monitor", default=None, dest="monitor_name",
+                     help="Deprecated alias for --monitor, kept for compatibility")
 
     return parser.parse_args()
 
