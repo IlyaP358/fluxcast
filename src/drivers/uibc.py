@@ -116,7 +116,7 @@ def parse_packets(buf: bytes) -> tuple[list, int]:
         offset += total_len
 
         if category != UIBC_CATEGORY_GENERIC:
-            continue  # HIDC not supported in v1
+            continue  # HIDC not supported yet
 
         has_ts = bool((b0 >> 4) & 0x1)
         body_start = _HEADER_LEN + (2 if has_ts else 0)
@@ -339,6 +339,7 @@ class UIBCServer:
         self._sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._dbg_count = 0
 
     def start(self) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -373,6 +374,7 @@ class UIBCServer:
     def _serve_conn(self, conn: socket.socket) -> None:
         conn.settimeout(1.0)
         buf = b""
+        first = True
         while self._running:
             try:
                 chunk = conn.recv(4096)
@@ -382,22 +384,47 @@ class UIBCServer:
                 break
             if not chunk:
                 break
+            if first:
+                # dump the first bytes raw: if no events follow, this shows
+                # whether the sink`s wire format matches what script parse.
+                first = False
+                print(f"[FluxCast UIBC] first {len(chunk)} bytes from sink: "
+                      f"{chunk[:16].hex(' ')}")
             buf += chunk
             events, consumed = parse_packets(buf)
             buf = buf[consumed:]
             for ev in events:
                 self._dispatch(ev)
 
+    _KIND_NAMES = {
+        GENERIC_TOUCH_DOWN: "DOWN", GENERIC_TOUCH_UP: "UP",
+        GENERIC_TOUCH_MOVE: "MOVE", GENERIC_KEY_DOWN: "KEY_DOWN",
+        GENERIC_KEY_UP: "KEY_UP",
+    }
+
     def _dispatch(self, ev) -> None:
+        # first 20 events verbose, then every 200th, so the first test is
+        # informative without flooding a touch-drag stream.
+        self._dbg_count += 1
+        verbose = self._dbg_count <= 20 or self._dbg_count % 200 == 0
+        name = self._KIND_NAMES.get(ev.kind, str(ev.kind))
         if isinstance(ev, PointerEvent):
             x, y = self._mapper.to_screen(ev.x, ev.y)
+            if verbose:
+                off = "" if self._injector.available else "  (uinput off)"
+                print(f"[FluxCast UIBC] #{self._dbg_count} {name} "
+                      f"sink=({ev.x},{ev.y}) -> screen=({x},{y}){off}")
             if ev.kind == GENERIC_TOUCH_DOWN:
                 self._injector.press(x, y)
             elif ev.kind == GENERIC_TOUCH_UP:
                 self._injector.release(x, y)
             elif ev.kind == GENERIC_TOUCH_MOVE:
                 self._injector.move(x, y)
-        # KeyEvent: parsed but not injected in v1 (see module docstring).
+        elif isinstance(ev, KeyEvent):
+            # parsed but not injected =/
+            if verbose:
+                print(f"[FluxCast UIBC] #{self._dbg_count} {name} "
+                      f"codes=({ev.code1},{ev.code2}) (not injected in v1)")
 
     def stop(self) -> None:
         self._running = False
