@@ -1028,6 +1028,8 @@ class WFDMediaPipeline:
             try:
                 if backend == "x11grab":
                     self._start_desktop_x11grab()
+                elif backend == "gst-x11":
+                    self._start_desktop_gst_x11()
                 elif backend == "portal":
                     self._start_desktop_portal()
                 else:
@@ -1610,6 +1612,124 @@ class WFDMediaPipeline:
         if ffmpeg_proc.poll() is not None:
             raise WFDNotReady("ffmpeg x11grab sender exited immediately during WFD streaming.")
         self.processes = [ffmpeg_proc]
+
+    def _start_desktop_gst_x11(self) -> None:
+        """X11 desktop capture using the proven test pattern 
+        GStreamer MPEG-TS pipeline (opt-in, fixes #56).
+        """
+        
+        if not shutil.which("gst-launch-1.0"):
+            raise WFDNotReady("gst-x11 backend requires gst-launch-1.0.")
+        monitor = self.config.monitor
+        if monitor is None:
+            raise WFDNotReady("gst-x11 backend requires a selected monitor.")
+
+        required = ["ximagesrc", "videoconvert", "videoscale",
+                    "x264enc", "mpegtsmux", "rtpmp2tpay", "udpsink"]
+        if not self.config.no_audio:
+            required += ["pulsesrc", "audioconvert", "audioresample", "aacparse"]
+        missing = [name for name in required if not _gst_has_element(name)]
+        if missing:
+            raise WFDNotReady(
+                "gst-x11 backend is missing GStreamer elements: " + ", ".join(missing)
+                + " (ximagesrc/videoscale are in gst-plugins-good, x264enc in gst-plugins-ugly)."
+            )
+
+        src_w, src_h = monitor.width, monitor.height
+        out_res = self.config.output_resolution or f"{src_w}x{src_h}"
+        out_w, out_h = _parse_resolution(out_res) or (src_w, src_h)
+        gop = _calculate_gop(self.config)
+        requested_kbits = _bitrate_to_kbits(self.config.bitrate)
+        floor_kbits = _quality_floor_kbits(out_w, out_h, self.config.fps)
+        bitrate_kbits = max(requested_kbits, floor_kbits)
+        if bitrate_kbits > requested_kbits:
+            print(
+                "[FluxCast WFD Media] Raising bitrate for desktop clarity: "
+                f"{self.config.bitrate} -> {_kbits_to_bitrate_text(bitrate_kbits)}"
+            )
+        display = os.environ.get("DISPLAY", monitor.display or ":0")
+        audio_monitor = self.config.audio_device or _detect_audio_monitor()
+
+        prog_map = "program_map,sink_4113=1"
+        if not self.config.no_audio:
+            prog_map += ",sink_4352=1"
+
+        # identical to the test pipeline, except for the video (ximagesrc) and audio (pulsesrc) sources.
+        cmd = [
+            "gst-launch-1.0", "-e", "-q",
+            "mpegtsmux", "name=mux",
+            "alignment=7",
+            f"prog-map={prog_map}",
+            "pat-interval=9000",
+            "pmt-interval=9000",
+            "pcr-interval=3600",
+            "!", "rtpmp2tpay", "pt=33", "mtu=1328",
+            "!", "udpsink",
+            f"host={self.tv_ip}",
+            f"port={self.sink_rtp_port}",
+            f"bind-address={self.local_ip}",
+            f"bind-port={self.config.source_port}",
+            "sync=false",
+            "async=false",
+            "ximagesrc",
+            f"display-name={display}",
+            "use-damage=false",
+            "show-pointer=true",
+            f"startx={monitor.x}", f"starty={monitor.y}",
+            f"endx={monitor.x + src_w - 1}", f"endy={monitor.y + src_h - 1}",
+            "!", f"video/x-raw,framerate={self.config.fps}/1",
+            "!", "videoconvert",
+            "!", "videoscale",
+            "!", f"video/x-raw,width={out_w},height={out_h}",
+            "!", "videoconvert",
+            "!", "video/x-raw,format=I420",
+            "!", "x264enc",
+            "tune=zerolatency",
+            f"speed-preset={'ultrafast' if out_h > 1080 else 'veryfast'}",
+            f"bitrate={bitrate_kbits}",
+            f"key-int-max={gop}",
+            "bframes=0",
+            "byte-stream=true",
+            "aud=true",
+            "sliced-threads=true",
+            "vbv-buf-capacity=200",
+            "!", "video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline",
+            "!", "queue",
+            "!", "mux.sink_4113",
+        ]
+
+        if not self.config.no_audio:
+            audio_encoder, audio_caps = _gst_pick_aac_encoder()
+            cmd += [
+                "pulsesrc", f"device={audio_monitor}", "do-timestamp=true",
+                "!", "audioconvert",
+                "!", "audioresample",
+                "!", *audio_caps,
+                "!", audio_encoder, "bitrate=128000",
+                "!", "aacparse",
+                "!", "queue",
+                "!", "mux.sink_4352",
+            ]
+
+        print(
+            "[FluxCast WFD Media] Using gst-x11 backend for desktop capture "
+            f"from {display}+{monitor.x},{monitor.y} ({src_w}x{src_h})"
+        )
+        if out_w != src_w or out_h != src_h:
+            print(f"[FluxCast WFD Media] Scaling output  : {out_w}x{out_h}")
+        if not self.config.no_audio:
+            print(f"[FluxCast WFD Media] Capturing audio  : {audio_monitor}")
+        print(
+            f"[FluxCast WFD Media] RTP target      : "
+            f"{self.tv_ip}:{self.sink_rtp_port} from local port {self.config.source_port}"
+        )
+        print(f"[FluxCast WFD Media] GST cmd: {' '.join(cmd)}")
+
+        proc = subprocess.Popen(cmd)
+        time.sleep(1.0)
+        if proc.poll() is not None:
+            raise WFDNotReady("gst-x11 GStreamer pipeline exited immediately during WFD streaming.")
+        self.processes = [proc]
 
 
 def _read_rtsp_message(rfile) -> Optional[RTSPMessage]:
