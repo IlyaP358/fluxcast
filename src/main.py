@@ -137,8 +137,10 @@ def parse_args() -> argparse.Namespace:
                      dest="wfd_media_pipeline",
                      help="For --protocol wfd, RTP media sender: auto (gst for test-pattern, ffmpeg for desktop), ffmpeg, or gst")
     wfd.add_argument("--wfd-capture-backend", default="auto", dest="wfd_capture_backend",
-                     choices=["auto", "portal", "wf-recorder", "x11grab"],
-                     help="Desktop capture backend for --protocol wfd: auto (default), portal, wf-recorder, or x11grab")
+                     choices=["auto", "portal", "wf-recorder", "x11grab", "gst-x11"],
+                     help="Desktop capture backend for --protocol wfd: auto (default), portal, "
+                          "wf-recorder, x11grab, or gst-x11 (X11 capture through the GStreamer "
+                          "MPEG-TS pipeline, for sinks that black-screen on the ffmpeg path)")
     wfd.add_argument("--wfd-latency-log", nargs="?", const="/tmp/fluxcast-wfd-latency.jsonl",
                      default=None, dest="wfd_latency_log",
                      help="For --protocol wfd, JSONL file path for latency/session logging "
