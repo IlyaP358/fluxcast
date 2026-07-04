@@ -13,7 +13,7 @@ Wire format (Wi-Fi Display spec, cross-checked against miraclecast
 
     Common packet header (4 bytes)
         byte 0 : version(3b) | T timestamp flag(1b) | reserved(4b)   -> 0x00
-        byte 1 : input category(4b, high nibble) | reserved(4b)      -> 0x00 = GENERIC
+        byte 1 : reserved(4b, high nibble) | input category(4b, low nibble)  -> 0x00 = GENERIC
         byte 2-3 : total packet length, big-endian (header + body)
       (if T=1: 2 extra timestamp bytes follow the header, i skip them)
 
@@ -102,7 +102,7 @@ def parse_packets(buf: bytes) -> tuple[list, int]:
 
     while n - offset >= _HEADER_LEN:
         b0 = buf[offset]
-        category = (buf[offset + 1] >> 4) & 0x0F
+        category = buf[offset + 1] & 0x0F  # Input Category = low nibble (spec WIFI ALLIANCE Fig.20, bits 12-15)
         total_len = (buf[offset + 2] << 8) | buf[offset + 3]
 
         # Sanity: length must at least cover the header, and not be ABSURD.
@@ -454,3 +454,28 @@ def start_uibc(port: int, sink_w: int, sink_h: int,
     except Exception as exc:
         print(f"[FluxCast UIBC] Could not start UIBC ({exc}); continuing without it.")
         return None
+
+
+def schedule_post_play_enable(handler, delay: float = 1.5) -> None:
+    """Re-send `wfd_uibc_setting: enable` as a standalone SET_PARAMETER once the
+    stream is live
+    """
+    def _fire():
+        parent = getattr(handler.server, "parent_server", None)
+        if getattr(parent, "_uibc_server", None) is None:
+            return
+        try:
+            handler._send_request(
+                "M14_UIBC_ENABLE",
+                "SET_PARAMETER",
+                handler._rtsp_control_uri(),
+                headers={"Session": f"{handler.session_id};timeout=30"},
+                body="wfd_uibc_setting: enable\r\n",
+            )
+            print("[FluxCast WFD RTSP] Post-PLAY UIBC enable sent")
+        except OSError:
+            pass  # socket dead / session ending
+
+    t = threading.Timer(delay, _fire)
+    t.daemon = True
+    t.start()

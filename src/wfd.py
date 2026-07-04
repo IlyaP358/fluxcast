@@ -2106,6 +2106,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             print("[FluxCast WFD RTSP] PLAY accepted; media stream started.")
             if self.media_config.uibc and getattr(self, "sink_supports_uibc", False):
                 self._maybe_start_uibc(mode)
+                self._schedule_uibc_enable(1.5)
             self.play_accepted_at = time.monotonic()
             self.setup_ms = round((self.play_accepted_at - self.connected_at) * 1000.0, 1)
             _append_latency_log(
@@ -2140,6 +2141,10 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 f"{WFD_UIBC_PORT} (sink {mode.width}x{mode.height} -> "
                 f"screen {mon_w}x{mon_h}+{mon_x}+{mon_y})"
             )
+
+    def _schedule_uibc_enable(self, delay: float) -> None:
+        from drivers import uibc
+        uibc.schedule_post_play_enable(self, delay)
 
     def _schedule_probe(self, delay: float) -> None:
         probe = threading.Timer(delay, self._probe_tx)
