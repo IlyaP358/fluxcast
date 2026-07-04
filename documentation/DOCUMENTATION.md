@@ -57,7 +57,7 @@ python3 src/main.py --protocol cast
 - `--wfd-dry-run`
 - `--wfd-test-pattern`
 - `--wfd-media-pipeline auto|ffmpeg|gst`
-- `--wfd-capture-backend auto|portal|wf-recorder|x11grab`
+- `--wfd-capture-backend auto|portal|wf-recorder|x11grab|gst-x11`
   - `auto` uses `portal` first on KDE/GNOME Wayland, then `wf-recorder` fallback.
 - `--wfd-latency-log [PATH]`
 - `--wfd-no-audio`
@@ -152,6 +152,7 @@ python3 src/main.py --protocol cast
   - `portal`: Wayland ScreenCast through xdg-desktop-portal (KDE/GNOME preferred path).
   - `wf-recorder`: recommended on Hyprland/wlroots.
   - `x11grab`: useful for X11 sessions.
+  - `gst-x11`: X11 capture routed through the GStreamer MPEG-TS pipeline (the same one the test pattern uses) instead of ffmpeg. Opt-in and never chosen by `auto`. Use it when a sink connects and streams but shows a black screen on the default ffmpeg path (confirmed on Hisense Vidaa). Requires `gst-launch-1.0`, `ximagesrc` (gst-plugins-good), and `x264enc` (gst-plugins-ugly).
   - `portal` backend requirements: `dbus-next`, `xdg-desktop-portal`, desktop portal backend, and `gst-launch-1.0`.
 - `--wfd-no-audio`
   - **Video-only mode** - May cause immediate disconnects on Samsung TVs during WFD negotiation.
