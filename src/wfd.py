@@ -2385,45 +2385,60 @@ def _firewalld_active() -> bool:
     if not shutil.which("firewall-cmd"):
         return False
     try:
-        result = _run(["firewall-cmd", "--state"], timeout=3.0)
+        result = _run(["systemctl", "is-active", "firewalld"], timeout=3.0)
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return result.returncode == 0 and "running" in (result.stdout + result.stderr).lower()
+    return result.returncode == 0 and result.stdout.strip() == "active"
+
+
+_FIREWALL_AUTH_TIMEOUT = 60.0
+
+_WFD_FIREWALL_ZONE = "nm-shared"
+
+def _print_firewall_manual_hint(port: int, reason: str) -> None:
+    print(
+        f"[FluxCast WFD] Could not open firewalld port {port}/tcp automatically "
+        f"({reason}).\n"
+        "  Open it once yourself, then re-run FluxCast:\n"
+        f"    sudo firewall-cmd --permanent --zone={_WFD_FIREWALL_ZONE} --add-port={port}/tcp "
+        "&& sudo firewall-cmd --reload\n"
+        "  or pass --wfd-no-firewall if you manage the firewall yourself."
+    )
 
 
 def _open_wfd_firewall_port(port: int) -> bool:
     """
-    firewalld drops the transient ``p2p-wlanX`` interface into the default zone,
-    where the RTSP port is closed, so the sink's connection back to us is silently
-    dropped and the session never starts. ISSUE #53
-
     Runtime-only (no ``--permanent``): cleared on reload/reboot, and removed on
     exit. Returns True only if WE opened it, so the caller knows to undo it; a
     port the user already had open is left untouched.
     """
     if not _firewalld_active():
         return False
+    print(f"[FluxCast WFD] Opening firewalld port {port}/tcp ({_WFD_FIREWALL_ZONE} zone) "
+          "for this session; approve the authorization prompt if one appears.")
     try:
-        if _run(["firewall-cmd", f"--query-port={port}/tcp"], timeout=3.0).returncode == 0:
-            return False  # already open, leave the user's setup exactly as-is
-        result = _run(["firewall-cmd", f"--add-port={port}/tcp"], timeout=5.0)
+        result = _run(["firewall-cmd", f"--zone={_WFD_FIREWALL_ZONE}",
+                       f"--add-port={port}/tcp"],
+                      timeout=_FIREWALL_AUTH_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        print(f"[FluxCast WFD] Note: could not adjust firewalld for port {port}/tcp "
-              f"({exc}); if the TV can't connect, open it manually or stop firewalld.")
+        _print_firewall_manual_hint(port, f"authorization did not complete: {exc}")
         return False
-    if result.returncode == 0:
-        print(f"[FluxCast WFD] Opened firewalld port {port}/tcp for this session "
-              "(removed on exit).")
-        return True
-    print(f"[FluxCast WFD] Note: firewall-cmd could not open {port}/tcp: "
-          f"{(result.stdout + result.stderr).strip()}")
-    return False
+    output = result.stdout + result.stderr
+    if result.returncode != 0:
+        _print_firewall_manual_hint(port, output.strip() or "firewall-cmd refused the request")
+        return False
+    if "ALREADY_ENABLED" in output.upper():
+        return False  # user already had it open; leave it exactly as-is
+    print(f"[FluxCast WFD] Opened firewalld port {port}/tcp for this session "
+          "(removed on exit).")
+    return True
 
 
 def _close_wfd_firewall_port(port: int) -> None:
     """Undo _open_wfd_firewall_port (best-effort)."""
     try:
-        _run(["firewall-cmd", f"--remove-port={port}/tcp"], timeout=5.0)
+        _run(["firewall-cmd", f"--zone={_WFD_FIREWALL_ZONE}",
+              f"--remove-port={port}/tcp"], timeout=15.0)
         print(f"[FluxCast WFD] Closed firewalld port {port}/tcp.")
     except (OSError, subprocess.TimeoutExpired):
         pass
@@ -3352,11 +3367,6 @@ def start_experimental_backend(args) -> None:
         except Exception:
             pass
         rtsp.start()
-        # firewalld parks the transient p2p-wlanX interface in the default zone,
-        # which blocks the sink's inbound RTSP connection. Open the port for the
-        # session (no-op without firewalld; skip with --wfd-no-firewall).
-        if not getattr(args, "wfd_no_firewall", False):
-            firewall_opened = _open_wfd_firewall_port(rtsp_port)
         active_path = _connect_peer(
             device_path,
             peer,
@@ -3364,6 +3374,9 @@ def start_experimental_backend(args) -> None:
         )
         connected = True
         _wait_for_nm_activation(active_path)
+
+        if not getattr(args, "wfd_no_firewall", False):
+            firewall_opened = _open_wfd_firewall_port(rtsp_port)
 
         # Active probe for newer TVs (Samsung 2024++, some LGs)
         # It runs in a background thread to not block the main loop.

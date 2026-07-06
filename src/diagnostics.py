@@ -451,35 +451,25 @@ def _firewalld_check() -> Optional[Check]:
         return None
 
     try:
-        state = _run(["firewall-cmd", "--state"], timeout=3.0)
+        state = _run(["systemctl", "is-active", "firewalld"], timeout=3.0)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return Check("firewall (firewalld)", STATUS_WARN, "could not query firewalld state", str(exc))
 
-    if state.returncode != 0 or "running" not in (state.stdout + state.stderr).lower():
+    if state.stdout.strip() != "active":
         return Check(
             "firewall (firewalld)",
             STATUS_OK,
             "firewalld is not running; port not blocked",
-            (state.stdout + state.stderr).strip(),
+            state.stdout.strip(),
         )
 
-    try:
-        query = _run(["firewall-cmd", "--query-port", f"{WFD_RTSP_PORT}/tcp"], timeout=3.0)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return Check("firewall (firewalld)", STATUS_WARN, "could not query firewalld port", str(exc))
-
-    if query.returncode == 0 and "yes" in query.stdout.lower():
-        return Check(
-            "firewall (firewalld)",
-            STATUS_OK,
-            f"firewalld is running and allows port {WFD_RTSP_PORT}",
-            query.stdout.strip(),
-        )
+    # Don't probe the port here: `firewall-cmd --query-port` can prompt for auth, and
+    # FluxCast opens the port automatically for the session anyway.
     return Check(
         "firewall (firewalld)",
         STATUS_WARN,
-        f"firewalld is running but port {WFD_RTSP_PORT} is not allowed",
-        f"open it with: sudo firewall-cmd --add-port={WFD_RTSP_PORT}/tcp --permanent && sudo firewall-cmd --reload",
+        f"firewalld is running; FluxCast opens port {WFD_RTSP_PORT}/tcp for the WFD session",
+        f"if the TV can't connect, open it yourself: sudo firewall-cmd --add-port={WFD_RTSP_PORT}/tcp --permanent && sudo firewall-cmd --reload",
     )
 
 
