@@ -448,7 +448,7 @@ def _build_menu():
             wfd_sub = pystray.Menu(pystray.MenuItem("Scanning…", None, enabled=False))
         else:
             wfd_sub = pystray.Menu(pystray.MenuItem("No WFD devices found", None, enabled=False))
-        wfd_label = "Cast via Miracast (WFD, portal dialog)" if wfd_via_portal else "Cast via Miracast (WFD)"
+        wfd_label = "Cast via Miracast (WFD, portal dialog)   " if wfd_via_portal else "Cast via Miracast (WFD)"
         items.append(pystray.MenuItem(wfd_label, wfd_sub))
 
         if dlna:
