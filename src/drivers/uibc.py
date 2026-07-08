@@ -186,6 +186,14 @@ _SYN_REPORT = 0x00
 _ABS_X, _ABS_Y = 0x00, 0x01
 _BTN_LEFT, _BTN_TOUCH = 0x110, 0x14A
 _ABS_CNT = 0x40
+# Multitouch (protocol B) axes + direct-device property, so the compositor treats
+# us as a real touchscreen (native touch, swipe-scroll in touch-aware apps) instead
+# of a "relative" mouse.
+_ABS_MT_SLOT = 0x2F
+_ABS_MT_POSITION_X = 0x35
+_ABS_MT_POSITION_Y = 0x36
+_ABS_MT_TRACKING_ID = 0x39
+_INPUT_PROP_DIRECT = 0x01
 
 _IOC_WRITE = 1
 
@@ -205,17 +213,20 @@ def _iow(type_ch: str, nr: int, size: int) -> int:
 _UI_SET_EVBIT = _iow("U", 100, ctypes.sizeof(ctypes.c_int))
 _UI_SET_KEYBIT = _iow("U", 101, ctypes.sizeof(ctypes.c_int))
 _UI_SET_ABSBIT = _iow("U", 103, ctypes.sizeof(ctypes.c_int))
+_UI_SET_PROPBIT = _iow("U", 110, ctypes.sizeof(ctypes.c_int))
 _UI_DEV_CREATE = _io("U", 1)
 _UI_DEV_DESTROY = _io("U", 2)
 
 
 class UinputPointer:
+# Virtual single-touch touchscreen (uinput multitouch protocol B)
     def __init__(self, screen_w: int, screen_h: int):
         self._w = max(1, screen_w)
         self._h = max(1, screen_h)
         self._fd: Optional[int] = None
         self.available = False
         self._pressed = False
+        self._tracking_id = 0
 
     def open(self) -> bool:
         try:
@@ -229,23 +240,27 @@ class UinputPointer:
             fcntl.ioctl(fd, _UI_SET_EVBIT, _EV_SYN)
             fcntl.ioctl(fd, _UI_SET_EVBIT, _EV_KEY)
             fcntl.ioctl(fd, _UI_SET_EVBIT, _EV_ABS)
-            for key in (_BTN_LEFT, _BTN_TOUCH):
-                fcntl.ioctl(fd, _UI_SET_KEYBIT, key)
-            for axis in (_ABS_X, _ABS_Y):
+            fcntl.ioctl(fd, _UI_SET_KEYBIT, _BTN_TOUCH)
+            for axis in (_ABS_X, _ABS_Y, _ABS_MT_SLOT, _ABS_MT_POSITION_X,
+                         _ABS_MT_POSITION_Y, _ABS_MT_TRACKING_ID):
                 fcntl.ioctl(fd, _UI_SET_ABSBIT, axis)
+            # Mark it a direct/touchscreen device (NOT a relative mouse).
+            fcntl.ioctl(fd, _UI_SET_PROPBIT, _INPUT_PROP_DIRECT)
 
             absmin = [0] * _ABS_CNT
             absmax = [0] * _ABS_CNT
             absfuzz = [0] * _ABS_CNT
             absflat = [0] * _ABS_CNT
-            absmax[_ABS_X] = self._w - 1
-            absmax[_ABS_Y] = self._h - 1
+            absmax[_ABS_X] = absmax[_ABS_MT_POSITION_X] = self._w - 1
+            absmax[_ABS_Y] = absmax[_ABS_MT_POSITION_Y] = self._h - 1
+            absmax[_ABS_MT_SLOT] = 9            # up to 10 simultaneous contacts
+            absmax[_ABS_MT_TRACKING_ID] = 0xFFFF
 
             # struct uinput_user_dev: name[80], input_id{4 x u16}, ff_effects_max(u32),
             # then absmax/absmin/absfuzz/absflat each [ABS_CNT] s32.
             dev = struct.pack(
                 "<80s4HI",
-                b"FluxCast UIBC pointer",
+                b"FluxCast UIBC touchscreen",
                 0x03, 0x1209, 0x0001, 0x0001,  # bustype=USB, vendor, product, version
                 0,
             )
@@ -264,7 +279,7 @@ class UinputPointer:
         self._fd = fd
         self.available = True
         time.sleep(0.1)  # let udev create the device node
-        print("[FluxCast UIBC] Virtual pointer ready; sink input will be injected.")
+        print("[FluxCast UIBC] Virtual touchscreen ready; sink input will be injected.")
         return True
 
     def _emit(self, etype: int, code: int, value: int) -> None:
@@ -280,31 +295,38 @@ class UinputPointer:
     def _sync(self) -> None:
         self._emit(_EV_SYN, _SYN_REPORT, 0)
 
+    def _emit_pos(self, x: int, y: int) -> None:
+        self._emit(_EV_ABS, _ABS_MT_POSITION_X, x)
+        self._emit(_EV_ABS, _ABS_MT_POSITION_Y, y)
+        # legacy single-touch axes too, for the compositor`s touch -> pointer emulation
+        self._emit(_EV_ABS, _ABS_X, x)
+        self._emit(_EV_ABS, _ABS_Y, y)
+
     def move(self, x: int, y: int) -> None:
         if not self.available:
             return
-        self._emit(_EV_ABS, _ABS_X, x)
-        self._emit(_EV_ABS, _ABS_Y, y)
+        self._emit(_EV_ABS, _ABS_MT_SLOT, 0)
+        self._emit_pos(x, y)
         self._sync()
 
     def press(self, x: int, y: int) -> None:
         if not self.available:
             return
-        self._emit(_EV_ABS, _ABS_X, x)
-        self._emit(_EV_ABS, _ABS_Y, y)
+        self._emit(_EV_ABS, _ABS_MT_SLOT, 0)
         if not self._pressed:
+            self._tracking_id = self._tracking_id % 0xFFFF + 1
+            self._emit(_EV_ABS, _ABS_MT_TRACKING_ID, self._tracking_id)
             self._emit(_EV_KEY, _BTN_TOUCH, 1)
-            self._emit(_EV_KEY, _BTN_LEFT, 1)
             self._pressed = True
+        self._emit_pos(x, y)
         self._sync()
 
     def release(self, x: int, y: int) -> None:
         if not self.available:
             return
-        self._emit(_EV_ABS, _ABS_X, x)
-        self._emit(_EV_ABS, _ABS_Y, y)
+        self._emit(_EV_ABS, _ABS_MT_SLOT, 0)
         if self._pressed:
-            self._emit(_EV_KEY, _BTN_LEFT, 0)
+            self._emit(_EV_ABS, _ABS_MT_TRACKING_ID, -1)
             self._emit(_EV_KEY, _BTN_TOUCH, 0)
             self._pressed = False
         self._sync()
