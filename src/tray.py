@@ -9,6 +9,8 @@ os.environ.setdefault("PYSTRAY_BACKEND", "appindicator")
 from PIL import Image
 import pystray
 
+from tray_config import load_profile
+
 _BASE = os.path.dirname(os.path.abspath(__file__))
 _ICON_PATH = os.path.join(_BASE, "assets", "flcast_logo_512x512.png")
 _MAIN = os.path.join(_BASE, "main.py")
@@ -243,11 +245,16 @@ def _rescan_all() -> None:
 
 # ── cast actions ──────────────────────────────────────────────────────────────
 
+def _profile_args(mode: str) -> list[str]:
+    return load_profile(mode, warn=lambda message: _log(f"config warning: {message}"))
+
+
 def _start_wfd(peer, monitor) -> None:
     cmd = [_PY, _MAIN, "--protocol", "wfd", "--wfd-peer", peer.address]
     # On non-Hyprland Wayland the WFD backend uses xdg-portal and shows its
     if monitor is not None and not _wfd_uses_portal():
         cmd += ["--monitor", monitor.name]
+    cmd += _profile_args("wfd")
     _launch(cmd, peer.name or peer.address)
 
 
@@ -255,6 +262,7 @@ def _start_dlna(device, monitor) -> None:
     cmd = [_PY, _MAIN, "--protocol", "dlna", "--device-name", device.friendly_name]
     if monitor is not None:
         cmd += ["--monitor", monitor.name]
+    cmd += _profile_args("dlna")
     _launch(cmd, device.friendly_name)
 
 
@@ -263,6 +271,7 @@ def _start_cast(device, monitor) -> None:
     cmd = [_PY, _MAIN, "--protocol", "cast", "--device-name", name]
     if monitor is not None:
         cmd += ["--monitor", monitor.name]
+    cmd += _profile_args("cast")
     _launch(cmd, name)
 
 
