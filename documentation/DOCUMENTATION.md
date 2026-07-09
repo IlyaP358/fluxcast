@@ -92,6 +92,51 @@ python3 src/main.py --protocol cast
   - Requires `libappindicator` (Hyprland/KDE) or `gnome-shell-extension-appindicator` (GNOME).
   - On non-Hyprland Wayland (KDE, GNOME), WFD capture uses the xdg-desktop-portal screen picker dialog.
 
+#### Per-mode tray configuration
+
+Tray launches can override stream defaults with an INI file at
+`$XDG_CONFIG_HOME/fluxcast/config`, or `~/.config/fluxcast/config` when
+`XDG_CONFIG_HOME` is not set. This file affects only the tray; direct CLI
+commands keep their normal behavior.
+
+```ini
+[wfd]
+output-res = 1920x1080
+fps = 60
+bitrate = 8M
+wfd-no-audio = false
+
+[dlna]
+transport = hls
+fps = 30
+bitrate = 4M
+
+[cast]
+bitrate = 4M
+```
+
+All modes accept `output-res`, `fps`, and `bitrate`. The `dlna` and `cast`
+sections also accept `host`, `port`, `discover-timeout`, `transport`, and
+`capture-backend`. The `wfd` section accepts these WFD stream/session options:
+
+- `wfd-test-pattern`
+- `wfd-media-pipeline`
+- `wfd-capture-backend`
+- `wfd-latency-log`
+- `wfd-no-audio`
+- `wfd-audio-device`
+- `wfd-rtsp-port`
+- `wfd-no-firewall`
+- `wfd-rtp-source-port`
+- `wfd-interface`
+- `wfd-timeout`
+
+Boolean flags accept `true` or `false` (also `yes`/`no`, `on`/`off`, and
+`1`/`0`). A missing file, an empty file, or an omitted key keeps the built-in
+default. Invalid values and unknown keys are logged and ignored. Device, peer,
+monitor, and protocol selection remain controlled by the tray and cannot be
+overridden in this file.
+
 ### DLNA/Cast
 
 - `--host`, `--port`
