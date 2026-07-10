@@ -62,12 +62,14 @@ _GENERIC_BODY_HEADER_LEN = 3  # input-type(1) + length(2)
 def build_uibc_capability(port: int) -> str:
     """Value for the `wfd_uibc_capability` RTSP parameter (M3/M4).
 
-    Advertises the GENERIC category with mouse + single-touch and the TCP port
-    the sink should connect to for input.
+    Advertises the GENERIC category with mouse, single-touch and keyboard, plus
+    the TCP port the sink should connect to for input. The sink only sends input
+    types present here, so keyboard must be advertised to receive key events
+    (they are parsed and logged; injection is a follow-up).
     """
     return (
         "input_category_list=GENERIC;"
-        "generic_cap_list=Mouse, SingleTouch;"
+        "generic_cap_list=Keyboard, Mouse, SingleTouch;"
         "hidc_cap_list=none;"
         f"port={port}"
     )
