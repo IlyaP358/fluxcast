@@ -89,6 +89,7 @@ class KeyEvent:
     kind: int          # GENERIC_KEY_DOWN / _UP
     code1: int
     code2: int
+    raw: bytes = b""   # full body bytes, for inspecting modifier encoding
 
 
 def parse_packets(buf: bytes) -> tuple[list, int]:
@@ -150,7 +151,7 @@ def _parse_generic_body(packet: bytes, start: int, events: list) -> None:
         if len(body) >= 5:
             code1 = (body[1] << 8) | body[2]
             code2 = (body[3] << 8) | body[4]
-            events.append(KeyEvent(type_id, code1, code2))
+            events.append(KeyEvent(type_id, code1, code2, bytes(body[:16])))
     # zoom/scroll/rotate ignored for now =/
 
 
@@ -446,9 +447,9 @@ class UIBCServer:
                 self._injector.move(x, y)
         elif isinstance(ev, KeyEvent):
             # parsed but not injected =/
-            if verbose:
-                print(f"[FluxCast UIBC] #{self._dbg_count} {name} "
-                      f"codes=({ev.code1},{ev.code2}) (not injected in v1)")
+            print(f"[FluxCast UIBC] #{self._dbg_count} {name} "
+                  f"codes=({ev.code1},{ev.code2}) raw=[{ev.raw.hex(' ')}] "
+                  f"(not injected in v1)")
 
     def stop(self) -> None:
         self._running = False
