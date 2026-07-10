@@ -128,6 +128,8 @@ _MODE_OPTIONS = {
     "cast": _DLNA_CAST_OPTIONS,
 }
 
+_TRAY_ONLY_OPTIONS = {"monitor"}
+
 
 def get_config_path() -> Path:
     """Return the XDG-compliant tray config path."""
@@ -138,6 +140,45 @@ def get_config_path() -> Path:
 
 def _default_warning(message: str) -> None:
     print(f"[FluxCast tray config] WARNING: {message}", file=sys.stderr)
+
+
+def _read_section(
+    mode: str,
+    path: Path,
+    warning: WarningHandler,
+) -> dict[str, str] | None:
+    """Return the raw ``key: value`` items for ``[mode]``.
+
+    Returns ``None`` (meaning "no config to apply") for a missing file, an
+    empty file, an unreadable or unparseable file, or an absent section.
+    """
+    try:
+        contents = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        warning(f"could not read {path}: {exc}; using built-in defaults")
+        return None
+
+    if not contents.strip():
+        return None
+
+    # Treat [DEFAULT] like an ordinary, unused section: profiles must not
+    # inherit options because the config contract is explicitly per-mode.
+    parser = configparser.ConfigParser(
+        interpolation=None,
+        default_section="__fluxcast_defaults_are_not_supported__",
+    )
+    try:
+        parser.read_string(contents, source=str(path))
+    except configparser.Error as exc:
+        warning(f"could not parse {path}: {exc}; using built-in defaults")
+        return None
+
+    if not parser.has_section(mode):
+        return None
+
+    return dict(parser.items(mode))
 
 
 def load_profile(
@@ -157,35 +198,15 @@ def load_profile(
     path = Path(config_path) if config_path is not None else get_config_path()
     warning = warn if warn is not None else _default_warning
 
-    try:
-        contents = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return []
-    except OSError as exc:
-        warning(f"could not read {path}: {exc}; using built-in defaults")
-        return []
-
-    if not contents.strip():
-        return []
-
-    # Treat [DEFAULT] like an ordinary, unused section: profiles must not
-    # inherit options because the config contract is explicitly per-mode.
-    parser = configparser.ConfigParser(
-        interpolation=None,
-        default_section="__fluxcast_defaults_are_not_supported__",
-    )
-    try:
-        parser.read_string(contents, source=str(path))
-    except configparser.Error as exc:
-        warning(f"could not parse {path}: {exc}; using built-in defaults")
-        return []
-
-    if not parser.has_section(mode):
+    section = _read_section(mode, path, warning)
+    if section is None:
         return []
 
     args: list[str] = []
     options = _MODE_OPTIONS[mode]
-    for name, raw_value in parser.items(mode):
+    for name, raw_value in section.items():
+        if name in _TRAY_ONLY_OPTIONS:
+            continue
         option = options.get(name)
         if option is None:
             warning(f"unknown option '{name}' in [{mode}]; ignoring it")
@@ -207,3 +228,34 @@ def load_profile(
             args.extend((f"--{name}", str(value)))
 
     return args
+
+
+def load_preferred_monitor(
+    mode: str,
+    *,
+    config_path: str | os.PathLike[str] | None = None,
+    warn: WarningHandler | None = None,
+) -> str | None:
+    """Return the preferred output name from ``[mode]``'s ``monitor`` key.
+    """
+    if mode not in _MODE_OPTIONS:
+        raise ValueError(f"unsupported tray mode: {mode}")
+
+    path = Path(config_path) if config_path is not None else get_config_path()
+    warning = warn if warn is not None else _default_warning
+
+    section = _read_section(mode, path, warning)
+    if section is None:
+        return None
+
+    raw = section.get("monitor")
+    if raw is None:
+        return None
+    try:
+        return _text(raw)
+    except ValueError as exc:
+        warning(
+            f"invalid value for 'monitor' in [{mode}]: {raw!r} "
+            f"({exc}); using the tray selection"
+        )
+        return None

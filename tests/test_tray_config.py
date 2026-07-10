@@ -137,6 +137,67 @@ wfd-peer = living-room-tv
         self.assertEqual(len(warnings), 1)
         self.assertIn("could not parse", warnings[0])
 
+    def test_monitor_key_is_not_forwarded_or_warned(self):
+        self._write(
+            """
+[wfd]
+fps = 60
+monitor = HDMI-A-1
+"""
+        )
+        warnings = []
+
+        args = tray_config.load_profile(
+            "wfd", config_path=self.config_path, warn=warnings.append
+        )
+
+        self.assertEqual(args, ["--fps", "60"])
+        self.assertEqual(warnings, [])
+
+    def test_load_preferred_monitor_reads_per_mode(self):
+        self._write(
+            """
+[wfd]
+monitor = HDMI-A-1
+
+[dlna]
+monitor = eDP-1
+"""
+        )
+
+        self.assertEqual(
+            tray_config.load_preferred_monitor("wfd", config_path=self.config_path),
+            "HDMI-A-1",
+        )
+        self.assertEqual(
+            tray_config.load_preferred_monitor("dlna", config_path=self.config_path),
+            "eDP-1",
+        )
+        self.assertIsNone(
+            tray_config.load_preferred_monitor("cast", config_path=self.config_path),
+        )
+
+    def test_load_preferred_monitor_missing_and_invalid(self):
+        # No file at all.
+        self.assertIsNone(
+            tray_config.load_preferred_monitor("wfd", config_path=self.config_path),
+        )
+        # Present but no monitor key.
+        self._write("[wfd]\nfps = 60\n")
+        self.assertIsNone(
+            tray_config.load_preferred_monitor("wfd", config_path=self.config_path),
+        )
+        # Invalid value (leading dash) warns and falls back to None.
+        self._write("[wfd]\nmonitor = -bad\n")
+        warnings = []
+        self.assertIsNone(
+            tray_config.load_preferred_monitor(
+                "wfd", config_path=self.config_path, warn=warnings.append
+            ),
+        )
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("invalid value for 'monitor'", warnings[0])
+
     def test_uses_xdg_config_home(self):
         with mock.patch.dict(
             os.environ, {"XDG_CONFIG_HOME": "/tmp/fluxcast-test-config"}

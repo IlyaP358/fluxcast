@@ -104,6 +104,7 @@ commands keep their normal behavior.
 output-res = 1920x1080
 fps = 60
 bitrate = 8M
+monitor = HDMI-A-1
 wfd-no-audio = false
 
 [dlna]
@@ -115,7 +116,7 @@ bitrate = 4M
 bitrate = 4M
 ```
 
-All modes accept `output-res`, `fps`, and `bitrate`. The `dlna` and `cast`
+All modes accept `output-res`, `fps`, `bitrate`, and `monitor`. The `dlna` and `cast`
 sections also accept `host`, `port`, `discover-timeout`, `transport`, and
 `capture-backend`. The `wfd` section accepts these WFD stream/session options:
 
@@ -131,11 +132,14 @@ sections also accept `host`, `port`, `discover-timeout`, `transport`, and
 - `wfd-interface`
 - `wfd-timeout`
 
+`monitor` preselects the capture output for that mode by its name (as shown by
+`wlr-randr`/`xrandr`, e.g. `HDMI-A-1`), so tray launches skip the monitor
+picker. If omitted, the tray's own monitor selection is used.
+
 Boolean flags accept `true` or `false` (also `yes`/`no`, `on`/`off`, and
 `1`/`0`). A missing file, an empty file, or an omitted key keeps the built-in
 default. Invalid values and unknown keys are logged and ignored. Device, peer,
-monitor, and protocol selection remain controlled by the tray and cannot be
-overridden in this file.
+and protocol selection remain controlled by the tray and cannot be set here.
 
 ### DLNA/Cast
 
