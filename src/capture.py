@@ -18,6 +18,7 @@ class Monitor(NamedTuple):
     x: int # x offset within the combined framebuffer
     y: int
     refresh: float # Hz
+    primary: bool = False # xrandr 'primary' output
 
 
 class SessionInfo(NamedTuple):
@@ -161,12 +162,13 @@ def _parse_xrandr(display: str) -> list:
     lines = result.stdout.splitlines()
     for i, line in enumerate(lines):
         m = re.match(
-            r"^(\S+)\s+connected\s+(?:primary\s+)?(\d+)x(\d+)\+(\d+)\+(\d+)",
+            r"^(\S+)\s+connected\s+(primary\s+)?(\d+)x(\d+)\+(\d+)\+(\d+)",
             line,
         )
         if not m:
             continue
-        name, w, h, x, y = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5))
+        primary = m.group(2) is not None
+        name, w, h, x, y = m.group(1), int(m.group(3)), int(m.group(4)), int(m.group(5)), int(m.group(6))
         refresh = 0.0
         if i + 1 < len(lines):
             rm = re.search(r"([\d.]+)\*", lines[i + 1])
@@ -174,7 +176,7 @@ def _parse_xrandr(display: str) -> list:
                 refresh = float(rm.group(1))
         monitors.append(Monitor(
             display=display, name=name,
-            width=w, height=h, x=x, y=y, refresh=refresh,
+            width=w, height=h, x=x, y=y, refresh=refresh, primary=primary,
         ))
     return monitors
 
@@ -194,22 +196,20 @@ def prompt_monitor() -> Monitor:
         return Monitor(display=":0", name="(unknown)", width=1920, height=1080,
                        x=0, y=0, refresh=60.0)
 
-    current_display = os.environ.get("DISPLAY", "")
+    # Default to the primary output (falls back to the first if none is marked).
+    default_idx = next((i for i, mon in enumerate(monitors) if mon.primary), 0)
 
     print("\n[FluxCast] Available monitors to capture:")
     print(f"  {'#':<4} {'Monitor':<12} {'Display':<8} "
           f"{'Resolution':<14} {'Position':<14} {'Refresh'}")
     print(f"  {'-'*4} {'-'*12} {'-'*8} {'-'*14} {'-'*14} {'-'*8}")
 
-    default_idx = 0
     for i, mon in enumerate(monitors):
         pos = f"{mon.x},{mon.y}"
         hz = f"{mon.refresh:.1f} Hz" if mon.refresh else "—"
-        current = " ← active" if mon.display == current_display and i == 0 else ""
+        active = " ← active" if i == default_idx else ""
         print(f"  [{i}]  {mon.name:<12} {mon.display:<8} "
-              f"{mon.width}x{mon.height:<8} {pos:<14} {hz}{current}")
-        if mon.display == current_display:
-            default_idx = i
+              f"{mon.width}x{mon.height:<8} {pos:<14} {hz}{active}")
 
     print()
     raw = input(f"Select monitor [{default_idx}]: ").strip()
@@ -217,8 +217,10 @@ def prompt_monitor() -> Monitor:
         return monitors[default_idx]
     try:
         idx = int(raw)
+        if not 0 <= idx < len(monitors):
+            raise ValueError
         return monitors[idx]
-    except (ValueError, IndexError):
+    except ValueError:
         print(f"[FluxCast] Invalid choice, using monitor {default_idx}.")
         return monitors[default_idx]
 
