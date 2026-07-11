@@ -60,13 +60,8 @@ _GENERIC_BODY_HEADER_LEN = 3  # input-type(1) + length(2)
 
 
 def build_uibc_capability(port: int) -> str:
-    """Value for the `wfd_uibc_capability` RTSP parameter (M3/M4).
-
-    Advertises the GENERIC category with mouse, single-touch and keyboard, plus
-    the TCP port the sink should connect to for input. The sink only sends input
-    types present here, so keyboard must be advertised to receive key events
-    (they are parsed and logged; injection is a follow-up).
-    """
+    """`wfd_uibc_capability` value (M3/M4). The sink only sends input types
+    listed here, so keyboard must be advertised to receive key events."""
     return (
         "input_category_list=GENERIC;"
         "generic_cap_list=Keyboard, Mouse, SingleTouch;"
@@ -158,26 +153,24 @@ def _parse_generic_body(packet: bytes, start: int, events: list) -> None:
 # ── coordinate mapping ──────────────────────────────────────────────────────
 
 class CoordinateMapper:
-    """Maps sink-space pixels (negotiated resolution) to source screen pixels.
+    """Sink pixels -> captured monitor's LOCAL pixels [0, mon_w) x [0, mon_h).
 
-    The sink reports coordinates in the resolution negotiated (e.g. 1920x1080).
-    The captured monitor may be a different size/offset, so scale then translate.
+    Local, not desktop-global: the injector is a per-monitor touchscreen, so
+    adding the desktop offset overflows its range and clamps to the edge (the
+    "stuck at the edge" bug on offset/virtual monitors).
     """
 
-    def __init__(self, sink_w: int, sink_h: int,
-                 mon_w: int, mon_h: int, mon_x: int = 0, mon_y: int = 0):
+    def __init__(self, sink_w: int, sink_h: int, mon_w: int, mon_h: int):
         self._sink_w = max(1, sink_w)
         self._sink_h = max(1, sink_h)
         self._mon_w = mon_w
         self._mon_h = mon_h
-        self._mon_x = mon_x
-        self._mon_y = mon_y
 
     def to_screen(self, x: int, y: int) -> tuple[int, int]:
-        sx = self._mon_x + round(x * self._mon_w / self._sink_w)
-        sy = self._mon_y + round(y * self._mon_h / self._sink_h)
-        sx = min(max(sx, self._mon_x), self._mon_x + self._mon_w - 1)
-        sy = min(max(sy, self._mon_y), self._mon_y + self._mon_h - 1)
+        sx = round(x * self._mon_w / self._sink_w)
+        sy = round(y * self._mon_h / self._sink_h)
+        sx = min(max(sx, 0), self._mon_w - 1)
+        sy = min(max(sy, 0), self._mon_h - 1)
         return sx, sy
 
 
@@ -349,7 +342,7 @@ class UinputPointer:
 
 
 # ── keyboard injection (base characters only) ───────────────────────────────
-#Injected on a US  layout, so non-US layouts may map some keys differently
+# Base character -> Linux key code (US layout). Non-US layouts may mistype.
 _CHAR_KEYCODES = {
     "1": 2, "2": 3, "3": 4, "4": 5, "5": 6, "6": 7, "7": 8, "8": 9, "9": 10, "0": 11,
     "-": 12, "=": 13,
@@ -362,7 +355,7 @@ _CHAR_KEYCODES = {
     ",": 51, ".": 52, "/": 53,
     " ": 57,
 }
-# Enter=CR, Backspace=BS, Tab=HT). LF is mapped to Enter too, just in case.
+# Control codes: Backspace, Tab, Enter (CR/LF).
 _CONTROL_KEYCODES = {
     8: 14,    # \b -> KEY_BACKSPACE
     9: 15,    # \t -> KEY_TAB
@@ -546,7 +539,7 @@ class UIBCServer:
             if verbose:
                 off = "" if self._injector.available else "  (uinput off)"
                 print(f"[FluxCast UIBC] #{self._dbg_count} {name} "
-                      f"sink=({ev.x},{ev.y}) -> screen=({x},{y}){off}")
+                      f"sink=({ev.x},{ev.y}) -> local=({x},{y}){off}")
             if ev.kind == GENERIC_TOUCH_DOWN:
                 self._injector.press(x, y)
             elif ev.kind == GENERIC_TOUCH_UP:
@@ -592,7 +585,11 @@ def start_uibc(port: int, sink_w: int, sink_h: int,
         injector.open()  # may be a no-op without permissions, that's fine
         keyboard = UinputKeyboard()
         keyboard.open()  # same: no-op without permissions
-        mapper = CoordinateMapper(sink_w, sink_h, mon_w, mon_h, mon_x, mon_y)
+        mapper = CoordinateMapper(sink_w, sink_h, mon_w, mon_h)
+        # Offset is logged for reference only, not applied (see CoordinateMapper).
+        print(f"[FluxCast UIBC] input mapping: sink {sink_w}x{sink_h} -> "
+              f"monitor-local 0..{mon_w - 1} x 0..{mon_h - 1} "
+              f"(desktop offset +{mon_x}+{mon_y}, not applied)")
         server = UIBCServer(port, mapper, injector, keyboard)
         server.start()
         return server

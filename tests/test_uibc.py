@@ -90,6 +90,33 @@ class KeyPacketParseTest(unittest.TestCase):
         self.assertEqual((events[0].x, events[0].y), (0x0102, 0x0304))
 
 
+class CoordinateMapperTest(unittest.TestCase):
+    def test_physical_case_unchanged(self):
+        m = uibc.CoordinateMapper(1280, 720, 1920, 1200)
+        self.assertEqual(m.to_screen(575, 204), (862, 340))
+        self.assertEqual(m.to_screen(0, 0), (0, 0))
+
+    def test_never_exceeds_monitor_bounds(self):
+        cases = [
+            (1280, 720, 1920, 1200),   # upscale
+            (1920, 1080, 1366, 768),   # downscale
+            (1000, 1000, 100, 100),    # heavy downscale (round-up at top edge)
+            (800, 600, 3840, 2160),    # heavy upscale
+        ]
+        for sink_w, sink_h, mon_w, mon_h in cases:
+            m = uibc.CoordinateMapper(sink_w, sink_h, mon_w, mon_h)
+            for sx in (-5, 0, sink_w // 2, sink_w - 1, sink_w, sink_w * 2):
+                for sy in (-5, 0, sink_h // 2, sink_h - 1, sink_h, sink_h * 2):
+                    x, y = m.to_screen(sx, sy)
+                    self.assertTrue(0 <= x <= mon_w - 1, (sink_w, mon_w, sx, x))
+                    self.assertTrue(0 <= y <= mon_h - 1, (sink_h, mon_h, sy, y))
+
+    def test_scales_across_full_range(self):
+        m = uibc.CoordinateMapper(1280, 720, 1920, 1200)
+        self.assertEqual(m.to_screen(0, 0), (0, 0))
+        self.assertEqual(m.to_screen(1279, 719), (1918, 1198))
+
+
 class CapabilityTest(unittest.TestCase):
     def test_advertises_keyboard(self):
         cap = build_uibc_capability(7239)
