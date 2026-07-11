@@ -348,6 +348,112 @@ class UinputPointer:
             self.available = False
 
 
+# ── keyboard injection (base characters only) ───────────────────────────────
+#Injected on a US  layout, so non-US layouts may map some keys differently
+_CHAR_KEYCODES = {
+    "1": 2, "2": 3, "3": 4, "4": 5, "5": 6, "6": 7, "7": 8, "8": 9, "9": 10, "0": 11,
+    "-": 12, "=": 13,
+    "q": 16, "w": 17, "e": 18, "r": 19, "t": 20, "y": 21, "u": 22, "i": 23, "o": 24, "p": 25,
+    "[": 26, "]": 27,
+    "a": 30, "s": 31, "d": 32, "f": 33, "g": 34, "h": 35, "j": 36, "k": 37, "l": 38,
+    ";": 39, "'": 40, "`": 41,
+    "\\": 43,
+    "z": 44, "x": 45, "c": 46, "v": 47, "b": 48, "n": 49, "m": 50,
+    ",": 51, ".": 52, "/": 53,
+    " ": 57,
+}
+# Enter=CR, Backspace=BS, Tab=HT). LF is mapped to Enter too, just in case.
+_CONTROL_KEYCODES = {
+    8: 14,    # \b -> KEY_BACKSPACE
+    9: 15,    # \t -> KEY_TAB
+    10: 28,   # \n -> KEY_ENTER
+    13: 28,   # \r -> KEY_ENTER
+}
+
+
+def _keycode_for(code1: int) -> Optional[int]:
+    """Map a sink key code (unicode / control) to a Linux key code, or None."""
+    if code1 in _CONTROL_KEYCODES:
+        return _CONTROL_KEYCODES[code1]
+    if 32 <= code1 <= 126:
+        ch = chr(code1)
+        return _CHAR_KEYCODES.get(ch) or _CHAR_KEYCODES.get(ch.lower())
+    return None
+
+
+class UinputKeyboard:
+    """Virtual keyboard (uinput) for UIBC base-character injection. """
+    def __init__(self):
+        self._fd: Optional[int] = None
+        self.available = False
+
+    def open(self) -> bool:
+        try:
+            fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as exc:
+            print(f"[FluxCast UIBC] uinput unavailable for keyboard ({exc}); "
+                  "keys will not be injected.")
+            return False
+        try:
+            fcntl.ioctl(fd, _UI_SET_EVBIT, _EV_SYN)
+            fcntl.ioctl(fd, _UI_SET_EVBIT, _EV_KEY)
+            for code in set(_CHAR_KEYCODES.values()) | set(_CONTROL_KEYCODES.values()):
+                fcntl.ioctl(fd, _UI_SET_KEYBIT, code)
+
+            # struct uinput_user_dev: name[80], input_id{4 x u16}, ff_effects_max,
+            # then the four ABS arrays (unused for a key-only device -> zeros).
+            dev = struct.pack(
+                "<80s4HI",
+                b"FluxCast UIBC keyboard",
+                0x03, 0x1209, 0x0002, 0x0001,  # bustype=USB, vendor, product, version
+                0,
+            )
+            zeros = [0] * _ABS_CNT
+            for _ in range(4):  # absmax, absmin, absfuzz, absflat
+                dev += struct.pack(f"<{_ABS_CNT}i", *zeros)
+            os.write(fd, dev)
+            fcntl.ioctl(fd, _UI_DEV_CREATE)
+        except OSError as exc:
+            print(f"[FluxCast UIBC] Could not set up uinput keyboard ({exc}); "
+                  "keys will not be injected.")
+            os.close(fd)
+            return False
+
+        self._fd = fd
+        self.available = True
+        time.sleep(0.1)  # let udev create the device node
+        print("[FluxCast UIBC] Virtual keyboard ready; sink keys will be injected.")
+        return True
+
+    def _emit(self, etype: int, code: int, value: int) -> None:
+        if self._fd is None:
+            return
+        ev = struct.pack("<qqHHi", 0, 0, etype, code, value)
+        try:
+            os.write(self._fd, ev)
+        except OSError:
+            pass
+
+    def key(self, keycode: int, pressed: bool) -> None:
+        if not self.available:
+            return
+        self._emit(_EV_KEY, keycode, 1 if pressed else 0)
+        self._emit(_EV_SYN, _SYN_REPORT, 0)
+
+    def close(self) -> None:
+        if self._fd is not None:
+            try:
+                fcntl.ioctl(self._fd, _UI_DEV_DESTROY)
+            except OSError:
+                pass
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+            self.available = False
+
+
 # ── TCP server ──────────────────────────────────────────────────────────────
 
 class UIBCServer:
@@ -357,10 +463,12 @@ class UIBCServer:
     port. Runs in a background thread; `stop()` tears EVERYTHING DOWN.
     """
 
-    def __init__(self, port: int, mapper: CoordinateMapper, injector: UinputPointer):
+    def __init__(self, port: int, mapper: CoordinateMapper, injector: UinputPointer,
+                 keyboard: "Optional[UinputKeyboard]" = None):
         self.port = port
         self._mapper = mapper
         self._injector = injector
+        self._keyboard = keyboard
         self._sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -446,10 +554,18 @@ class UIBCServer:
             elif ev.kind == GENERIC_TOUCH_MOVE:
                 self._injector.move(x, y)
         elif isinstance(ev, KeyEvent):
-            # parsed but not injected =/
+            # Base characters + enter/backspace/tab are injected; modifiers
+            # (blank codes) and unmapped chars are logged but not injected.
+            keycode = _keycode_for(ev.code1)
+            if keycode is None:
+                status = "no mapping"
+            elif self._keyboard is None or not self._keyboard.available:
+                status = "kb off"
+            else:
+                self._keyboard.key(keycode, ev.kind == GENERIC_KEY_DOWN)
+                status = "injected"
             print(f"[FluxCast UIBC] #{self._dbg_count} {name} "
-                  f"codes=({ev.code1},{ev.code2}) raw=[{ev.raw.hex(' ')}] "
-                  f"(not injected in v1)")
+                  f"codes=({ev.code1},{ev.code2}) raw=[{ev.raw.hex(' ')}] ({status})")
 
     def stop(self) -> None:
         self._running = False
@@ -460,6 +576,8 @@ class UIBCServer:
                 pass
             self._sock = None
         self._injector.close()
+        if self._keyboard is not None:
+            self._keyboard.close()
 
 
 def start_uibc(port: int, sink_w: int, sink_h: int,
@@ -471,9 +589,11 @@ def start_uibc(port: int, sink_w: int, sink_h: int,
     """
     try:
         injector = UinputPointer(mon_w, mon_h)
-        injector.open()  # may be a no-op without permissions; that's fine
+        injector.open()  # may be a no-op without permissions, that's fine
+        keyboard = UinputKeyboard()
+        keyboard.open()  # same: no-op without permissions
         mapper = CoordinateMapper(sink_w, sink_h, mon_w, mon_h, mon_x, mon_y)
-        server = UIBCServer(port, mapper, injector)
+        server = UIBCServer(port, mapper, injector, keyboard)
         server.start()
         return server
     except Exception as exc:
