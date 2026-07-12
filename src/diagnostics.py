@@ -1,5 +1,6 @@
 import json
 import importlib.util
+import ipaddress
 import os
 import platform
 import re
@@ -16,6 +17,7 @@ STATUS_SKIP = "skip"
 
 # RTSP port advertised in the WFD IEs; must reach the receiver for streaming.
 WFD_RTSP_PORT = 7236
+WFD_NETWORK = ipaddress.ip_network("192.168.49.0/24")
 
 
 @dataclass
@@ -492,6 +494,62 @@ def _firewall_check() -> Check:
     )
 
 
+def _network_conflict_check() -> Check:
+    """Warn when an existing route overlaps NetworkManager's WFD subnet."""
+    ip = shutil.which("ip")
+    if not ip:
+        return Check(
+            "WFD network conflict",
+            STATUS_SKIP,
+            "ip was not found",
+            f"cannot check for routes overlapping {WFD_NETWORK}",
+        )
+
+    try:
+        result = _run([ip, "-j", "route", "show", "table", "all"], timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return Check("WFD network conflict", STATUS_WARN, "could not inspect routes", str(exc))
+
+    if result.returncode != 0:
+        return Check(
+            "WFD network conflict",
+            STATUS_WARN,
+            "could not inspect routes",
+            (result.stderr or result.stdout).strip(),
+        )
+
+    try:
+        routes = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError) as exc:
+        return Check("WFD network conflict", STATUS_WARN, "could not parse routes", str(exc))
+
+    conflicts = []
+    for route in routes:
+        destination = route.get("dst")
+        if not destination or destination == "default":
+            continue
+        try:
+            network = ipaddress.ip_network(destination, strict=False)
+        except ValueError:
+            continue
+        if network.overlaps(WFD_NETWORK):
+            device = route.get("dev", "unknown interface")
+            conflicts.append(f"{network} via {device}")
+
+    if conflicts:
+        return Check(
+            "WFD network conflict",
+            STATUS_WARN,
+            f"existing route overlaps WFD subnet {WFD_NETWORK}",
+            "; ".join(conflicts),
+        )
+    return Check(
+        "WFD network conflict",
+        STATUS_OK,
+        f"no routes overlap WFD subnet {WFD_NETWORK}",
+    )
+
+
 def _python_check() -> Check:
     return Check(
         "python",
@@ -540,6 +598,7 @@ def run_diagnostics() -> DiagnosticReport:
         _iw_p2p_check(),
         _supplicant_capability_check(),
         _supplicant_wfd_check(),
+        _network_conflict_check(),
         _firewall_check(),
     ]
 

@@ -95,5 +95,33 @@ class FirewallCheckTest(unittest.TestCase):
         self.assertEqual(check.status, diagnostics.STATUS_WARN)
 
 
+class NetworkConflictCheckTest(unittest.TestCase):
+    def test_warns_when_existing_route_overlaps_wfd_subnet(self):
+        routes = '[{"dst":"192.168.0.0/16","dev":"tun0"}]'
+        with mock.patch("diagnostics.shutil.which", return_value="/usr/sbin/ip"), \
+                mock.patch("diagnostics._run", return_value=_completed(routes)):
+            check = diagnostics._network_conflict_check()
+
+        self.assertEqual(check.name, "WFD network conflict")
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("192.168.49.0/24", check.message)
+        self.assertIn("192.168.0.0/16", check.detail)
+        self.assertIn("tun0", check.detail)
+
+    def test_ok_when_routes_do_not_overlap_wfd_subnet(self):
+        routes = '[{"dst":"192.168.50.0/24","dev":"wlan0"},{"dst":"default","dev":"wlan0"}]'
+        with mock.patch("diagnostics.shutil.which", return_value="/usr/sbin/ip"), \
+                mock.patch("diagnostics._run", return_value=_completed(routes)):
+            check = diagnostics._network_conflict_check()
+
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+
+    def test_skips_when_ip_is_unavailable(self):
+        with mock.patch("diagnostics.shutil.which", return_value=None):
+            check = diagnostics._network_conflict_check()
+
+        self.assertEqual(check.status, diagnostics.STATUS_SKIP)
+
+
 if __name__ == "__main__":
     unittest.main()
