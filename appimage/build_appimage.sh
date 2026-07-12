@@ -16,6 +16,7 @@ fi
 docker run --rm \
   -v "${PROJECT_ROOT}:/project" \
   --privileged \
+  -e APPIMAGE_EXTRACT_AND_RUN=1 \
   ubuntu:22.04 bash -c "
     set -e
 
