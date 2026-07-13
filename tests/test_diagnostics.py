@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -92,6 +93,67 @@ class FirewallCheckTest(unittest.TestCase):
                 mock.patch("diagnostics._run", side_effect=fake_run):
             check = diagnostics._firewall_check()
         self.assertEqual(check.name, "firewall (firewalld)")
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+
+
+class SubnetConflictCheckTest(unittest.TestCase):
+    def test_skips_when_ip_missing(self):
+        with mock.patch("diagnostics.shutil.which", return_value=None):
+            check = diagnostics._subnet_conflict_check()
+        self.assertEqual(check.name, "P2P subnet")
+        self.assertEqual(check.status, diagnostics.STATUS_SKIP)
+
+    def test_no_overlap_is_ok(self):
+        payload = json.dumps([
+            {"ifname": "lo", "addr_info": [{"family": "inet", "local": "127.0.0.1", "prefixlen": 8}]},
+            {"ifname": "wlan0", "addr_info": [{"family": "inet", "local": "192.168.1.20", "prefixlen": 24}]},
+        ])
+        with mock.patch("diagnostics.shutil.which", return_value="/usr/sbin/ip"), \
+                mock.patch("diagnostics._run", return_value=_completed(payload)):
+            check = diagnostics._subnet_conflict_check()
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+
+    def test_overlapping_interface_warns(self):
+        payload = json.dumps([
+            {"ifname": "docker0", "addr_info": [{"family": "inet", "local": "192.168.49.1", "prefixlen": 24}]},
+        ])
+        with mock.patch("diagnostics.shutil.which", return_value="/usr/sbin/ip"), \
+                mock.patch("diagnostics._run", return_value=_completed(payload)):
+            check = diagnostics._subnet_conflict_check()
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("docker0", check.detail)
+
+    def test_containing_supernet_warns(self):
+        # A VPN on 192.168.0.0/16 fully contains the P2P subnet.
+        payload = json.dumps([
+            {"ifname": "tun0", "addr_info": [{"family": "inet", "local": "192.168.0.5", "prefixlen": 16}]},
+        ])
+        with mock.patch("diagnostics.shutil.which", return_value="/usr/sbin/ip"), \
+                mock.patch("diagnostics._run", return_value=_completed(payload)):
+            check = diagnostics._subnet_conflict_check()
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("tun0", check.detail)
+
+    def test_own_p2p_interface_is_ignored(self):
+        # FluxCast's own Wi-Fi Direct interface lives on the subnet by design.
+        payload = json.dumps([
+            {"ifname": "p2p-dev-wlan0", "addr_info": [{"family": "inet", "local": "192.168.49.1", "prefixlen": 24}]},
+        ])
+        with mock.patch("diagnostics.shutil.which", return_value="/usr/sbin/ip"), \
+                mock.patch("diagnostics._run", return_value=_completed(payload)):
+            check = diagnostics._subnet_conflict_check()
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+
+    def test_timeout_is_handled(self):
+        with mock.patch("diagnostics.shutil.which", return_value="/usr/sbin/ip"), \
+                mock.patch("diagnostics._run", side_effect=subprocess.TimeoutExpired(cmd="ip", timeout=3.0)):
+            check = diagnostics._subnet_conflict_check()
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+
+    def test_malformed_json_is_handled(self):
+        with mock.patch("diagnostics.shutil.which", return_value="/usr/sbin/ip"), \
+                mock.patch("diagnostics._run", return_value=_completed("not json")):
+            check = diagnostics._subnet_conflict_check()
         self.assertEqual(check.status, diagnostics.STATUS_WARN)
 
 
