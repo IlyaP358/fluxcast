@@ -1,5 +1,6 @@
 import json
 import importlib.util
+import ipaddress
 import os
 import platform
 import re
@@ -16,6 +17,11 @@ STATUS_SKIP = "skip"
 
 # RTSP port advertised in the WFD IEs; must reach the receiver for streaming.
 WFD_RTSP_PORT = 7236
+
+# NetworkManager brings Wi-Fi Direct (P2P) groups up on this hardcoded subnet.
+# An existing LAN/VPN/docker interface that overlaps it breaks the P2P session
+# in a way that is hard to diagnose, so --doctor surfaces the clash.
+WFD_P2P_SUBNET = "192.168.49.0/24"
 
 
 @dataclass
@@ -357,6 +363,68 @@ def _iw_p2p_check() -> Check:
     return Check("iw P2P", STATUS_WARN, "no Wi-Fi interfaces were shown", output)
 
 
+def _subnet_conflict_check() -> Check:
+    """Warn when an existing interface overlaps the Wi-Fi Direct P2P subnet.
+
+    NetworkManager provisions Wi-Fi Direct groups on WFD_P2P_SUBNET. If a LAN,
+    VPN, or docker interface already occupies that range, the P2P session fails
+    in a way that is hard to diagnose, so surface the overlap here. This is a
+    read-only check; it never changes any interface.
+    """
+    name = "P2P subnet"
+    if not shutil.which("ip"):
+        return Check(name, STATUS_SKIP, "ip was not found", "cannot inspect interface addresses")
+
+    try:
+        result = _run(["ip", "-j", "addr"], timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return Check(name, STATUS_WARN, "could not query interface addresses", str(exc))
+
+    if result.returncode != 0:
+        return Check(name, STATUS_WARN, "ip addr query failed", (result.stderr or "").strip())
+
+    try:
+        interfaces = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        return Check(name, STATUS_WARN, "could not parse ip addr output", str(exc))
+
+    p2p_net = ipaddress.ip_network(WFD_P2P_SUBNET)
+    conflicts = []
+    for iface in interfaces:
+        dev = iface.get("ifname", "?")
+        # Wi-Fi Direct interfaces are expected to live on this subnet; a clash is
+        # only meaningful when some *other* interface already occupies the range.
+        if "p2p" in dev.lower():
+            continue
+        for addr in iface.get("addr_info", []):
+            if addr.get("family") != "inet":
+                continue
+            local, prefixlen = addr.get("local"), addr.get("prefixlen")
+            if local is None or prefixlen is None:
+                continue
+            try:
+                net = ipaddress.ip_network(f"{local}/{prefixlen}", strict=False)
+            except ValueError:
+                continue
+            if net.overlaps(p2p_net):
+                conflicts.append(f"{dev}={local}/{prefixlen}")
+
+    if conflicts:
+        return Check(
+            name,
+            STATUS_WARN,
+            f"an existing interface overlaps the Wi-Fi Direct subnet {WFD_P2P_SUBNET}",
+            "; ".join(conflicts)
+            + f"; move it off {WFD_P2P_SUBNET} (LAN/VPN/docker) to avoid a P2P clash",
+        )
+    return Check(
+        name,
+        STATUS_OK,
+        f"no interface overlaps the Wi-Fi Direct subnet {WFD_P2P_SUBNET}",
+        "",
+    )
+
+
 def _supplicant_capability_check() -> Check:
     if not shutil.which("gdbus"):
         return Check("wpa_supplicant P2P", STATUS_WARN, "gdbus was not found", "cannot query system D-Bus")
@@ -537,6 +605,7 @@ def run_diagnostics() -> DiagnosticReport:
         _display_capture_check(),
         _audio_check(),
         _nmcli_check(),
+        _subnet_conflict_check(),
         _iw_p2p_check(),
         _supplicant_capability_check(),
         _supplicant_wfd_check(),
