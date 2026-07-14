@@ -519,25 +519,37 @@ def _firewalld_check() -> Optional[Check]:
         return None
 
     try:
-        state = _run(["systemctl", "is-active", "firewalld"], timeout=3.0)
+        state = _run(["firewall-cmd", "--state"], timeout=3.0)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return Check("firewall (firewalld)", STATUS_WARN, "could not query firewalld state", str(exc))
 
-    if state.stdout.strip() != "active":
+    if state.returncode != 0 or state.stdout.strip() != "running":
         return Check(
             "firewall (firewalld)",
             STATUS_OK,
             "firewalld is not running; port not blocked",
-            state.stdout.strip(),
+            (state.stdout + state.stderr).strip(),
         )
 
-    # Don't probe the port here: `firewall-cmd --query-port` can prompt for auth, and
-    # FluxCast opens the port automatically for the session anyway.
+    # `--query-port` is a read-only D-Bus getter; unlike `--add-port` it never
+    # prompts for authentication, so probing the port here is safe.
+    try:
+        query = _run(["firewall-cmd", f"--query-port={WFD_RTSP_PORT}/tcp"], timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return Check("firewall (firewalld)", STATUS_WARN, "could not query firewalld port", str(exc))
+
+    if query.returncode == 0 and query.stdout.strip() == "yes":
+        return Check(
+            "firewall (firewalld)",
+            STATUS_OK,
+            f"firewalld is running and allows port {WFD_RTSP_PORT}",
+            (query.stdout + query.stderr).strip(),
+        )
     return Check(
         "firewall (firewalld)",
         STATUS_WARN,
-        f"firewalld is running; FluxCast opens port {WFD_RTSP_PORT}/tcp for the WFD session",
-        f"if the TV can't connect, open it yourself: sudo firewall-cmd --add-port={WFD_RTSP_PORT}/tcp --permanent && sudo firewall-cmd --reload",
+        f"firewalld is running but port {WFD_RTSP_PORT}/tcp is closed",
+        f"open it with: sudo firewall-cmd --add-port={WFD_RTSP_PORT}/tcp --permanent && sudo firewall-cmd --reload",
     )
 
 
