@@ -519,25 +519,59 @@ def _firewalld_check() -> Optional[Check]:
         return None
 
     try:
-        state = _run(["systemctl", "is-active", "firewalld"], timeout=3.0)
+        state = _run(["firewall-cmd", "--state"], timeout=3.0)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return Check("firewall (firewalld)", STATUS_WARN, "could not query firewalld state", str(exc))
 
-    if state.stdout.strip() != "active":
+    # firewalld gates firewall-cmd through polkit, so on a headless/gated host
+    # `--state` and `--query-port` can fail with an authorization error rather
+    # than a real answer. Trust only what firewall-cmd literally prints: a
+    # non-zero exit is not proof the firewall is down, so an auth failure must
+    # never become a definitive OK-or-closed. Report "couldn't verify" instead.
+    state_out = state.stdout.strip()
+    state_all = (state.stdout + state.stderr).strip()
+    if state_out != "running":
+        if "not running" in state_all.lower():
+            return Check(
+                "firewall (firewalld)",
+                STATUS_OK,
+                "firewalld is not running; port not blocked",
+                state_all,
+            )
+        return Check(
+            "firewall (firewalld)",
+            STATUS_WARN,
+            "could not verify firewalld state (firewall-cmd did not report running/not running)",
+            state_all,
+        )
+
+    try:
+        query = _run(["firewall-cmd", f"--query-port={WFD_RTSP_PORT}/tcp"], timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return Check("firewall (firewalld)", STATUS_WARN, "could not query firewalld port", str(exc))
+
+    # `--query-port` prints `yes`/`no` (exit 0/1) for a real answer; anything
+    # else — empty output, an auth error — means we could not check the port.
+    query_out = query.stdout.strip()
+    if query_out == "yes":
         return Check(
             "firewall (firewalld)",
             STATUS_OK,
-            "firewalld is not running; port not blocked",
-            state.stdout.strip(),
+            f"firewalld is running and allows port {WFD_RTSP_PORT}",
+            (query.stdout + query.stderr).strip(),
         )
-
-    # Don't probe the port here: `firewall-cmd --query-port` can prompt for auth, and
-    # FluxCast opens the port automatically for the session anyway.
+    if query_out == "no":
+        return Check(
+            "firewall (firewalld)",
+            STATUS_WARN,
+            f"firewalld is running but port {WFD_RTSP_PORT}/tcp is closed",
+            f"open it with: sudo firewall-cmd --add-port={WFD_RTSP_PORT}/tcp --permanent && sudo firewall-cmd --reload",
+        )
     return Check(
         "firewall (firewalld)",
         STATUS_WARN,
-        f"firewalld is running; FluxCast opens port {WFD_RTSP_PORT}/tcp for the WFD session",
-        f"if the TV can't connect, open it yourself: sudo firewall-cmd --add-port={WFD_RTSP_PORT}/tcp --permanent && sudo firewall-cmd --reload",
+        f"could not verify whether firewalld allows port {WFD_RTSP_PORT}/tcp",
+        (query.stdout + query.stderr).strip(),
     )
 
 
