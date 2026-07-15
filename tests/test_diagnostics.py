@@ -61,6 +61,34 @@ class FirewallCheckTest(unittest.TestCase):
             check = diagnostics._firewall_check()
         self.assertEqual(check.status, diagnostics.STATUS_OK)
 
+    def test_firewalld_state_auth_failure_does_not_give_all_clear(self):
+        # polkit-gated `--state` fails with an auth error, not "not running";
+        # a non-zero exit must not be read as a clean firewall.
+        err = "Authorization failed.\n    Make sure polkit agent is running or run the application as superuser."
+        with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/bin/firewall-cmd" if b == "firewall-cmd" else None), \
+                mock.patch("diagnostics._run", return_value=_completed("", returncode=1, stderr=err)):
+            check = diagnostics._firewall_check()
+        self.assertEqual(check.name, "firewall (firewalld)")
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("could not verify", check.message)
+
+    def test_firewalld_query_auth_failure_is_not_reported_closed(self):
+        # `--state` says running, but the port probe hits an auth error; that is
+        # "couldn't verify", not a definitive "port closed".
+        err = "Authorization failed."
+
+        def fake_run(args, timeout=3.0):
+            if "--state" in args:
+                return _completed("running")
+            return _completed("", returncode=1, stderr=err)
+
+        with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/bin/firewall-cmd" if b == "firewall-cmd" else None), \
+                mock.patch("diagnostics._run", side_effect=fake_run):
+            check = diagnostics._firewall_check()
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("could not verify", check.message)
+        self.assertNotIn("closed", check.message)
+
     def test_query_timeout_is_handled(self):
         with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/sbin/ufw" if b == "ufw" else None), \
                 mock.patch("diagnostics._run", side_effect=subprocess.TimeoutExpired(cmd="ufw", timeout=3.0)):
