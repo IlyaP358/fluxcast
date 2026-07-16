@@ -2878,6 +2878,30 @@ def _select_peer(peers: list[WFDPeer], selector: Optional[str]) -> WFDPeer:
     raise WFDNotReady(f"No peer matched selector: {selector}")
 
 
+def _scan_and_select(interface: Optional[str], selector: Optional[str],
+                     timeout: int, attempts: int = 3) -> WFDPeer:
+    """Scans and resolves peer. If no selector, does one scan and opens prompt.
+    With selector, retries non-deterministic scans
+    until resolved or raises original error.
+    """
+    if selector is None:
+        peers = active_scan(interface=interface, timeout=timeout)
+        return _select_peer(peers, None)
+
+    last_error: Optional[WFDNotReady] = None
+    for attempt in range(1, attempts + 1):
+        peers = active_scan(interface=interface, timeout=timeout)
+        try:
+            return _select_peer(peers, selector)
+        except WFDNotReady as exc:
+            last_error = exc
+            if attempt < attempts:
+                print(f"[FluxCast WFD] peer '{selector}' not in scan "
+                      f"{attempt}/{attempts}; rescanning...")
+    assert last_error is not None
+    raise last_error
+
+
 def _default_wifi_interface() -> Optional[str]:
     if not shutil.which("iw"):
         return None
@@ -3313,8 +3337,9 @@ def start_experimental_backend(args) -> None:
                 monitor = prompt_monitor()
 
     _set_p2p_device_name(args.wfd_interface)
-    peers = active_scan(interface=args.wfd_interface, timeout=args.wfd_timeout)
-    peer = _select_peer(peers, getattr(args, "wfd_peer", None))
+    peer = _scan_and_select(
+        args.wfd_interface, getattr(args, "wfd_peer", None), args.wfd_timeout
+    )
     device_path = _nm_p2p_device_path(args.wfd_interface)
     if not device_path:
         raise WFDNotReady("NetworkManager P2P device disappeared before connection.")
