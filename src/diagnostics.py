@@ -344,6 +344,48 @@ def _nmcli_check() -> Check:
     return Check("NetworkManager", STATUS_WARN, "no Wi-Fi device was listed by NetworkManager", detail)
 
 
+def _iw_phy_p2p_facts() -> tuple[Optional[bool], Optional[bool]]:
+    """
+    Gets P2P capability and STA/P2P concurrency via `iw phy` (no root).
+    Returns (bool/None, bool/None); both are None if parsing fails.
+    """
+    if not shutil.which("iw"):
+        return (None, None)
+    try:
+        result = _run(["iw", "phy"], timeout=4.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return (None, None)
+    if result.returncode != 0:
+        return (None, None)
+    text = result.stdout
+
+    p2p_capable = bool(re.search(r"P2P-(client|GO|device)", text))
+
+    # Capture the "valid interface combinations:" block: lines indented deeper
+    # than the header, until the section ends.
+    combo_lines: list[str] = []
+    capturing = False
+    header_indent = 0
+    for line in text.splitlines():
+        if "valid interface combinations:" in line:
+            capturing = True
+            header_indent = len(line) - len(line.lstrip())
+            continue
+        if capturing:
+            if not line.strip():
+                continue
+            if (len(line) - len(line.lstrip())) <= header_indent:
+                break
+            combo_lines.append(line)
+    # Each combination is a '*'-led entry (may wrap onto continuation lines).
+    # Concurrent if a single entry allows both a managed and a P2P interface.
+    concurrent = any(
+        "managed" in chunk and re.search(r"P2P-(client|GO|device)", chunk)
+        for chunk in "\n".join(combo_lines).split("*")
+    )
+    return (p2p_capable, concurrent)
+
+
 def _iw_p2p_check() -> Check:
     if not shutil.which("iw"):
         return Check("iw P2P", STATUS_WARN, "iw was not found", "cannot inspect kernel Wi-Fi interfaces")
@@ -359,6 +401,23 @@ def _iw_p2p_check() -> Check:
     if re.search(r"\btype\s+P2P-device\b", output):
         return Check("iw P2P", STATUS_OK, "kernel exposes a P2P-device interface", output)
     if "Interface" in output:
+        # No P2P-device instance: explain why and what to do, using the adapter's
+        # advertised capability instead of a bare "no P2P-device shown".
+        p2p_capable, concurrent = _iw_phy_p2p_facts()
+        if p2p_capable is False:
+            return Check(
+                "iw P2P", STATUS_WARN,
+                "this Wi-Fi adapter's driver does not support Wi-Fi Direct (P2P)",
+                "WFD needs a P2P-capable adapter (most internal Wi-Fi, or a P2P-capable "
+                "USB dongle).",
+            )
+        if concurrent is False:
+            return Check(
+                "iw P2P", STATUS_WARN,
+                "this adapter can't run a Wi-Fi connection and Wi-Fi Direct at the same time",
+                "disconnect Wi-Fi before starting WFD (keep Ethernet for internet), or use an "
+                "adapter whose driver supports concurrent STA + P2P.",
+            )
         return Check("iw P2P", STATUS_WARN, "Wi-Fi interfaces exist, but no P2P-device was shown", output)
     return Check("iw P2P", STATUS_WARN, "no Wi-Fi interfaces were shown", output)
 
