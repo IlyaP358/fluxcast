@@ -2771,7 +2771,13 @@ def _connect_peer(
     return active
 
 
-def _set_p2p_device_name(iface: Optional[str], name: str = _DEVICE_NAME) -> None:
+def _p2p_device_iface_paths(iface: Optional[str]) -> list[str]:
+    """Return wpa_supplicant interface object paths, best P2P candidate first.
+
+    The p2p-dev-<iface> control interface is preferred, then the physical
+    interface, then anything else. Returns [] if wpa_supplicant can't be
+    queried, so callers degrade to a warning instead of raising.
+    """
     wpa_dest = "fi.w1.wpa_supplicant1"
     wpa_root = "/fi/w1/wpa_supplicant1"
     wpa_iface = "fi.w1.wpa_supplicant1.Interface"
@@ -2784,17 +2790,14 @@ def _set_p2p_device_name(iface: Optional[str], name: str = _DEVICE_NAME) -> None
             wpa_dest, "Interfaces",
         ], timeout=3.0)
     except Exception:
-        print("[FluxCast WFD] Warning: could not set P2P device name (cosmetic, connection will proceed).")
-        return
+        return []
 
     if list_result.returncode != 0:
-        print("[FluxCast WFD] Warning: could not set P2P device name (cosmetic, connection will proceed).")
-        return
+        return []
 
     iface_paths = _object_paths(list_result.stdout)
     if not iface_paths:
-        print("[FluxCast WFD] Warning: could not set P2P device name (cosmetic, connection will proceed).")
-        return
+        return []
 
     physical = iface or _default_wifi_interface()
     p2p_dev = f"p2p-dev-{physical}" if physical and not physical.startswith("p2p-dev-") else physical
@@ -2807,7 +2810,19 @@ def _set_p2p_device_name(iface: Optional[str], name: str = _DEVICE_NAME) -> None
             return 1
         return 2
 
-    for iface_path in sorted(iface_paths, key=_priority):
+    return sorted(iface_paths, key=_priority)
+
+
+def _set_p2p_device_name(iface: Optional[str], name: str = _DEVICE_NAME) -> None:
+    wpa_dest = "fi.w1.wpa_supplicant1"
+    wpa_iface = "fi.w1.wpa_supplicant1.Interface"
+
+    paths = _p2p_device_iface_paths(iface)
+    if not paths:
+        print("[FluxCast WFD] Warning: could not set P2P device name (cosmetic, connection will proceed).")
+        return
+
+    for iface_path in paths:
         try:
             result = _gdbus_call([
                 "--dest", wpa_dest,
@@ -2823,6 +2838,63 @@ def _set_p2p_device_name(iface: Optional[str], name: str = _DEVICE_NAME) -> None
             pass
 
     print("[FluxCast WFD] Warning: could not set P2P device name (cosmetic, connection will proceed).")
+
+
+def _read_p2p_go_intent(iface_path: str) -> Optional[int]:
+    """Read the current P2P GO intent from a wpa_supplicant interface, or None."""
+    wpa_dest = "fi.w1.wpa_supplicant1"
+    wpa_iface = "fi.w1.wpa_supplicant1.Interface"
+    try:
+        result = _gdbus_call([
+            "--dest", wpa_dest,
+            "--object-path", iface_path,
+            "--method", "org.freedesktop.DBus.Properties.Get",
+            f"{wpa_iface}.P2PDevice", "P2PDeviceConfig",
+        ], timeout=3.0)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    match = re.search(r"'GOIntent':\s*<uint32\s+(\d+)>", result.stdout)
+    return int(match.group(1)) if match else None
+
+
+def _set_p2p_go_intent(iface: Optional[str], value: int,
+                       restoring: bool = False) -> Optional[int]:
+    #Set the wpa_supplicant P2P group-owner intent (0-15)
+    
+    wpa_dest = "fi.w1.wpa_supplicant1"
+    wpa_iface = "fi.w1.wpa_supplicant1.Interface"
+
+    paths = _p2p_device_iface_paths(iface)
+    if not paths:
+        if not restoring:
+            print("[FluxCast WFD] Warning: could not set P2P GO intent (connection will proceed with the default).")
+        return None
+
+    for iface_path in paths:
+        previous = _read_p2p_go_intent(iface_path)
+        try:
+            result = _gdbus_call([
+                "--dest", wpa_dest,
+                "--object-path", iface_path,
+                "--method", "org.freedesktop.DBus.Properties.Set",
+                f"{wpa_iface}.P2PDevice", "P2PDeviceConfig",
+                f"<{{'GOIntent': <uint32 {value}>}}>",
+            ], timeout=3.0)
+            if result.returncode == 0:
+                if restoring:
+                    print(f"[FluxCast WFD] Restored P2P GO intent to {value}.")
+                else:
+                    print(f"[FluxCast WFD] P2P GO intent set to {value} "
+                          f"(lower intent lets the TV be the group owner).")
+                return previous
+        except Exception:
+            pass
+
+    if not restoring:
+        print("[FluxCast WFD] Warning: could not set P2P GO intent (connection will proceed with the default).")
+    return None
 
 
 def _disconnect_device(device_path: str) -> None:
@@ -3385,6 +3457,7 @@ def start_experimental_backend(args) -> None:
     connected = False
     firewall_opened = False
     active_path = ""
+    previous_go_intent = None
     try:
         # Clear stale P2P device state from previous runs before new activation.
         try:
@@ -3392,6 +3465,11 @@ def start_experimental_backend(args) -> None:
         except Exception:
             pass
         rtsp.start()
+        # Lower our GO intent before negotiation so the TV becomes the group
+        # owner; most Miracast sinks only start the RTSP session in that role.
+        previous_go_intent = _set_p2p_go_intent(
+            args.wfd_interface, getattr(args, "wfd_go_intent", 0)
+        )
         active_path = _connect_peer(
             device_path,
             peer,
@@ -3425,3 +3503,5 @@ def start_experimental_backend(args) -> None:
         if connected:
             _deactivate_connection(active_path)
             _disconnect_device(device_path)
+        if previous_go_intent is not None:
+            _set_p2p_go_intent(args.wfd_interface, previous_go_intent, restoring=True)
