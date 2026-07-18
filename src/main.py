@@ -47,6 +47,7 @@ Wi-Fi Display (Miracast) Options:
     --wfd-rtp-source-port P  Local RTP source port (default: 19002)
     --wfd-interface IFACE    Wi-Fi interface to use, e.g. wlan0
     --wfd-timeout N          Wi-Fi Direct scan timeout in seconds (default: 8)
+    --wfd-go-intent 0-15     P2P group-owner intent; 0 lets the TV be the owner (default: 0)
     --wfd-monitor NAME       Deprecated alias for --monitor
 """
 
@@ -160,6 +161,11 @@ def parse_args() -> argparse.Namespace:
                      help="Wi-Fi interface to use for --wfd-scan, e.g. wlan0")
     wfd.add_argument("--wfd-timeout", type=int, default=8, dest="wfd_timeout",
                      help="Wi-Fi Direct scan timeout in seconds (default: 8)")
+    wfd.add_argument("--wfd-go-intent", type=int, default=0, dest="wfd_go_intent",
+                     choices=range(0, 16), metavar="0-15",
+                     help="P2P group-owner intent (0-15); 0 forces the TV to be "
+                          "the group owner, which most Miracast TVs require to "
+                          "start the session (default: 0)")
     wfd.add_argument("--wfd-monitor", default=None, dest="monitor_name",
                      help="Deprecated alias for --monitor, kept for compatibility")
 
