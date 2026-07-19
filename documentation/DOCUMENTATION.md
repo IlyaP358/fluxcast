@@ -67,6 +67,7 @@ python3 src/main.py --protocol cast
 - `--wfd-no-firewall`
 - `--wfd-interface IFACE`
 - `--wfd-timeout SEC`
+- `--wfd-go-intent 0-15`
 - `--wfd-monitor NAME` **deprecated** alias for `--monitor` (kept for compatibility)
 
 ## Flag Details
@@ -178,6 +179,8 @@ and protocol selection remain controlled by the tray and cannot be set here.
   - Scan only, no connection attempt.
 - `--wfd-peer`
   - Accepts index, MAC, or device-name substring.
+  - Prefer selecting by MAC rather than index: the index can change between a
+    separate `--wfd-scan` and the later connect step.
   - If omitted, FluxCast prints peers and asks for interactive selection.
 - `--wfd-dry-run`
   - Prints the D-Bus connection call without activating a session.
@@ -185,6 +188,12 @@ and protocol selection remain controlled by the tray and cannot be set here.
   - Explicit interface for scan path.
 - `--wfd-timeout`
   - Active peer discovery timeout.
+- `--wfd-go-intent`
+  - Sets FluxCast's Wi-Fi Direct group-owner intent (`0`–`15`, default `0`).
+  - A low value (`0` by default) is what gets most Miracast TVs to start the
+    session; raise it only if a specific sink requires a higher intent.
+  - Does not claim or require that the TV becomes the group owner or that the
+    P2P address range changes.
 - `--wfd-monitor NAME`
   - **Deprecated** alias for `--monitor`, kept for backward compatibility. Use `--monitor` instead.
 
