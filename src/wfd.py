@@ -17,6 +17,7 @@ from portal_capture import PortalCaptureError, PortalCaptureSession, close_porta
 
  
 WFD_RTSP_PORT = 7236
+WFD_UIBC_PORT = 7239  # local TCP port the sink connects to for input (#37, opt-in)
 try:
     _DEVICE_NAME: str = re.sub(r"[^a-zA-Z0-9\-]", "", socket.gethostname().split(".")[0])[:32] or "FluxCast"
 except OSError:
@@ -159,6 +160,7 @@ class WFDMediaConfig:
     latency_log_path: Optional[str] = None
     capture_backend: str = "auto"
     peer_name: str = ""
+    uibc: bool = False  # opt-in: accept touch/mouse input back from the sink (issue #37)
 
 
 @dataclass
@@ -1779,6 +1781,15 @@ def _parse_parameters(body: str) -> dict[str, str]:
     return params
 
 
+def _sink_advertises_uibc(params: dict[str, str]) -> bool:
+    # Gate M4 uibc-enable on this. A strict sink can reject the whole
+    # SET_PARAMETER (killing the session) if we enable UIBC it never advertised.
+    val = (params.get("wfd_uibc_capability") or "").strip().lower()
+    if not val or val == "none":
+        return False
+    return "generic" in val or "hidc" in val
+
+
 def _parse_rtp_ports(value: str) -> Optional[tuple[int, int]]:
     match = re.search(
         r"RTP/AVP/(?:UDP|TCP);unicast\s+(\d+)\s+(\d+)\s+mode=play",
@@ -1958,6 +1969,8 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             "wfd_audio_codecs\r\n"
             "wfd_client_rtp_ports\r\n"
         )
+        if self.media_config.uibc:
+            body += "wfd_uibc_capability\r\n"
         self._send_request(
             "M3_GET_PARAMETER",
             "GET_PARAMETER",
@@ -1977,6 +1990,12 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             "wfd_client_rtp_ports: RTP/AVP/UDP;unicast "
             f"{self.sink_rtp_port} {sink_rtcp_port} mode=play\r\n"
         )
+        if self.media_config.uibc and getattr(self, "sink_supports_uibc", False):
+            from drivers import uibc
+            body += (
+                f"wfd_uibc_capability: {uibc.build_uibc_capability(WFD_UIBC_PORT)}\r\n"
+                "wfd_uibc_setting: enable\r\n"
+            )
         self._send_request(
             "M4_SET_PARAMETER",
             "SET_PARAMETER",
@@ -2024,6 +2043,13 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             self.sink_video_format = _parse_sink_video_format(
                 params.get("wfd_video_formats", "")
             )
+            if self.media_config.uibc:
+                self.sink_supports_uibc = _sink_advertises_uibc(params)
+                if not self.sink_supports_uibc:
+                    print(
+                        "[FluxCast WFD RTSP] TV did not advertise UIBC support; "
+                        "input back-channel stays disabled for this session."
+                    )
             audio = params.get("wfd_audio_codecs", "")
             _is_microsoft = "microsoft" in self.media_config.peer_name.lower()
             if (
@@ -2198,6 +2224,9 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 self.server.parent_server._register_media(self.media)  # type: ignore[attr-defined]
             self.media.start()
             print("[FluxCast WFD RTSP] PLAY accepted; media stream started.")
+            if self.media_config.uibc and getattr(self, "sink_supports_uibc", False):
+                self._maybe_start_uibc(mode)
+                self._schedule_uibc_enable(1.5)
             self.play_accepted_at = time.monotonic()
             self.setup_ms = round((self.play_accepted_at - self.connected_at) * 1000.0, 1)
             _append_latency_log(
@@ -2206,6 +2235,36 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 setup_ms=self.setup_ms,
             )
             self._schedule_probe(0.7)
+
+    def _maybe_start_uibc(self, mode) -> None:
+        parent = getattr(self.server, "parent_server", None)
+        if parent is None or parent._uibc_server is not None:
+            return
+        try:
+            from drivers import uibc
+        except Exception as exc:
+            print(f"[FluxCast WFD UIBC] disabled (import failed: {exc})")
+            return
+        monitor = self.media_config.monitor
+        if monitor is not None:
+            mon_w, mon_h, mon_x, mon_y = (
+                monitor.width, monitor.height, monitor.x, monitor.y,
+            )
+        else:
+            mon_w, mon_h, mon_x, mon_y = mode.width, mode.height, 0, 0
+        parent._uibc_server = uibc.start_uibc(
+            WFD_UIBC_PORT, mode.width, mode.height, mon_w, mon_h, mon_x, mon_y,
+        )
+        if parent._uibc_server is not None:
+            print(
+                f"[FluxCast WFD UIBC] input server listening on port "
+                f"{WFD_UIBC_PORT} (sink {mode.width}x{mode.height} -> "
+                f"screen {mon_w}x{mon_h}+{mon_x}+{mon_y})"
+            )
+
+    def _schedule_uibc_enable(self, delay: float) -> None:
+        from drivers import uibc
+        uibc.schedule_post_play_enable(self, delay)
 
     def _schedule_probe(self, delay: float) -> None:
         probe = threading.Timer(delay, self._probe_tx)
@@ -2340,6 +2399,7 @@ class WFDRTSPServer:
         self.has_connected_client = False
         self._media_lock = threading.Lock()
         self._active_media: list[WFDMediaPipeline] = []
+        self._uibc_server = None  # opt-in UIBC input server; None unless enabled
 
     def _register_media(self, media: WFDMediaPipeline) -> None:
         with self._media_lock:
@@ -2367,6 +2427,9 @@ class WFDRTSPServer:
         print(f"[FluxCast WFD RTSP] Server listening on {self.host}:{self.port}")
 
     def stop(self) -> None:
+        if self._uibc_server is not None:
+            self._uibc_server.stop()
+            self._uibc_server = None
         if self._server:
             self._server.shutdown()
             self._server.server_close()
@@ -3474,6 +3537,7 @@ def start_experimental_backend(args) -> None:
         latency_log_path=getattr(args, "wfd_latency_log", None),
         capture_backend=getattr(args, "wfd_capture_backend", "auto"),
         peer_name=peer.name,
+        uibc=getattr(args, "wfd_uibc", False),
     )
     if media_config.latency_log_path:
         print(f"[FluxCast WFD] Latency log file: {media_config.latency_log_path}")
@@ -3485,6 +3549,7 @@ def start_experimental_backend(args) -> None:
     )
     connected = False
     firewall_opened = False
+    uibc_firewall_opened = False
     active_path = ""
     previous_go_intent = None
     try:
@@ -3509,6 +3574,8 @@ def start_experimental_backend(args) -> None:
 
         if not getattr(args, "wfd_no_firewall", False):
             firewall_opened = _open_wfd_firewall_port(rtsp_port)
+            if getattr(args, "wfd_uibc", False):
+                uibc_firewall_opened = _open_wfd_firewall_port(WFD_UIBC_PORT)
 
         # Active probe for newer TVs (Samsung 2024++, some LGs)
         # It runs in a background thread to not block the main loop.
@@ -3529,6 +3596,8 @@ def start_experimental_backend(args) -> None:
         rtsp.stop()
         if firewall_opened:
             _close_wfd_firewall_port(rtsp_port)
+        if uibc_firewall_opened:
+            _close_wfd_firewall_port(WFD_UIBC_PORT)
         if connected:
             _deactivate_connection(active_path)
             _disconnect_device(device_path)

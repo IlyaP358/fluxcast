@@ -68,6 +68,7 @@ python3 src/main.py --protocol cast
 - `--wfd-interface IFACE`
 - `--wfd-timeout SEC`
 - `--wfd-go-intent 0-15`
+- `--wfd-uibc` enable the input back channel (control the desktop from the sink)
 - `--wfd-monitor NAME` **deprecated** alias for `--monitor` (kept for compatibility)
 
 ## Flag Details
@@ -223,6 +224,21 @@ and protocol selection remain controlled by the tray and cannot be set here.
   - Local RTP source port.
 - `--wfd-no-firewall`
   - Disables the automatic firewall handling described below.
+
+### WFD Input Back Channel (UIBC)
+
+- `--wfd-uibc`
+  - Opt-in. Lets the sink (TV/tablet) control the desktop back over the WFD
+    session: touch and mouse move the cursor, and basic keyboard input is typed.
+  - **Works:** touch/mouse (tap, drag), and base-character typing including
+    Enter, Backspace and Tab.
+  - **Limitations:**
+    - Keys are injected on a **US layout**, so on other layouts some keys map
+      differently (e.g. `z`/`y` on QWERTZ).
+    - **No modifiers**: uppercase and combos (Shift/Ctrl/Alt) are not supported
+      because the generic UIBC channel does not report which modifier is held.
+    - When casting an offset/secondary monitor, touch goes to whichever output
+      the cursor is currently on.
 
 ### WFD and firewalld
 

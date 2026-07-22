@@ -168,6 +168,10 @@ def parse_args() -> argparse.Namespace:
                           "start the session (default: 0)")
     wfd.add_argument("--wfd-monitor", default=None, dest="monitor_name",
                      help="Deprecated alias for --monitor, kept for compatibility")
+    wfd.add_argument("--wfd-uibc", action="store_true", dest="wfd_uibc",
+                     help="Experimental: accept touch/mouse input back from the "
+                          "sink (TV/tablet) and inject it locally via uinput. "
+                          "Off by default; requires access to /dev/uinput")
 
     return parser.parse_args()
 
