@@ -925,6 +925,7 @@ class WFDMediaPipeline:
 
         if not self.config.no_audio:
             cmd += [
+                "-af", "aresample=async=1",
                 "-c:a", "aac",
                 "-profile:a", "aac_low",
                 "-b:a", "128k",
@@ -1482,6 +1483,7 @@ class WFDMediaPipeline:
 
         if not self.config.no_audio:
             ffmpeg_cmd += [
+                "-af", "aresample=async=1",
                 "-c:a", "aac",
                 "-profile:a", "aac_low",
                 "-b:a", "128k",
@@ -1586,6 +1588,7 @@ class WFDMediaPipeline:
 
         if not self.config.no_audio:
             ffmpeg_cmd += [
+                "-af", "aresample=async=1",
                 "-c:a", "aac",
                 "-profile:a", "aac_low",
                 "-b:a", "128k",
