@@ -2392,6 +2392,7 @@ def _firewalld_active() -> bool:
 
 
 _FIREWALL_AUTH_TIMEOUT = 60.0
+_FIREWALL_QUERY_TIMEOUT = 3.0
 
 _WFD_FIREWALL_ZONE = "nm-shared"
 
@@ -2414,6 +2415,34 @@ def _open_wfd_firewall_port(port: int) -> bool:
     """
     if not _firewalld_active():
         return False
+
+    try:
+        query = _run(
+            [
+                "firewall-cmd",
+                f"--zone={_WFD_FIREWALL_ZONE}",
+                f"--query-port={port}/tcp",
+            ],
+            timeout=_FIREWALL_QUERY_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _print_firewall_manual_hint(port, f"could not check existing rule: {exc}")
+        return False
+
+    # A real query result is the literal ``yes``/``no`` output. Authorization
+    # failures can use the same non-zero status as a closed port, so do not
+    # infer the result from the return code alone.
+    query_status = query.stdout.strip().lower()
+    query_output = (query.stdout + query.stderr).strip()
+    if query_status == "yes":
+        return False  # The user already had it open; leave it untouched.
+    if query_status != "no":
+        _print_firewall_manual_hint(
+            port,
+            query_output or "firewall-cmd could not verify the existing rule",
+        )
+        return False
+
     print(f"[FluxCast WFD] Opening firewalld port {port}/tcp ({_WFD_FIREWALL_ZONE} zone) "
           "for this session; approve the authorization prompt if one appears.")
     try:
