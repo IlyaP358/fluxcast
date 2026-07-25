@@ -10,6 +10,8 @@ FluxCast streams a Linux desktop to a TV.
 [![Issues](https://img.shields.io/github/issues/IlyaP358/fluxcast?style=flat-square&color=red)](https://github.com/IlyaP358/fluxcast/issues)
 [![PRs](https://img.shields.io/github/issues-pr/IlyaP358/fluxcast?style=flat-square)](https://github.com/IlyaP358/fluxcast/pulls)
 
+> 🌐 **Need a free subdomain for your project?** Check out [sub.fluxcast.dev](https://sub.fluxcast.dev) ([GitHub repo](https://github.com/IlyaP358/fluxcast-domains)) — a free GitOps subdomain registry for developers!
+
 ## Demo
 
 https://github.com/user-attachments/assets/ce01804c-2f86-4a5d-8ecf-d6f2a72f55d1
