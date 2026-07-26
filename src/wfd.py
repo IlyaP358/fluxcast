@@ -764,6 +764,13 @@ def _netdev_tx_bytes(interface: Optional[str]) -> Optional[int]:
     return None
 
 
+def _ffmpeg_sender_args() -> list[str]:
+    return [
+        "ffmpeg", "-hide_banner", "-y",
+        "-loglevel", "warning", "-stats",
+    ]
+
+
 class WFDMediaPipeline:
     def __init__(
         self,
@@ -887,8 +894,7 @@ class WFDMediaPipeline:
         gop = _calculate_gop(self.config)
         _tp_h = (_parse_resolution(resolution) or (1280, 720))[1]
         cmd = [
-            "ffmpeg", "-hide_banner", "-y",
-            "-loglevel", "warning",
+            *_ffmpeg_sender_args(),
             "-re",
             "-f", "lavfi",
             "-i", f"testsrc2=size={resolution}:rate={self.config.fps}",
@@ -1439,8 +1445,7 @@ class WFDMediaPipeline:
         ]
 
         ffmpeg_cmd = [
-            "ffmpeg", "-hide_banner", "-y",
-            "-loglevel", "warning",
+            *_ffmpeg_sender_args(),
             "-fflags", "+genpts",
             "-thread_queue_size", "1024",
             "-f", "nut",
@@ -1543,8 +1548,7 @@ class WFDMediaPipeline:
 
         display = os.environ.get("DISPLAY", monitor.display or ":0")
         ffmpeg_cmd = [
-            "ffmpeg", "-hide_banner", "-y",
-            "-loglevel", "warning",
+            *_ffmpeg_sender_args(),
             "-thread_queue_size", "1024",
             "-f", "x11grab",
             "-framerate", str(self.config.fps),

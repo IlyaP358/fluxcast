@@ -17,6 +17,16 @@ def _completed(stdout="", returncode=0, stderr=""):
     )
 
 
+class FfmpegProgressArgsTest(unittest.TestCase):
+    def test_warning_loglevel_keeps_progress_stats_visible(self):
+        args = wfd._ffmpeg_sender_args()
+
+        self.assertEqual(
+            args,
+            ["ffmpeg", "-hide_banner", "-y", "-loglevel", "warning", "-stats"],
+        )
+
+
 class FirewallPortTest(unittest.TestCase):
     def test_existing_port_skips_privileged_add(self):
         calls = []
