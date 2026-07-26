@@ -161,6 +161,8 @@ class WFDMediaConfig:
     capture_backend: str = "auto"
     peer_name: str = ""
     uibc: bool = False  # opt-in: accept touch/mouse input back from the sink (issue #37)
+    # H.264 profile the encoders emit; must match the profile sent in M4 (#84).
+    h264_profile: str = "baseline"
 
 
 @dataclass
@@ -518,6 +520,21 @@ def _choose_profile(profile_hex: str) -> str:
     if profile_mask & 0x02:
         return "02"
     return f"{profile_mask & 0xff:02x}"
+
+
+def _encoder_h264_profile(sink_format: Optional[WFDVideoFormat]) -> str:
+    """x264/ffmpeg profile name matching the WFD profile advertised in M4 (#84)."""
+    if sink_format is None:
+        return "baseline"
+    try:
+        profile_mask = int(sink_format.profile, 16)
+    except ValueError:
+        return "baseline"
+    if profile_mask & 0x01:
+        return "baseline"  # sink takes CBP: keep the long-proven path
+    if profile_mask & 0x02:
+        return "high"  # CHP only: encode what we advertise in M4
+    return "baseline"
 
 
 def _max_wfd_level(level_hex: str) -> Optional[int]:
@@ -909,7 +926,7 @@ class WFDMediaPipeline:
             "-c:v", "libx264",
             "-preset", "ultrafast" if _tp_h > 1080 else "veryfast",
             "-tune", "zerolatency",
-            "-profile:v", "baseline",
+            "-profile:v", self.config.h264_profile,
             "-level:v", _h264_level_for_mode(self.config),
             "-pix_fmt", "yuv420p",
             "-r", str(self.config.fps),
@@ -963,6 +980,15 @@ class WFDMediaPipeline:
         if not self.config.no_audio:
             prog_map += ",sink_4352=1"
 
+        # Inject in-band SPS/PPS before every IDR, like the portal path and
+        # ffmpeg's repeat-headers=1. Without it a sink that starts decoding
+        # late never receives the headers and stays black, which also made
+        # this smoke mode a misleading control while debugging #84.
+        h264_parse_chain = (
+            ["!", "h264parse", "config-interval=-1"]
+            if _gst_has_element("h264parse") else []
+        )
+
         cmd = [
             "gst-launch-1.0", "-e", "-q",
             "mpegtsmux", "name=mux",
@@ -992,7 +1018,8 @@ class WFDMediaPipeline:
             "aud=true",
             "sliced-threads=true",
             "vbv-buf-capacity=200",
-            "!", "video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline",
+            *h264_parse_chain,
+            "!", f"video/x-h264,stream-format=byte-stream,alignment=au,profile={self.config.h264_profile}",
             "!", "queue",
             "!", "mux.sink_4113",
         ]
@@ -1223,7 +1250,7 @@ class WFDMediaPipeline:
                 "!", "x264enc",
                 *encoder_args,
                 *h264_parse_chain,
-                "!", "video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline",
+                "!", f"video/x-h264,stream-format=byte-stream,alignment=au,profile={self.config.h264_profile}",
                 "!", "queue",
                 "!", "mux.sink_4113",
             ]
@@ -1467,7 +1494,7 @@ class WFDMediaPipeline:
             "-c:v", "libx264",
             "-preset", "ultrafast" if parsed_out[1] > 1080 else "veryfast",
             "-tune", "zerolatency",
-            "-profile:v", "baseline",
+            "-profile:v", self.config.h264_profile,
             "-level:v", _h264_level_for_mode(self.config),
             "-pix_fmt", "yuv420p",
             "-r", str(self.config.fps),
@@ -1572,7 +1599,7 @@ class WFDMediaPipeline:
             "-c:v", "libx264",
             "-preset", "ultrafast" if parsed_out[1] > 1080 else "veryfast",
             "-tune", "zerolatency",
-            "-profile:v", "baseline",
+            "-profile:v", self.config.h264_profile,
             "-level:v", _h264_level_for_mode(self.config),
             "-pix_fmt", "yuv420p",
             "-r", str(self.config.fps),
@@ -1698,7 +1725,7 @@ class WFDMediaPipeline:
             "aud=true",
             "sliced-threads=true",
             "vbv-buf-capacity=200",
-            "!", "video/x-h264,stream-format=byte-stream,alignment=au,profile=baseline",
+            "!", f"video/x-h264,stream-format=byte-stream,alignment=au,profile={self.config.h264_profile}",
             "!", "queue",
             "!", "mux.sink_4113",
         ]
@@ -2204,6 +2231,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 output_resolution=mode.resolution,
                 fps=mode.fps,
                 no_audio=self.media_config.no_audio or self.negotiated_no_audio,
+                h264_profile=_encoder_h264_profile(self.sink_video_format),
             )
             print(
                 f"[FluxCast WFD RTSP] Starting media as {mode.name}; "
@@ -3424,6 +3452,7 @@ def _active_rtsp_probe(
                             output_resolution=mode.resolution,
                             fps=mode.fps,
                             no_audio=st["no_audio"],
+                            h264_profile=_encoder_h264_profile(st["sink_vfmt"]),
                         )
                         media = WFDMediaPipeline(
                             eff_cfg,
