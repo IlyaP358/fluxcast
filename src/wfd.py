@@ -155,6 +155,7 @@ class WFDMediaConfig:
     audio_device: Optional[str] = None
     no_audio: bool = False
     test_pattern: bool = False
+    ffmpeg_stats: bool = False
     source_port: int = 19002
     media_pipeline: str = "auto"
     latency_log_path: Optional[str] = None
@@ -764,11 +765,14 @@ def _netdev_tx_bytes(interface: Optional[str]) -> Optional[int]:
     return None
 
 
-def _ffmpeg_sender_args() -> list[str]:
-    return [
+def _ffmpeg_sender_args(show_stats: bool = False) -> list[str]:
+    args = [
         "ffmpeg", "-hide_banner", "-y",
-        "-loglevel", "warning", "-stats",
+        "-loglevel", "warning",
     ]
+    if show_stats:
+        args.append("-stats")
+    return args
 
 
 class WFDMediaPipeline:
@@ -894,7 +898,7 @@ class WFDMediaPipeline:
         gop = _calculate_gop(self.config)
         _tp_h = (_parse_resolution(resolution) or (1280, 720))[1]
         cmd = [
-            *_ffmpeg_sender_args(),
+            *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             "-re",
             "-f", "lavfi",
             "-i", f"testsrc2=size={resolution}:rate={self.config.fps}",
@@ -1445,7 +1449,7 @@ class WFDMediaPipeline:
         ]
 
         ffmpeg_cmd = [
-            *_ffmpeg_sender_args(),
+            *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             "-fflags", "+genpts",
             "-thread_queue_size", "1024",
             "-f", "nut",
@@ -1548,7 +1552,7 @@ class WFDMediaPipeline:
 
         display = os.environ.get("DISPLAY", monitor.display or ":0")
         ffmpeg_cmd = [
-            *_ffmpeg_sender_args(),
+            *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             "-thread_queue_size", "1024",
             "-f", "x11grab",
             "-framerate", str(self.config.fps),
@@ -3539,6 +3543,7 @@ def start_experimental_backend(args) -> None:
         audio_device=getattr(args, "wfd_audio_device", None),
         no_audio=no_audio,
         test_pattern=getattr(args, "wfd_test_pattern", False),
+        ffmpeg_stats=getattr(args, "wfd_ffmpeg_stats", False),
         source_port=getattr(args, "wfd_rtp_source_port", 19002),
         media_pipeline=getattr(args, "wfd_media_pipeline", "auto"),
         latency_log_path=getattr(args, "wfd_latency_log", None),
