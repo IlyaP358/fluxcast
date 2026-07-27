@@ -582,6 +582,7 @@ def _choose_cea_mode(
     wants_720 = resolution is None or (resolution[0] <= 1280 and resolution[1] <= 720)
     wants_1200 = resolution is not None and resolution[0] >= 1920 and resolution[1] > 1080
     wants_60 = config.fps > 30
+    wants_480 = resolution is not None and resolution[0] <= 640 and resolution[1] <= 480
 
     all_modes = {**WFD_CEA_MODES, **WFD_VESA_MODES}
 
@@ -606,6 +607,8 @@ def _choose_cea_mode(
                 WFD_CEA_720P30, WFD_CEA_720P60,
             ]
         )
+    elif wants_480:
+        preferred = [WFD_CEA_640P60, WFD_CEA_720P30, WFD_CEA_720P60]
     elif wants_720:
         preferred = (
             [WFD_CEA_720P60, WFD_CEA_720P30]
@@ -2233,8 +2236,17 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 no_audio=self.media_config.no_audio or self.negotiated_no_audio,
                 h264_profile=_encoder_h264_profile(self.sink_video_format),
             )
+            # Say so when the sink has no mode matching an explicit --output-res,
+            # instead of silently streaming something else (#84).
+            requested = _parse_resolution(self.media_config.output_resolution)
+            if requested is not None and requested != (mode.width, mode.height):
+                print(
+                    f"[FluxCast WFD RTSP] Requested {requested[0]}x{requested[1]} has no "
+                    f"matching WFD mode on this sink; using {mode.name} instead."
+                )
             print(
-                f"[FluxCast WFD RTSP] Starting media as {mode.name}; "
+                f"[FluxCast WFD RTSP] Starting media as {mode.name} "
+                f"(H.264 {effective_config.h264_profile}); "
                 f"RTP source port {self.source_rtp_port}"
             )
             _append_latency_log(
