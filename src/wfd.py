@@ -610,7 +610,10 @@ def _choose_cea_mode(
             ]
         )
     elif wants_480:
-        preferred = [WFD_CEA_640P60, WFD_CEA_720P30, WFD_CEA_720P60]
+        preferred = (
+            [WFD_CEA_640P60, WFD_CEA_720P60, WFD_CEA_720P30]
+            if wants_60 else [WFD_CEA_640P60, WFD_CEA_720P30, WFD_CEA_720P60]
+        )
     elif wants_720:
         preferred = (
             [WFD_CEA_720P60, WFD_CEA_720P30]
