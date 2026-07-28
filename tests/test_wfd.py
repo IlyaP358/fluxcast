@@ -17,6 +17,26 @@ def _completed(stdout="", returncode=0, stderr=""):
     )
 
 
+class VideoModeTableTest(unittest.TestCase):
+    KNOWN_INCONSISTENT = {"1920x1200p30", "1920x1200p60"}
+
+    def test_native_byte_matches_the_mode_bit(self):
+        mismatched = set()
+        for bit, mode in {**wfd.WFD_CEA_MODES, **wfd.WFD_VESA_MODES}.items():
+            native = int(mode.native, 16)
+            table = 1 if mode.table == "vesa" else 0
+            if (native & 0x07, native >> 3) != (table, bit.bit_length() - 1):
+                mismatched.add(mode.name)
+
+        self.assertEqual(mismatched, self.KNOWN_INCONSISTENT)
+
+    def test_level_is_a_single_defined_bit(self):
+        defined = {0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40}
+        for mode in {**wfd.WFD_CEA_MODES, **wfd.WFD_VESA_MODES}.values():
+            level = wfd._wfd_level_for_mode(mode)
+            self.assertIn(level, defined, f"{mode.name} has an undefined level")
+
+
 class FirewallPortTest(unittest.TestCase):
     def test_existing_port_skips_privileged_add(self):
         calls = []

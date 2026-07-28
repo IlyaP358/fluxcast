@@ -192,7 +192,7 @@ class WFDCEAMode:
 
 
 WFD_CEA_MODES: dict[int, WFDCEAMode] = {
-    WFD_CEA_640P60:  WFDCEAMode("640x480p60",    WFD_CEA_640P60,  "08", 640,  480, 60),
+    WFD_CEA_640P60:  WFDCEAMode("640x480p60",    WFD_CEA_640P60,  "00", 640,  480, 60),
     WFD_CEA_720P30:  WFDCEAMode("1280x720p30",   WFD_CEA_720P30,  "28", 1280, 720, 30),
     WFD_CEA_720P60:  WFDCEAMode("1280x720p60",   WFD_CEA_720P60,  "30", 1280, 720, 60),
     WFD_CEA_1080P30: WFDCEAMode("1920x1080p30",  WFD_CEA_1080P30, "38", 1920, 1080, 30),
@@ -454,6 +454,8 @@ def _quality_floor_kbits(width: int, height: int, fps: int) -> int:
     Conservative quality floors for desktop readability at low latency.
     """
     pixels = width * height
+    if pixels <= 640 * 480:
+        return 2000 if fps <= 30 else 3000
     if pixels <= 1280 * 720:
         return 5000 if fps <= 30 else 7000
     if pixels <= 1920 * 1080:
