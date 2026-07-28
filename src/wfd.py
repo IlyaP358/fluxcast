@@ -513,30 +513,14 @@ def _parse_sink_video_format(value: str) -> Optional[WFDVideoFormat]:
 
 
 def _choose_profile(profile_hex: str) -> str:
-    try:
-        profile_mask = int(profile_hex, 16)
-    except ValueError:
-        return profile_hex
-    if profile_mask & 0x01:
-        return "01"
-    if profile_mask & 0x02:
-        return "02"
-    return f"{profile_mask & 0xff:02x}"
+    return "01"
 
 
 def _encoder_h264_profile(sink_format: Optional[WFDVideoFormat]) -> str:
-    """x264/ffmpeg profile name matching the WFD profile advertised in M4 (#84)."""
+    """x264/ffmpeg profile name for the profile _choose_profile advertises """
     if sink_format is None:
         return "baseline"
-    try:
-        profile_mask = int(sink_format.profile, 16)
-    except ValueError:
-        return "baseline"
-    if profile_mask & 0x01:
-        return "baseline"  # sink takes CBP: keep the long-proven path
-    if profile_mask & 0x02:
-        return "high"  # CHP only: encode what we advertise in M4
-    return "baseline"
+    return "high" if _choose_profile(sink_format.profile) == "02" else "baseline"
 
 
 def _max_wfd_level(level_hex: str) -> Optional[int]:
