@@ -3029,6 +3029,21 @@ def _deactivate_connection(active_path: str) -> None:
         print(f"[FluxCast WFD] NetworkManager deactivate warning: {text}")
 
 
+def _cleanup_step(label: str, action) -> None:
+    """Run one teardown step without letting it skip the ones after it.
+
+    Pressing Ctrl+C again while a session is being torn down used to abort the
+    rest of the cleanup, which left the P2P connection up and the GO intent
+    still lowered, so the next run needed a NetworkManager restart (#86).
+    """
+    try:
+        action()
+    except KeyboardInterrupt:
+        print(f"[FluxCast WFD] Interrupted during {label}; finishing cleanup anyway.")
+    except Exception as exc:
+        print(f"[FluxCast WFD] Cleanup step '{label}' failed: {exc}")
+
+
 def _select_peer(peers: list[WFDPeer], selector: Optional[str]) -> WFDPeer:
     if not peers:
         raise WFDNotReady("No Wi-Fi Direct peers found. Put the TV into Screen Share/Wireless Display mode.")
@@ -3559,7 +3574,6 @@ def start_experimental_backend(args) -> None:
         media_config=media_config,
         port=rtsp_port,
     )
-    connected = False
     firewall_opened = False
     uibc_firewall_opened = False
     active_path = ""
@@ -3581,7 +3595,6 @@ def start_experimental_backend(args) -> None:
             peer,
             rtsp_port=rtsp_port,
         )
-        connected = True
         _wait_for_nm_activation(active_path)
 
         if not getattr(args, "wfd_no_firewall", False):
@@ -3604,14 +3617,20 @@ def start_experimental_backend(args) -> None:
     except KeyboardInterrupt:
         print("\n[FluxCast WFD] Stopping WFD session...")
     finally:
-        rtsp.stop_all_media()
-        rtsp.stop()
+        _cleanup_step("media shutdown", rtsp.stop_all_media)
+        _cleanup_step("RTSP server shutdown", rtsp.stop)
         if firewall_opened:
-            _close_wfd_firewall_port(rtsp_port)
+            _cleanup_step("firewall close", lambda: _close_wfd_firewall_port(rtsp_port))
         if uibc_firewall_opened:
-            _close_wfd_firewall_port(WFD_UIBC_PORT)
-        if connected:
-            _deactivate_connection(active_path)
-            _disconnect_device(device_path)
+            _cleanup_step("UIBC firewall close", lambda: _close_wfd_firewall_port(WFD_UIBC_PORT))
+        if active_path:
+            _cleanup_step("connection deactivate",
+                          lambda: _deactivate_connection(active_path))
+        _cleanup_step("P2P device disconnect", lambda: _disconnect_device(device_path))
         if previous_go_intent is not None:
-            _set_p2p_go_intent(args.wfd_interface, previous_go_intent, restoring=True)
+            _cleanup_step(
+                "GO intent restore",
+                lambda: _set_p2p_go_intent(
+                    args.wfd_interface, previous_go_intent, restoring=True
+                ),
+            )
