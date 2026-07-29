@@ -19,6 +19,7 @@ echo -e "\e[1m\e[34m>>>\e[0m Installing fluxcast to ${DESTDIR:-/}..."
 # Install source files & assets
 mkdir -p "$DESTDIR/opt/fluxcast"
 install -m644 "$SRCDIR"/src/*.py "$DESTDIR/opt/fluxcast/"
+install -Dm644 "$SRCDIR"/src/drivers/*.py -t "$DESTDIR/opt/fluxcast/drivers/"
 install -Dm644 "$SRCDIR/src/assets/flcast_logo_512x512.png" -t "$DESTDIR/opt/fluxcast/assets/"
 
 # Install system integration
