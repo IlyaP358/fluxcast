@@ -8,6 +8,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import ts_probe  # noqa: E402
 import wfd  # noqa: E402
 
 
@@ -115,6 +116,64 @@ class FirewallPortTest(unittest.TestCase):
         self.assertFalse(opened)
         self.assertEqual(len(calls), 1)
         self.assertIn(f"--query-port={port}/tcp", calls[0])
+
+
+class ProgMapTest(unittest.TestCase):
+    def test_default_prog_map_is_unchanged(self):
+        self.assertEqual(
+            wfd._wfd_gst_prog_map(True), "program_map,sink_4113=1,sink_4352=1"
+        )
+        self.assertEqual(wfd._wfd_gst_prog_map(False), "program_map,sink_4113=1")
+
+    def test_flag_pins_the_pmt_pid_as_uint(self):
+        self.assertTrue(
+            wfd._wfd_gst_prog_map(True, True).endswith(",PMT_1=(uint)256")
+        )
+        self.assertTrue(
+            wfd._wfd_gst_prog_map(False, True).endswith(",PMT_1=(uint)256")
+        )
+
+    def test_media_config_defaults_to_off(self):
+        self.assertFalse(wfd.WFDMediaConfig(monitor=None).aosp_pmt_pid)
+
+
+class TsDumpTest(unittest.TestCase):
+    def test_pipeline_is_untouched_without_a_dump_path(self):
+        self.assertEqual(
+            wfd._gst_rtp_link(None), ["!", "rtpmp2tpay", "pt=33", "mtu=1328"]
+        )
+        self.assertEqual(wfd._gst_dump_branch(None), [])
+        self.assertIsNone(wfd.WFDMediaConfig(monitor=None).dump_ts_path)
+
+    def test_dump_path_tees_the_muxer_output(self):
+        link = wfd._gst_rtp_link("/tmp/x.ts")
+        branch = wfd._gst_dump_branch("/tmp/x.ts")
+        self.assertEqual(link[:3], ["!", "tee", "name=tsdump"])
+        self.assertIn("rtpmp2tpay", link)
+        self.assertEqual(branch[0], "tsdump.")
+        self.assertIn("location=/tmp/x.ts", branch)
+
+
+class TsProbeTest(unittest.TestCase):
+    def test_sps_parser_reads_profile_level_and_size(self):
+        sps = bytes.fromhex("42c01e d8 0a 03 c9 fd 80 88 00 00 03 00 88 00 00 1e 47 8c 18 cd".replace(" ", ""))
+        info = ts_probe._parse_sps(ts_probe._unescape_rbsp(sps))
+        self.assertIsNotNone(info)
+        self.assertEqual(info.profile_idc, 66)
+        self.assertEqual(info.level_idc, 30)
+
+    def test_null_packets_do_not_count_as_continuity_errors(self):
+        # cc is deliberately frozen; nulls must not be flagged.
+        null = bytes([0x47, 0x1F, 0xFF, 0x10]) + b"\xff" * 184
+        path = os.path.join(os.path.dirname(__file__), "_ts_probe_null.ts")
+        with open(path, "wb") as handle:
+            handle.write(null * 40)
+        try:
+            report = ts_probe.analyze(path)
+            self.assertEqual(report.continuity_errors, {})
+            self.assertEqual(report.packets, 40)
+        finally:
+            os.unlink(path)
 
 
 if __name__ == "__main__":

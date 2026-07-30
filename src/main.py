@@ -42,6 +42,8 @@ Wi-Fi Display (Miracast) Options:
                              Desktop capture backend for wfd (default: auto)
     --wfd-latency-log PATH   Write latency/session events to JSONL log file
     --wfd-no-audio           Stream video only
+    --wfd-aosp-pmt-pid       Put the MPEG-TS PMT on AOSP's PID 0x0100 (issue #84)
+    --wfd-dump-ts [PATH]     Dump the transmitted MPEG-TS and self-check it (issue #84)
     --wfd-audio-device DEV   Pulse/PipeWire monitor source for audio
     --wfd-rtsp-port PORT     RTSP port advertised in WFD IEs (default: 7236)
     --wfd-rtp-source-port P  Local RTP source port (default: 19002)
@@ -146,6 +148,15 @@ def parse_args() -> argparse.Namespace:
                      default=None, dest="wfd_latency_log",
                      help="For --protocol wfd, JSONL file path for latency/session logging "
                           "(default: /tmp/fluxcast-wfd-latency.jsonl)")
+    wfd.add_argument("--wfd-dump-ts", nargs="?", const="/tmp/fluxcast-wfd-stream.ts",
+                     default=None, dest="wfd_dump_ts",
+                     help="For --protocol wfd, write the transmitted MPEG-TS to this file and "
+                          "print a self-check of its PID layout, SPS/PPS and IDR cadence "
+                          "(default: /tmp/fluxcast-wfd-stream.ts). Debug only, the file grows "
+                          "at the stream bitrate")
+    wfd.add_argument("--wfd-aosp-pmt-pid", action="store_true", dest="wfd_aosp_pmt_pid",
+                     help="For --protocol wfd, put the MPEG-TS PMT on AOSP's PID 0x0100 instead "
+                          "of the muxer default, for sinks that only look for it there (issue #84)")
     wfd.add_argument("--wfd-no-audio", action="store_true", dest="wfd_no_audio",
                      help="For --protocol wfd, stream video only")
     wfd.add_argument("--wfd-audio-device", default=None, dest="wfd_audio_device",

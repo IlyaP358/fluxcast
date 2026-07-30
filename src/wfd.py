@@ -163,6 +163,8 @@ class WFDMediaConfig:
     uibc: bool = False  # opt-in: accept touch/mouse input back from the sink (issue #37)
     # H.264 profile the encoders emit; must match the profile sent in M4 (#84).
     h264_profile: str = "baseline"
+    aosp_pmt_pid: bool = False  # opt-in: PMT on AOSP's 0x0100 instead of the muxer default (#84)
+    dump_ts_path: Optional[str] = None
 
 
 @dataclass
@@ -284,6 +286,62 @@ def _gst_has_element(name: str) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0
+
+
+def _wfd_gst_prog_map(with_audio: bool, aosp_pmt_pid: bool = False) -> str:
+    # PMT_<program> must be uint-typed; a plain int is parsed as gint and
+    # silently ignored, leaving the PMT on mpegtsmux's 0x0020 default.
+    prog_map = "program_map,sink_4113=1"
+    if with_audio:
+        prog_map += ",sink_4352=1"
+    if aosp_pmt_pid:
+        prog_map += ",PMT_1=(uint)256"
+    return prog_map
+
+
+def _gst_rtp_link(dump_ts_path: Optional[str]) -> list[str]:
+    payloader = ["!", "rtpmp2tpay", "pt=33", "mtu=1328"]
+    if not dump_ts_path:
+        return payloader
+    return ["!", "tee", "name=tsdump", "!", "queue"] + payloader
+
+
+def _gst_dump_branch(dump_ts_path: Optional[str]) -> list[str]:
+    if not dump_ts_path:
+        return []
+    return [
+        "tsdump.",
+        "!", "queue", "leaky=downstream", "max-size-buffers=512",
+        "!", "filesink", f"location={dump_ts_path}", "async=false",
+    ]
+
+
+def report_ts_dump(dump_ts_path: Optional[str]) -> None:
+    if not dump_ts_path:
+        return
+    try:
+        if not os.path.exists(dump_ts_path) or os.path.getsize(dump_ts_path) < 188 * 20:
+            print(
+                f"[FluxCast WFD TS] {dump_ts_path} is empty or too small to analyse; "
+                "the media pipeline produced almost nothing."
+            )
+            return
+        import ts_probe
+
+        print(ts_probe.format_report(ts_probe.analyze(dump_ts_path)))
+    except Exception as exc:  # diagnostics must never break a session
+        print(f"[FluxCast WFD TS] Self-check failed: {exc}")
+
+
+def schedule_ts_dump_report(dump_ts_path: Optional[str], delay: float = 12.0) -> None:
+    if not dump_ts_path:
+        return
+
+    def _run() -> None:
+        time.sleep(delay)
+        report_ts_dump(dump_ts_path)
+
+    threading.Thread(target=_run, daemon=True, name="wfd-ts-probe").start()
 
 
 def _gst_wfd_sender_available() -> bool:
@@ -871,6 +929,14 @@ class WFDMediaPipeline:
         """
         Low-latency RTP/MPEG-TS output args.
         """
+        if self.config.dump_ts_path:
+            # A second ffmpeg output would get its own encoder (mpeg2video), so
+            # the dump would not be the stream we transmit. Only gst can tee it.
+            print(
+                "[FluxCast WFD TS] --wfd-dump-ts is not supported on the ffmpeg "
+                "pipeline; re-run with --wfd-media-pipeline gst to capture it."
+            )
+
         return [
             "-muxdelay", "0",
             "-muxpreload", "0",
@@ -878,7 +944,7 @@ class WFDMediaPipeline:
             # WFD receivers (notably Samsung) are sensitive to MPEG-TS layout.
             # Keep PMT/video/audio PID values aligned with the working gst path!!!
             # PMT PID 0x1000, video PID 0x1011, audio PID 0x1100.
-            "-mpegts_pmt_start_pid", "4096",
+            "-mpegts_pmt_start_pid", "256" if self.config.aosp_pmt_pid else "4096",
             "-mpegts_start_pid", "4113",
             "-streamid", "0:4113",
             "-mpegts_flags", "resend_headers+pat_pmt_at_frames",
@@ -968,9 +1034,9 @@ class WFDMediaPipeline:
         bitrate_kbits = _bitrate_to_kbits(self.config.bitrate)
         gop = _calculate_gop(self.config)
 
-        prog_map = "program_map,sink_4113=1"
-        if not self.config.no_audio:
-            prog_map += ",sink_4352=1"
+        prog_map = _wfd_gst_prog_map(
+            not self.config.no_audio, self.config.aosp_pmt_pid
+        )
 
         # Inject in-band SPS/PPS before every IDR, like the portal path and
         # ffmpeg's repeat-headers=1. Without it a sink that starts decoding
@@ -989,7 +1055,7 @@ class WFDMediaPipeline:
             "pat-interval=9000",
             "pmt-interval=9000",
             "pcr-interval=3600",
-            "!", "rtpmp2tpay", "pt=33", "mtu=1328",
+            *_gst_rtp_link(self.config.dump_ts_path),
             "!", "udpsink",
             f"host={self.tv_ip}",
             f"port={self.sink_rtp_port}",
@@ -1028,6 +1094,8 @@ class WFDMediaPipeline:
                 "!", "queue",
                 "!", "mux.sink_4352",
             ]
+
+        cmd += _gst_dump_branch(self.config.dump_ts_path)
 
         print(
             f"[FluxCast WFD Media] Starting GStreamer test RTP stream to "
@@ -1142,7 +1210,9 @@ class WFDMediaPipeline:
             stream_label=session.stream_label,
         )
         bitrate_kbits = _bitrate_to_kbits(effective_bitrate)
-        prog_map = "program_map,sink_4113=1"
+        prog_map = _wfd_gst_prog_map(
+            not self.config.no_audio, self.config.aosp_pmt_pid
+        )
         has_h264parse = _gst_has_element("h264parse")
 
         def _gst_video_chain(video_caps: str, selector_args: list[str]) -> list[str]:
@@ -1250,7 +1320,6 @@ class WFDMediaPipeline:
         gst_audio_chain: list[str] = []
         if not self.config.no_audio:
             audio_encoder, audio_caps = _gst_pick_aac_encoder()
-            prog_map += ",sink_4352=1"
             gst_audio_chain = [
                 "pulsesrc", f"device={audio_monitor}", "do-timestamp=true",
                 "!", "audioconvert",
@@ -1271,7 +1340,7 @@ class WFDMediaPipeline:
                 "pat-interval=9000",
                 "pmt-interval=9000",
                 "pcr-interval=3600",
-                "!", "rtpmp2tpay", "pt=33", "mtu=1328",
+                *_gst_rtp_link(self.config.dump_ts_path),
                 "!", "udpsink",
                 f"host={self.tv_ip}",
                 f"port={self.sink_rtp_port}",
@@ -1281,6 +1350,7 @@ class WFDMediaPipeline:
                 "async=false",
                 *_gst_video_chain(video_caps, selector_args),
                 *gst_audio_chain,
+                *_gst_dump_branch(self.config.dump_ts_path),
             ]
 
         caps_strict = (
@@ -1674,9 +1744,9 @@ class WFDMediaPipeline:
         display = os.environ.get("DISPLAY", monitor.display or ":0")
         audio_monitor = self.config.audio_device or _detect_audio_monitor()
 
-        prog_map = "program_map,sink_4113=1"
-        if not self.config.no_audio:
-            prog_map += ",sink_4352=1"
+        prog_map = _wfd_gst_prog_map(
+            not self.config.no_audio, self.config.aosp_pmt_pid
+        )
 
         # identical to the test pipeline, except for the video (ximagesrc) and audio (pulsesrc) sources.
         cmd = [
@@ -1687,7 +1757,7 @@ class WFDMediaPipeline:
             "pat-interval=9000",
             "pmt-interval=9000",
             "pcr-interval=3600",
-            "!", "rtpmp2tpay", "pt=33", "mtu=1328",
+            *_gst_rtp_link(self.config.dump_ts_path),
             "!", "udpsink",
             f"host={self.tv_ip}",
             f"port={self.sink_rtp_port}",
@@ -1734,6 +1804,8 @@ class WFDMediaPipeline:
                 "!", "queue",
                 "!", "mux.sink_4352",
             ]
+
+        cmd += _gst_dump_branch(self.config.dump_ts_path)
 
         print(
             "[FluxCast WFD Media] Using gst-x11 backend for desktop capture "
@@ -2238,6 +2310,9 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 f"(H.264 {effective_config.h264_profile}); "
                 f"RTP source port {self.source_rtp_port}"
             )
+            if effective_config.aosp_pmt_pid:
+                print("[FluxCast WFD RTSP] MPEG-TS PMT pinned to AOSP PID 0x0100 (#84).")
+            schedule_ts_dump_report(effective_config.dump_ts_path)
             _append_latency_log(
                 self.media_config.latency_log_path,
                 "media_starting",
@@ -3466,7 +3541,10 @@ def _active_rtsp_probe(
                             f"[FluxCast WFD RTSP] Active probe: PLAY — "
                             f"starting media ({mode.name})"
                         )
+                        if eff_cfg.aosp_pmt_pid:
+                            print("[FluxCast WFD RTSP] MPEG-TS PMT pinned to AOSP PID 0x0100 (#84).")
                         media.start()
+                        schedule_ts_dump_report(eff_cfg.dump_ts_path)
                         # Keep-alive: respond to GET_PARAMETER/SET_PARAMETER heartbeats.
                         while True:
                             ka = _read_rtsp_message(rfile)
@@ -3571,7 +3649,11 @@ def start_experimental_backend(args) -> None:
         capture_backend=getattr(args, "wfd_capture_backend", "auto"),
         peer_name=peer.name,
         uibc=getattr(args, "wfd_uibc", False),
+        aosp_pmt_pid=getattr(args, "wfd_aosp_pmt_pid", False),
+        dump_ts_path=getattr(args, "wfd_dump_ts", None),
     )
+    if media_config.dump_ts_path:
+        print(f"[FluxCast WFD] Dumping transmitted MPEG-TS to: {media_config.dump_ts_path}")
     if media_config.latency_log_path:
         print(f"[FluxCast WFD] Latency log file: {media_config.latency_log_path}")
 
