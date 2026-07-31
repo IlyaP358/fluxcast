@@ -125,13 +125,14 @@ class ProgMapTest(unittest.TestCase):
         )
         self.assertEqual(wfd._wfd_gst_prog_map(False), "program_map,sink_4113=1")
 
-    def test_flag_pins_the_pmt_pid_as_uint(self):
-        self.assertTrue(
-            wfd._wfd_gst_prog_map(True, True).endswith(",PMT_1=(uint)256")
-        )
-        self.assertTrue(
-            wfd._wfd_gst_prog_map(False, True).endswith(",PMT_1=(uint)256")
-        )
+    def test_flag_pins_pmt_as_uint_and_pcr_as_int(self):
+        # mpegtsmux reads PMT_%d as uint and PCR_%d as int; the wrong type is
+        # silently ignored and the PID stays at the muxer default.
+        for with_audio in (True, False):
+            prog_map = wfd._wfd_gst_prog_map(with_audio, True)
+            self.assertIn(",PMT_1=(uint)256", prog_map)
+            self.assertIn(",PCR_1=4096", prog_map)
+            self.assertNotIn("PCR_1=(uint)", prog_map)
 
     def test_media_config_defaults_to_off(self):
         self.assertFalse(wfd.WFDMediaConfig(monitor=None).aosp_pmt_pid)

@@ -295,7 +295,10 @@ def _wfd_gst_prog_map(with_audio: bool, aosp_pmt_pid: bool = False) -> str:
     if with_audio:
         prog_map += ",sink_4352=1"
     if aosp_pmt_pid:
-        prog_map += ",PMT_1=(uint)256"
+        # PMT_%d is read as uint, PCR_%d as plain int; the wrong type is
+        # silently ignored. PCR_1 gives the dedicated 0x1000 PCR stream that
+        # AOSP emits and this muxer otherwise folds into the video PID (#84).
+        prog_map += ",PMT_1=(uint)256,PCR_1=4096"
     return prog_map
 
 
@@ -316,9 +319,15 @@ def _gst_dump_branch(dump_ts_path: Optional[str]) -> list[str]:
     ]
 
 
+_ts_dump_reported: set = set()
+
+
 def report_ts_dump(dump_ts_path: Optional[str]) -> None:
-    if not dump_ts_path:
+    # Runs both from a timer and from teardown, whichever comes first, so a
+    # short Ctrl+C run still prints the self-check (#84).
+    if not dump_ts_path or dump_ts_path in _ts_dump_reported:
         return
+    _ts_dump_reported.add(dump_ts_path)
     try:
         if not os.path.exists(dump_ts_path) or os.path.getsize(dump_ts_path) < 188 * 20:
             print(
@@ -333,7 +342,7 @@ def report_ts_dump(dump_ts_path: Optional[str]) -> None:
         print(f"[FluxCast WFD TS] Self-check failed: {exc}")
 
 
-def schedule_ts_dump_report(dump_ts_path: Optional[str], delay: float = 12.0) -> None:
+def schedule_ts_dump_report(dump_ts_path: Optional[str], delay: float = 8.0) -> None:
     if not dump_ts_path:
         return
 
@@ -2311,7 +2320,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 f"RTP source port {self.source_rtp_port}"
             )
             if effective_config.aosp_pmt_pid:
-                print("[FluxCast WFD RTSP] MPEG-TS PMT pinned to AOSP PID 0x0100 (#84).")
+                print("[FluxCast WFD RTSP] MPEG-TS PIDs pinned to AOSP layout: PMT 0x0100, PCR 0x1000 (#84).")
             schedule_ts_dump_report(effective_config.dump_ts_path)
             _append_latency_log(
                 self.media_config.latency_log_path,
@@ -3542,7 +3551,7 @@ def _active_rtsp_probe(
                             f"starting media ({mode.name})"
                         )
                         if eff_cfg.aosp_pmt_pid:
-                            print("[FluxCast WFD RTSP] MPEG-TS PMT pinned to AOSP PID 0x0100 (#84).")
+                            print("[FluxCast WFD RTSP] MPEG-TS PIDs pinned to AOSP layout: PMT 0x0100, PCR 0x1000 (#84).")
                         media.start()
                         schedule_ts_dump_report(eff_cfg.dump_ts_path)
                         # Keep-alive: respond to GET_PARAMETER/SET_PARAMETER heartbeats.
@@ -3708,6 +3717,7 @@ def start_experimental_backend(args) -> None:
         print("\n[FluxCast WFD] Stopping WFD session...")
     finally:
         rtsp.stop_all_media()
+        report_ts_dump(media_config.dump_ts_path)
         rtsp.stop()
         if firewall_opened:
             _close_wfd_firewall_port(rtsp_port)
