@@ -191,6 +191,7 @@ class TSReport:
     pat_pmt_pid: Optional[int] = None
     pmt_pcr_pid: Optional[int] = None
     pmt_streams: list = field(default_factory=list)  # (stream_type, pid)
+    pmt_versions: list = field(default_factory=list)  # [(pcr_pid, streams)]
     pid_counts: dict = field(default_factory=dict)
     continuity_errors: dict = field(default_factory=dict)
     pcr_count: int = 0
@@ -209,6 +210,25 @@ class TSReport:
 def _iter_packets(data: bytes):
     for offset in range(0, len(data) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
         yield offset, data[offset:offset + TS_PACKET_SIZE]
+
+
+def _parse_pmt(section: Optional[bytes]):
+    """Return (pcr_pid, [(stream_type, pid), ...]) for one PMT section."""
+    if not section or len(section) <= 12:
+        return None
+    length = ((section[1] & 0x0F) << 8) | section[2]
+    pcr_pid = ((section[8] & 0x1F) << 8) | section[9]
+    info_length = ((section[10] & 0x0F) << 8) | section[11]
+    cursor = 12 + info_length
+    end = min(3 + length - 4, len(section))
+    streams = []
+    while cursor + 4 < end:
+        stream_type = section[cursor]
+        es_pid = ((section[cursor + 1] & 0x1F) << 8) | section[cursor + 2]
+        es_info = ((section[cursor + 3] & 0x0F) << 8) | section[cursor + 4]
+        streams.append((stream_type, es_pid))
+        cursor += 5 + es_info
+    return (pcr_pid, tuple(streams))
 
 
 def _section_payload(packet: bytes) -> Optional[bytes]:
@@ -271,23 +291,27 @@ def analyze(path: str, max_bytes: int = 24 * 1024 * 1024) -> TSReport:
                 body = section[8:3 + length - 4]
                 if len(body) >= 4:
                     report.pat_pmt_pid = ((body[2] & 0x1F) << 8) | body[3]
-        elif pid == report.pat_pmt_pid and not report.pmt_streams:
-            section = _section_payload(packet)
-            if section and len(section) > 12:
-                length = ((section[1] & 0x0F) << 8) | section[2]
-                report.pmt_pcr_pid = ((section[8] & 0x1F) << 8) | section[9]
-                info_length = ((section[10] & 0x0F) << 8) | section[11]
-                cursor = 12 + info_length
-                end = 3 + length - 4
-                while cursor + 4 < min(end, len(section)):
-                    stream_type = section[cursor]
-                    es_pid = ((section[cursor + 1] & 0x1F) << 8) | section[cursor + 2]
-                    es_info = ((section[cursor + 3] & 0x0F) << 8) | section[cursor + 4]
-                    report.pmt_streams.append((stream_type, es_pid))
-                    if stream_type in (0x1B, 0x24) and video_pid is None:
-                        video_pid = es_pid
-                    cursor += 5 + es_info
-        elif video_pid is not None and pid == video_pid and afc in (1, 3):
+        elif pid == report.pat_pmt_pid:
+            parsed = _parse_pmt(_section_payload(packet))
+            if parsed is not None and parsed not in report.pmt_versions:
+                report.pmt_versions.append(parsed)
+
+    for pcr_pid, streams in report.pmt_versions:
+        for stream_type, es_pid in streams:
+            if stream_type in (0x1B, 0x24) and video_pid is None:
+                video_pid = es_pid
+    if report.pmt_versions:
+        report.pmt_pcr_pid, report.pmt_streams = report.pmt_versions[0]
+
+    if video_pid is not None:
+        for _, packet in _iter_packets(data):
+            if packet[0] != SYNC_BYTE:
+                continue
+            if (((packet[1] & 0x1F) << 8) | packet[2]) != video_pid:
+                continue
+            afc = (packet[3] >> 4) & 0x03
+            if afc not in (1, 3):
+                continue
             payload_offset = 4
             if afc == 3:
                 payload_offset += 1 + packet[4]
@@ -364,6 +388,24 @@ def format_report(report: TSReport) -> str:
         lines.append(f"{tag} PMT: {name} on PID 0x{pid:04x}{expected}")
     if not report.pmt_streams:
         lines.append(f"{tag} WARNING no PMT found -- a sink can never locate the video stream")
+
+    if len(report.pmt_versions) > 1:
+        lines.append(
+            f"{tag} WARNING the PMT changed {len(report.pmt_versions)} times; a sink that reads "
+            "only the first one never sees the streams added later:"
+        )
+        for index, (pcr_pid, streams) in enumerate(report.pmt_versions):
+            described = ", ".join(
+                f"{STREAM_TYPES.get(t, hex(t))}@0x{p:04x}" for t, p in streams
+            ) or "(no streams)"
+            lines.append(f"{tag}   PMT #{index + 1}: PCR 0x{pcr_pid:04x} | {described}")
+
+    if report.pid_counts:
+        counts = "  ".join(
+            f"0x{pid:04x}:{count}"
+            for pid, count in sorted(report.pid_counts.items(), key=lambda kv: -kv[1])
+        )
+        lines.append(f"{tag} packets per PID: {counts}")
 
     first = " ".join(f"0x{pid:04x}" for pid in report.first_packet_pids)
     lines.append(f"{tag} first 7 packets (what the sink sees first): {first}")
