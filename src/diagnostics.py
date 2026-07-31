@@ -662,7 +662,12 @@ def _python_check() -> Check:
     )
 
 
-def run_diagnostics() -> DiagnosticReport:
+def run_diagnostics(skip_firewall: bool = False) -> DiagnosticReport:
+    firewall_check = (
+        Check("firewall", STATUS_SKIP, "disabled by --wfd-no-firewall")
+        if skip_firewall
+        else _firewall_check()
+    )
     checks = [
         _python_check(),
         _command_check("ffmpeg", "video/audio transcoding", required=True),
@@ -702,7 +707,7 @@ def run_diagnostics() -> DiagnosticReport:
         _iw_p2p_check(),
         _supplicant_capability_check(),
         _supplicant_wfd_check(),
-        _firewall_check(),
+        firewall_check,
     ]
 
     by_name = {check.name: check for check in checks}

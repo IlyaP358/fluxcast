@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -110,6 +111,21 @@ class FirewallPortTest(unittest.TestCase):
         self.assertFalse(opened)
         self.assertEqual(len(calls), 1)
         self.assertIn(f"--query-port={port}/tcp", calls[0])
+
+
+class StartBackendDiagnosticsTest(unittest.TestCase):
+    def test_no_firewall_flag_is_forwarded_to_diagnostics(self):
+        args = SimpleNamespace(wfd_no_firewall=True)
+        report = SimpleNamespace(wfd_candidate=False)
+
+        with (
+            mock.patch.object(wfd, "run_diagnostics", return_value=report) as run,
+            mock.patch.object(wfd, "print_report"),
+            self.assertRaises(wfd.WFDNotReady),
+        ):
+            wfd.start_experimental_backend(args)
+
+        run.assert_called_once_with(skip_firewall=True)
 
 
 if __name__ == "__main__":
