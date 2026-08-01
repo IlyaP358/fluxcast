@@ -288,6 +288,9 @@ def _gst_has_element(name: str) -> bool:
     return result.returncode == 0
 
 
+_GST_CAPTURE_BACKENDS = ("portal", "gst-x11")
+
+
 def _wfd_gst_prog_map(with_audio: bool, aosp_pmt_pid: bool = False) -> str:
     # PMT_<program> must be uint-typed; a plain int is parsed as gint and
     # silently ignored, leaving the PMT on mpegtsmux's 0x0020 default.
@@ -295,10 +298,7 @@ def _wfd_gst_prog_map(with_audio: bool, aosp_pmt_pid: bool = False) -> str:
     if with_audio:
         prog_map += ",sink_4352=1"
     if aosp_pmt_pid:
-        # PMT_%d is read as uint, PCR_%d as plain int; the wrong type is
-        # silently ignored. PCR_1 gives the dedicated 0x1000 PCR stream that
-        # AOSP emits and this muxer otherwise folds into the video PID (#84).
-        prog_map += ",PMT_1=(uint)256,PCR_1=4096"
+        prog_map += ",PMT_1=(uint)256"
     return prog_map
 
 
@@ -871,6 +871,16 @@ class WFDMediaPipeline:
         pipeline = requested_pipeline
         if pipeline == "auto":
             pipeline = "gst" if self.config.test_pattern and _gst_wfd_sender_available() else "ffmpeg"
+        # mpegtsmux has no way to set the PSI version_number, so the AOSP
+        # layout is only reachable through ffmpeg (#84).
+        if self.config.aosp_pmt_pid and pipeline == "gst":
+            if requested_pipeline == "auto":
+                print("[FluxCast WFD Media] AOSP TS layout requested; using the ffmpeg sender "
+                      "(mpegtsmux cannot set the PAT/PMT version).")
+                pipeline = "ffmpeg"
+            else:
+                print("[FluxCast WFD Media] WARNING --wfd-media-pipeline gst cannot set the "
+                      "PAT/PMT version to AOSP's 1; the sink may ignore the tables.")
 
         if pipeline == "gst":
             if not self.config.test_pattern:
@@ -946,6 +956,15 @@ class WFDMediaPipeline:
                 "pipeline; re-run with --wfd-media-pipeline gst to capture it."
             )
 
+        aosp_args: list[str] = []
+        if self.config.aosp_pmt_pid:
+            # AOSP's TSPacketizer stamps version_number=1 on PAT and PMT
+            # (0xc3); ffmpeg and mpegtsmux both default to 0 (0xc1). A sink
+            # that seeds its "last seen version" at 0 treats our tables as
+            # already-parsed and never picks up the program (#84).
+            # sdt_period only thins the SDT out, it cannot be removed.
+            aosp_args = ["-tables_version", "1", "-sdt_period", "1000000"]
+
         return [
             "-muxdelay", "0",
             "-muxpreload", "0",
@@ -959,6 +978,7 @@ class WFDMediaPipeline:
             "-mpegts_flags", "resend_headers+pat_pmt_at_frames",
             "-pat_period", "0.1",
             "-pcr_period", "20",
+            *aosp_args,
             "-f", "rtp_mpegts",
             self._rtp_output(),
         ]
@@ -1122,6 +1142,9 @@ class WFDMediaPipeline:
             raise WFDNotReady("ffmpeg is required for WFD desktop streaming.")
 
         backends = _wfd_capture_backend_order(self.config)
+        if self.config.aosp_pmt_pid and backends and backends[0] in _GST_CAPTURE_BACKENDS:
+            print(f"[FluxCast WFD Media] WARNING the {backends[0]} backend muxes with mpegtsmux, "
+                  "which cannot set the PAT/PMT version to AOSP's 1; only the PMT PID is applied.")
         errors: list[str] = []
         for idx, backend in enumerate(backends):
             try:
@@ -2320,7 +2343,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 f"RTP source port {self.source_rtp_port}"
             )
             if effective_config.aosp_pmt_pid:
-                print("[FluxCast WFD RTSP] MPEG-TS PIDs pinned to AOSP layout: PMT 0x0100, PCR 0x1000 (#84).")
+                print("[FluxCast WFD RTSP] AOSP-compatible MPEG-TS requested: PMT 0x0100, PSI version 1 (#84).")
             schedule_ts_dump_report(effective_config.dump_ts_path)
             _append_latency_log(
                 self.media_config.latency_log_path,
@@ -3551,7 +3574,7 @@ def _active_rtsp_probe(
                             f"starting media ({mode.name})"
                         )
                         if eff_cfg.aosp_pmt_pid:
-                            print("[FluxCast WFD RTSP] MPEG-TS PIDs pinned to AOSP layout: PMT 0x0100, PCR 0x1000 (#84).")
+                            print("[FluxCast WFD RTSP] AOSP-compatible MPEG-TS requested: PMT 0x0100, PSI version 1 (#84).")
                         media.start()
                         schedule_ts_dump_report(eff_cfg.dump_ts_path)
                         # Keep-alive: respond to GET_PARAMETER/SET_PARAMETER heartbeats.

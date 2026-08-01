@@ -195,6 +195,7 @@ class TSReport:
     pid_counts: dict = field(default_factory=dict)
     continuity_errors: dict = field(default_factory=dict)
     pcr_count: int = 0
+    pcr_pids: dict = field(default_factory=dict)
     first_packet_pids: list = field(default_factory=list)
     sps_count: int = 0
     pps_count: int = 0
@@ -268,6 +269,7 @@ def analyze(path: str, max_bytes: int = 24 * 1024 * 1024) -> TSReport:
         afc = (packet[3] >> 4) & 0x03
         if afc in (2, 3) and packet[4] > 0 and packet[5] & 0x10:
             report.pcr_count += 1
+            report.pcr_pids[pid] = report.pcr_pids.get(pid, 0) + 1
             pcr_base = (
                 (packet[6] << 25) | (packet[7] << 17) | (packet[8] << 9)
                 | (packet[9] << 1) | (packet[10] >> 7)
@@ -411,6 +413,17 @@ def format_report(report: TSReport) -> str:
     lines.append(f"{tag} first 7 packets (what the sink sees first): {first}")
 
     lines.append(f"{tag} PCR packets: {report.pcr_count}")
+    stray_pcr = {
+        pid: count for pid, count in report.pcr_pids.items()
+        if report.pmt_pcr_pid is not None and pid != report.pmt_pcr_pid
+    }
+    if stray_pcr:
+        where = "  ".join(f"0x{pid:04x}:{count}" for pid, count in sorted(stray_pcr.items()))
+        lines.append(
+            f"{tag} WARNING PCR also on PIDs the PMT does not name as PCR_PID: {where}"
+        )
+    if not report.pcr_count:
+        lines.append(f"{tag} WARNING no PCR at all -- the sink has no clock to lock to")
     if report.continuity_errors:
         broken = ", ".join(
             f"0x{pid:04x}:{count}" for pid, count in sorted(report.continuity_errors.items())

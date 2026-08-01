@@ -42,7 +42,8 @@ Wi-Fi Display (Miracast) Options:
                              Desktop capture backend for wfd (default: auto)
     --wfd-latency-log PATH   Write latency/session events to JSONL log file
     --wfd-no-audio           Stream video only
-    --wfd-aosp-pmt-pid       Use AOSP's MPEG-TS PID layout: PMT 0x0100, PCR 0x1000 (issue #84)
+    --wfd-aosp-pmt-pid       AOSP-compatible MPEG-TS: PMT on PID 0x0100, PSI version 1
+                             (issue #84; needs the ffmpeg sender)
     --wfd-dump-ts [PATH]     Dump the transmitted MPEG-TS and self-check it (issue #84)
     --wfd-audio-device DEV   Pulse/PipeWire monitor source for audio
     --wfd-rtsp-port PORT     RTSP port advertised in WFD IEs (default: 7236)
@@ -155,9 +156,9 @@ def parse_args() -> argparse.Namespace:
                           "(default: /tmp/fluxcast-wfd-stream.ts). Debug only, the file grows "
                           "at the stream bitrate")
     wfd.add_argument("--wfd-aosp-pmt-pid", action="store_true", dest="wfd_aosp_pmt_pid",
-                     help="For --protocol wfd, reproduce AOSP's MPEG-TS PID layout: PMT on "
-                          "0x0100 and a dedicated PCR stream on 0x1000, instead of the muxer "
-                          "defaults, for sinks that expect it (issue #84)")
+                     help="For --protocol wfd, emit an AOSP-compatible MPEG-TS: PMT on PID "
+                          "0x0100 and PAT/PMT version_number 1 instead of the muxer defaults. "
+                          "Requires the ffmpeg sender; mpegtsmux cannot set the version (issue #84)")
     wfd.add_argument("--wfd-no-audio", action="store_true", dest="wfd_no_audio",
                      help="For --protocol wfd, stream video only")
     wfd.add_argument("--wfd-audio-device", default=None, dest="wfd_audio_device",

@@ -125,17 +125,44 @@ class ProgMapTest(unittest.TestCase):
         )
         self.assertEqual(wfd._wfd_gst_prog_map(False), "program_map,sink_4113=1")
 
-    def test_flag_pins_pmt_as_uint_and_pcr_as_int(self):
-        # mpegtsmux reads PMT_%d as uint and PCR_%d as int; the wrong type is
-        # silently ignored and the PID stays at the muxer default.
+    def test_flag_pins_the_pmt_pid_as_uint(self):
+        # PMT_%d is read as uint; a plain int is silently ignored.
         for with_audio in (True, False):
-            prog_map = wfd._wfd_gst_prog_map(with_audio, True)
-            self.assertIn(",PMT_1=(uint)256", prog_map)
-            self.assertIn(",PCR_1=4096", prog_map)
-            self.assertNotIn("PCR_1=(uint)", prog_map)
+            self.assertIn(",PMT_1=(uint)256", wfd._wfd_gst_prog_map(with_audio, True))
+
+    def test_pcr_pid_is_never_requested(self):
+        for aosp in (True, False):
+            for with_audio in (True, False):
+                self.assertNotIn("PCR_1", wfd._wfd_gst_prog_map(with_audio, aosp))
 
     def test_media_config_defaults_to_off(self):
         self.assertFalse(wfd.WFDMediaConfig(monitor=None).aosp_pmt_pid)
+
+
+class AospTablesVersionTest(unittest.TestCase):
+    def _args(self, aosp):
+        config = wfd.WFDMediaConfig(monitor=None, output_resolution="1280x720",
+                                    aosp_pmt_pid=aosp)
+        pipeline = wfd.WFDMediaPipeline(config, tv_ip="10.42.0.2", local_ip="10.42.0.1",
+                                        sink_rtp_port=35034)
+        return pipeline._common_output_args()
+
+    def test_default_sends_no_version_override(self):
+        args = self._args(False)
+        self.assertNotIn("-tables_version", args)
+        self.assertNotIn("-sdt_period", args)
+        self.assertEqual(args[args.index("-mpegts_pmt_start_pid") + 1], "4096")
+
+    def test_flag_stamps_version_1_like_aosp(self):
+        # AOSP writes 0xc3 (version_number=1) in PAT and PMT; both muxers
+        # default to 0, which a sink seeded at 0 can treat as already seen.
+        args = self._args(True)
+        self.assertEqual(args[args.index("-tables_version") + 1], "1")
+        self.assertEqual(args[args.index("-mpegts_pmt_start_pid") + 1], "256")
+
+    def test_version_args_precede_the_output(self):
+        args = self._args(True)
+        self.assertLess(args.index("-tables_version"), args.index("-f"))
 
 
 class TsDumpTest(unittest.TestCase):
@@ -162,6 +189,19 @@ class TsProbeTest(unittest.TestCase):
         self.assertIsNotNone(info)
         self.assertEqual(info.profile_idc, 66)
         self.assertEqual(info.level_idc, 30)
+
+    def test_pcr_outside_the_declared_pcr_pid_is_reported(self):
+        report = ts_probe.TSReport(
+            pmt_pcr_pid=0x1000, pcr_count=4, pcr_pids={0x1000: 2, 0x0000: 1, 0x1011: 1}
+        )
+        text = ts_probe.format_report(report)
+        self.assertIn("PCR also on PIDs the PMT does not name", text)
+        self.assertIn("0x0000:1", text)
+        self.assertIn("0x1011:1", text)
+
+    def test_pcr_only_on_the_declared_pid_is_not_reported(self):
+        report = ts_probe.TSReport(pmt_pcr_pid=0x1011, pcr_count=2, pcr_pids={0x1011: 2})
+        self.assertNotIn("PCR also on PIDs", ts_probe.format_report(report))
 
     def test_null_packets_do_not_count_as_continuity_errors(self):
         # cc is deliberately frozen; nulls must not be flagged.
