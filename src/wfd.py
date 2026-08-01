@@ -3490,7 +3490,7 @@ def _active_rtsp_probe(
 
 
 def start_experimental_backend(args) -> None:
-    report = run_diagnostics()
+    report = run_diagnostics(skip_firewall=getattr(args, "wfd_no_firewall", False))
     print_report(report)
     print()
 

@@ -15,6 +15,14 @@ def _completed(stdout="", returncode=0, stderr=""):
 
 
 class FirewallCheckTest(unittest.TestCase):
+    def test_run_diagnostics_skips_firewall_probe_when_requested(self):
+        with mock.patch("diagnostics._firewall_check") as firewall_check:
+            report = diagnostics.run_diagnostics(skip_firewall=True)
+
+        firewall_check.assert_not_called()
+        firewall = next(check for check in report.checks if check.name == "firewall")
+        self.assertEqual(firewall.status, diagnostics.STATUS_SKIP)
+
     def test_skips_when_no_firewall_tool(self):
         with mock.patch("diagnostics.shutil.which", return_value=None):
             check = diagnostics._firewall_check()
