@@ -244,7 +244,7 @@ def main() -> None:
 
     if args.doctor or args.doctor_json:
         from diagnostics import print_report, run_diagnostics
-        report = run_diagnostics()
+        report = run_diagnostics(skip_firewall=getattr(args, "wfd_no_firewall", False))
         if args.doctor_json:
             print(report.to_json())
         else:
