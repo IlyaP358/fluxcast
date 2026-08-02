@@ -165,6 +165,67 @@ class AospTablesVersionTest(unittest.TestCase):
         self.assertLess(args.index("-tables_version"), args.index("-f"))
 
 
+class CapturePipeTest(unittest.TestCase):
+    """The portal->ffmpeg pipe must not report success on a silent capture."""
+
+    def _pipeline(self):
+        config = wfd.WFDMediaConfig(monitor=None, aosp_pmt_pid=True)
+        pipeline = wfd.WFDMediaPipeline(config, tv_ip="10.42.0.2", local_ip="10.42.0.1",
+                                        sink_rtp_port=35034)
+        pipeline.tx_interface = "lo"
+        return pipeline
+
+    def _run(self, tx_values, producer_alive=True):
+        pipeline = self._pipeline()
+        procs = []
+
+        class Proc:
+            def __init__(self, alive):
+                self.stdout = io.BytesIO()
+                self._alive = alive
+                self.terminated = False
+
+            def poll(self):
+                return None if self._alive else 1
+
+            def terminate(self):
+                self.terminated = True
+
+        def fake_popen(cmd, *a, **k):
+            proc = Proc(producer_alive if not procs else True)
+            procs.append(proc)
+            return proc
+
+        errors = []
+        with (
+            mock.patch.object(wfd.subprocess, "Popen", side_effect=fake_popen),
+            mock.patch.object(wfd, "_netdev_tx_bytes", side_effect=tx_values),
+            mock.patch.object(wfd.time, "sleep"),
+        ):
+            ok = pipeline._spawn_capture_pipe(["gst"], ["ffmpeg"], errors, "path")
+        return ok, errors, pipeline, procs
+
+    def test_flowing_capture_is_accepted(self):
+        ok, errors, pipeline, _ = self._run([1000, 90000])
+        self.assertTrue(ok)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(pipeline.processes), 2)
+
+    def test_silent_capture_is_rejected_and_torn_down(self):
+        # Byte-identical tx before and after means no RTP left the machine.
+        ok, errors, pipeline, procs = self._run([1000, 1000])
+        self.assertFalse(ok)
+        self.assertIn("no RTP left the interface", errors[0])
+        self.assertEqual(pipeline.processes, [])
+        self.assertTrue(all(p.terminated for p in procs))
+
+    def test_dead_capture_process_is_rejected(self):
+        ok, errors, pipeline, _ = self._run([1000, 90000], producer_alive=False)
+        self.assertFalse(ok)
+        self.assertIn("capture or encoder exited", errors[0])
+        self.assertEqual(pipeline.processes, [])
+
+
 class TsDumpTest(unittest.TestCase):
     def test_pipeline_is_untouched_without_a_dump_path(self):
         self.assertEqual(

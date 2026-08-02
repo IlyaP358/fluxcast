@@ -288,9 +288,6 @@ def _gst_has_element(name: str) -> bool:
     return result.returncode == 0
 
 
-_GST_CAPTURE_BACKENDS = ("portal", "gst-x11")
-
-
 def _wfd_gst_prog_map(with_audio: bool, aosp_pmt_pid: bool = False) -> str:
     # PMT_<program> must be uint-typed; a plain int is parsed as gint and
     # silently ignored, leaving the PMT on mpegtsmux's 0x0020 default.
@@ -1142,9 +1139,9 @@ class WFDMediaPipeline:
             raise WFDNotReady("ffmpeg is required for WFD desktop streaming.")
 
         backends = _wfd_capture_backend_order(self.config)
-        if self.config.aosp_pmt_pid and backends and backends[0] in _GST_CAPTURE_BACKENDS:
-            print(f"[FluxCast WFD Media] WARNING the {backends[0]} backend muxes with mpegtsmux, "
-                  "which cannot set the PAT/PMT version to AOSP's 1; only the PMT PID is applied.")
+        if self.config.aosp_pmt_pid and "gst-x11" in backends:
+            print("[FluxCast WFD Media] WARNING the gst-x11 backend muxes with mpegtsmux, "
+                  "which cannot set the PAT/PMT version to AOSP's 1.")
         errors: list[str] = []
         for idx, backend in enumerate(backends):
             try:
@@ -1153,7 +1150,12 @@ class WFDMediaPipeline:
                 elif backend == "gst-x11":
                     self._start_desktop_gst_x11()
                 elif backend == "portal":
-                    self._start_desktop_portal()
+                    # mpegtsmux cannot stamp the PSI version, so the AOSP
+                    # layout needs ffmpeg to do the muxing (#84).
+                    if self.config.aosp_pmt_pid:
+                        self._start_desktop_portal_ffmpeg()
+                    else:
+                        self._start_desktop_portal()
                 else:
                     self._start_desktop_wf_recorder()
                 return
@@ -1169,6 +1171,178 @@ class WFDMediaPipeline:
                 "then allow screen-share in the portal picker dialog."
             )
         raise WFDNotReady(detail)
+
+    def _open_portal_session(self, monitor):
+        print("[FluxCast WFD Media] Opening portal screen-share dialog (KDE/GNOME Wayland)...")
+        try:
+            self.portal_session = start_portal_capture(
+                timeout=120.0,
+                preferred_position=(monitor.x, monitor.y) if monitor is not None else None,
+                preferred_size=(monitor.width, monitor.height) if monitor is not None else None,
+            )
+        except PortalCaptureError as exc:
+            raise WFDNotReady(f"portal capture setup failed: {exc}") from exc
+
+        session = self.portal_session
+        # source_type: 1=MONITOR, 2=WINDOW, 4=VIRTUAL ("Share virtual screen")
+        if session.source_type is not None and session.source_type not in (1, 4):
+            close_portal_capture(self.portal_session)
+            self.portal_session = None
+            raise WFDNotReady(
+                "Portal returned a window or camera source. "
+                "In the portal picker choose a full monitor or 'Share virtual screen'."
+            )
+        return session
+
+    def _start_desktop_portal_ffmpeg(self) -> None:
+        """
+        Portal capture with ffmpeg doing the encode and mux.
+
+        mpegtsmux cannot stamp the PAT/PMT version_number, so sinks that need
+        AOSP's value are unreachable through the all-GStreamer portal path
+        (#84). Here gst only captures and scales, then hands raw I420 to
+        ffmpeg over a pipe, the same shape the wf-recorder backend uses.
+        """
+        if not shutil.which("gst-launch-1.0"):
+            raise WFDNotReady("Portal backend requires gst-launch-1.0 (pipewiresrc pipeline).")
+        if not shutil.which("ffmpeg"):
+            raise WFDNotReady("ffmpeg is required for the portal->ffmpeg pipeline.")
+        missing = [name for name in ("pipewiresrc", "videoconvert", "videoscale", "videorate")
+                   if not _gst_has_element(name)]
+        if missing:
+            raise WFDNotReady(
+                "Portal backend is missing required GStreamer elements: " + ", ".join(missing)
+            )
+
+        monitor = self.config.monitor
+        if self.config.output_resolution:
+            out_res = self.config.output_resolution
+        elif monitor is not None:
+            out_res = f"{monitor.width}x{monitor.height}"
+        else:
+            out_res = "1920x1080"
+        audio_monitor = self.config.audio_device or _detect_audio_monitor()
+        gop = _calculate_gop(self.config)
+        out_w, out_h = _parse_resolution(out_res) or (1920, 1080)
+        requested_kbits = _bitrate_to_kbits(self.config.bitrate)
+        effective_kbits = max(requested_kbits,
+                              _quality_floor_kbits(out_w, out_h, self.config.fps))
+        if "LG" in self.config.peer_name.upper():
+            effective_kbits = min(effective_kbits, 4000)
+        effective_bitrate = _kbits_to_bitrate_text(effective_kbits)
+        if effective_kbits > requested_kbits:
+            print("[FluxCast WFD Media] Raising bitrate for desktop clarity: "
+                  f"{self.config.bitrate} -> {effective_bitrate}")
+
+        session = self._open_portal_session(monitor)
+        attempts = _pipewiresrc_selector_attempts(session.pw_node_id,
+                                                  stream_label=session.stream_label)
+
+        props = _gst_pipewiresrc_properties()
+        extra_src = [flag for flag, prop in (
+            ("max-buffers=64", "max-buffers"),
+            ("resend-last=true", "resend-last"),
+            ("min-force-user-latency=0", "min-force-user-latency"),
+        ) if prop in props]
+
+        ffmpeg_cmd = [
+            "ffmpeg", "-hide_banner", "-y",
+            "-loglevel", "warning",
+            "-fflags", "+genpts",
+            "-thread_queue_size", "1024",
+            "-f", "rawvideo",
+            "-pix_fmt", "yuv420p",
+            "-s", f"{out_w}x{out_h}",
+            "-r", str(self.config.fps),
+            "-i", "pipe:0",
+        ]
+        if not self.config.no_audio:
+            ffmpeg_cmd += [
+                "-thread_queue_size", "1024",
+                "-f", "pulse", "-i", audio_monitor,
+                "-map", "0:v:0", "-map", "1:a:0",
+            ]
+        else:
+            ffmpeg_cmd += ["-map", "0:v:0"]
+        ffmpeg_cmd += [
+            "-c:v", "libx264",
+            "-preset", "ultrafast" if out_h > 1080 else "veryfast",
+            "-tune", "zerolatency",
+            "-profile:v", self.config.h264_profile,
+            "-level:v", _h264_level_for_mode(self.config),
+            "-pix_fmt", "yuv420p",
+            "-r", str(self.config.fps),
+            "-g", str(gop),
+            "-keyint_min", str(gop),
+            "-sc_threshold", "0",
+            "-bf", "0",
+            "-b:v", effective_bitrate,
+            "-maxrate", effective_bitrate,
+            "-bufsize", _vbv_bufsize(effective_bitrate, self.config),
+            "-x264-params", "repeat-headers=1:aud=1",
+        ]
+        if not self.config.no_audio:
+            ffmpeg_cmd += [
+                "-af", "aresample=async=1",
+                "-c:a", "aac", "-profile:a", "aac_low",
+                "-b:a", "128k", "-ac", "2", "-ar", "48000",
+                "-streamid", "1:4352",
+            ]
+        ffmpeg_cmd += self._common_output_args()
+
+        print(f"[FluxCast WFD Media] Capturing via portal node : {session.pw_node_id}")
+        print(f"[FluxCast WFD Media] Pipeline             : portal->ffmpeg (AOSP TS)")
+        print(f"[FluxCast WFD Media] Scaling output       : {out_w}x{out_h}")
+
+        errors: list[str] = []
+        for label, selector in attempts:
+            gst_cmd = [
+                "gst-launch-1.0", "-q",
+                "pipewiresrc", f"fd={session.pw_fd}", *selector, *extra_src,
+                "do-timestamp=true", "always-copy=false", "keepalive-time=33",
+                "!", "queue", "max-size-buffers=64", "leaky=downstream",
+                "!", "videorate", "skip-to-first=true",
+                "!", f"video/x-raw,framerate={self.config.fps}/1",
+                "!", "videoconvert",
+                "!", "videoscale",
+                "!", f"video/x-raw,width={out_w},height={out_h}",
+                "!", "videoconvert",
+                "!", f"video/x-raw,format=I420,width={out_w},height={out_h}",
+                "!", "fdsink", "fd=1", "sync=false",
+            ]
+            print(f"[FluxCast WFD Media] Portal attempt       : selector={label}")
+            if not self._spawn_capture_pipe(gst_cmd, ffmpeg_cmd, errors, label):
+                continue
+            return
+        raise WFDNotReady("portal->ffmpeg capture produced no video (" + "; ".join(errors) + ")")
+
+    def _spawn_capture_pipe(self, producer_cmd, consumer_cmd, errors, label) -> bool:
+        """Run producer | consumer and confirm bytes actually reach the wire."""
+        producer = subprocess.Popen(producer_cmd, stdout=subprocess.PIPE)
+        if producer.stdout is None:
+            producer.kill()
+            errors.append(f"{label}: capture pipeline exposed no stdout")
+            return False
+        consumer = subprocess.Popen(consumer_cmd, stdin=producer.stdout)
+        producer.stdout.close()
+        self.processes = [consumer, producer]
+
+        before = _netdev_tx_bytes(self.tx_interface)
+        time.sleep(3.0)
+        alive = producer.poll() is None and consumer.poll() is None
+        after = _netdev_tx_bytes(self.tx_interface)
+        sent = (after - before) if (before is not None and after is not None) else None
+        if alive and (sent is None or sent > 0):
+            return True
+
+        reason = "capture or encoder exited" if not alive else "no RTP left the interface"
+        for proc in (consumer, producer):
+            if proc.poll() is None:
+                proc.terminate()
+        self.processes = []
+        errors.append(f"{label}: {reason}")
+        print(f"[FluxCast WFD Media] Portal attempt {label} failed: {reason}")
+        return False
 
     def _start_desktop_portal(self) -> None:
         if not shutil.which("gst-launch-1.0"):
@@ -1212,25 +1386,7 @@ class WFDMediaPipeline:
                 f"{self.config.bitrate} -> {effective_bitrate}"
             )
 
-        print("[FluxCast WFD Media] Opening portal screen-share dialog (KDE/GNOME Wayland)...")
-        try:
-            self.portal_session = start_portal_capture(
-                timeout=120.0,
-                preferred_position=(monitor.x, monitor.y) if monitor is not None else None,
-                preferred_size=(monitor.width, monitor.height) if monitor is not None else None,
-            )
-        except PortalCaptureError as exc:
-            raise WFDNotReady(f"portal capture setup failed: {exc}") from exc
-
-        session = self.portal_session
-        # source_type: 1=MONITOR, 2=WINDOW, 4=VIRTUAL ("Share virtual screen")
-        if session.source_type is not None and session.source_type not in (1, 4):
-            close_portal_capture(self.portal_session)
-            self.portal_session = None
-            raise WFDNotReady(
-                "Portal returned a window or camera source. "
-                "In the portal picker choose a full monitor or 'Share virtual screen'."
-            )
+        session = self._open_portal_session(monitor)
 
         if session.size is not None:
             src_res = f"{session.size[0]}x{session.size[1]}"
