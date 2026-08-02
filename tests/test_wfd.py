@@ -165,10 +165,19 @@ class AospTablesVersionTest(unittest.TestCase):
         self.assertLess(args.index("-tables_version"), args.index("-f"))
 
 
+def _sequence(values):
+    """Yield the given values, then repeat the last one forever."""
+    state = list(values)
+    def next_value(*_a, **_k):
+        return state.pop(0) if len(state) > 1 else state[0]
+    return next_value
+
+
 class CapturePipeTest(unittest.TestCase):
     """The portal->ffmpeg pipe must not report success on a silent capture."""
 
     def _run(self, written, producer_alive=True, consumer_alive=True, min_bytes=1):
+        # written may be a list (consumed in order) or a callable per poll.
         config = wfd.WFDMediaConfig(monitor=None, aosp_pmt_pid=True)
         pipeline = wfd.WFDMediaPipeline(config, tv_ip="10.42.0.2", local_ip="10.42.0.1",
                                         sink_rtp_port=35034)
@@ -195,7 +204,9 @@ class CapturePipeTest(unittest.TestCase):
         errors = []
         with (
             mock.patch.object(wfd.subprocess, "Popen", side_effect=fake_popen),
-            mock.patch.object(wfd, "_process_written_bytes", side_effect=written),
+            mock.patch.object(wfd, "_process_written_bytes",
+                              side_effect=written if callable(written)
+                              else _sequence(written)),
             mock.patch.object(wfd.time, "sleep"),
         ):
             ok = pipeline._spawn_capture_pipe(["gst"], ["ffmpeg"], errors, "path",
@@ -227,6 +238,38 @@ class CapturePipeTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("capture pipeline exited", errors[0])
         self.assertEqual(pipeline.processes, [])
+
+    def test_portal_fd_is_inherited_by_the_capture_process(self):
+        # subprocess closes everything above stderr, so without pass_fds the
+        # PipeWire fd is gone in the child and capture yields nothing (#84).
+        seen = {}
+
+        class Proc:
+            stdout = io.BytesIO()
+            pid = 1
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+        def fake_popen(cmd, *a, **kwargs):
+            if "stdout" in kwargs:
+                seen["pass_fds"] = kwargs.get("pass_fds")
+            return Proc()
+
+        config = wfd.WFDMediaConfig(monitor=None, aosp_pmt_pid=True)
+        pipeline = wfd.WFDMediaPipeline(config, tv_ip="10.42.0.2", local_ip="10.42.0.1",
+                                        sink_rtp_port=35034)
+        with (
+            mock.patch.object(wfd.subprocess, "Popen", side_effect=fake_popen),
+            mock.patch.object(wfd, "_process_written_bytes", return_value=None),
+            mock.patch.object(wfd.time, "sleep"),
+        ):
+            pipeline._spawn_capture_pipe(["gst"], ["ffmpeg"], [], "path", pass_fds=(42,))
+
+        self.assertEqual(seen.get("pass_fds"), (42,))
 
     def test_unreadable_proc_io_does_not_block_startup(self):
         # /proc may be unavailable; fall back to "process is alive".
