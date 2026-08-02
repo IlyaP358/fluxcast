@@ -168,20 +168,16 @@ class AospTablesVersionTest(unittest.TestCase):
 class CapturePipeTest(unittest.TestCase):
     """The portal->ffmpeg pipe must not report success on a silent capture."""
 
-    def _pipeline(self):
+    def _run(self, written, producer_alive=True, consumer_alive=True, min_bytes=1):
         config = wfd.WFDMediaConfig(monitor=None, aosp_pmt_pid=True)
         pipeline = wfd.WFDMediaPipeline(config, tv_ip="10.42.0.2", local_ip="10.42.0.1",
                                         sink_rtp_port=35034)
-        pipeline.tx_interface = "lo"
-        return pipeline
-
-    def _run(self, tx_values, producer_alive=True):
-        pipeline = self._pipeline()
         procs = []
 
         class Proc:
             def __init__(self, alive):
                 self.stdout = io.BytesIO()
+                self.pid = 1000 + len(procs)
                 self._alive = alive
                 self.terminated = False
 
@@ -192,38 +188,51 @@ class CapturePipeTest(unittest.TestCase):
                 self.terminated = True
 
         def fake_popen(cmd, *a, **k):
-            proc = Proc(producer_alive if not procs else True)
+            proc = Proc(producer_alive if not procs else consumer_alive)
             procs.append(proc)
             return proc
 
         errors = []
         with (
             mock.patch.object(wfd.subprocess, "Popen", side_effect=fake_popen),
-            mock.patch.object(wfd, "_netdev_tx_bytes", side_effect=tx_values),
+            mock.patch.object(wfd, "_process_written_bytes", side_effect=written),
             mock.patch.object(wfd.time, "sleep"),
         ):
-            ok = pipeline._spawn_capture_pipe(["gst"], ["ffmpeg"], errors, "path")
+            ok = pipeline._spawn_capture_pipe(["gst"], ["ffmpeg"], errors, "path",
+                                              min_bytes=min_bytes)
         return ok, errors, pipeline, procs
 
     def test_flowing_capture_is_accepted(self):
-        ok, errors, pipeline, _ = self._run([1000, 90000])
+        ok, errors, pipeline, _ = self._run([0, 5_000_000], min_bytes=1_000_000)
         self.assertTrue(ok)
         self.assertEqual(errors, [])
         self.assertEqual(len(pipeline.processes), 2)
 
-    def test_silent_capture_is_rejected_and_torn_down(self):
-        # Byte-identical tx before and after means no RTP left the machine.
-        ok, errors, pipeline, procs = self._run([1000, 1000])
+    def test_silent_capture_is_rejected_even_though_audio_keeps_flowing(self):
+        # The regression this guards: RTP kept leaving the box because audio
+        # was fine, so a dead video source looked healthy.
+        ok, errors, pipeline, procs = self._run([0, 0], min_bytes=1_000_000)
         self.assertFalse(ok)
-        self.assertIn("no RTP left the interface", errors[0])
+        self.assertIn("produced no frames", errors[0])
         self.assertEqual(pipeline.processes, [])
         self.assertTrue(all(p.terminated for p in procs))
 
-    def test_dead_capture_process_is_rejected(self):
-        ok, errors, pipeline, _ = self._run([1000, 90000], producer_alive=False)
+    def test_partial_frame_is_not_enough(self):
+        ok, errors, _, _ = self._run([0, 4096], min_bytes=1_000_000)
         self.assertFalse(ok)
-        self.assertIn("capture or encoder exited", errors[0])
+        self.assertIn("produced no frames", errors[0])
+
+    def test_dead_capture_process_is_rejected(self):
+        ok, errors, pipeline, _ = self._run([0, 5_000_000], producer_alive=False)
+        self.assertFalse(ok)
+        self.assertIn("capture pipeline exited", errors[0])
         self.assertEqual(pipeline.processes, [])
+
+    def test_unreadable_proc_io_does_not_block_startup(self):
+        # /proc may be unavailable; fall back to "process is alive".
+        ok, errors, _, _ = self._run([None, None], min_bytes=1_000_000)
+        self.assertTrue(ok)
+        self.assertEqual(errors, [])
 
 
 class TsDumpTest(unittest.TestCase):

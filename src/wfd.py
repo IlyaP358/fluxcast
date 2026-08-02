@@ -288,6 +288,18 @@ def _gst_has_element(name: str) -> bool:
     return result.returncode == 0
 
 
+def _process_written_bytes(pid: int) -> Optional[int]:
+    """Bytes a process has written, pipes included (Linux /proc/<pid>/io)."""
+    try:
+        with open(f"/proc/{pid}/io", "r") as handle:
+            for line in handle:
+                if line.startswith("wchar:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def _wfd_gst_prog_map(with_audio: bool, aosp_pmt_pid: bool = False) -> str:
     # PMT_<program> must be uint-typed; a plain int is parsed as gint and
     # silently ignored, leaving the PMT on mpegtsmux's 0x0020 default.
@@ -1295,29 +1307,52 @@ class WFDMediaPipeline:
         print(f"[FluxCast WFD Media] Scaling output       : {out_w}x{out_h}")
 
         errors: list[str] = []
+        # One raw frame; anything less in three seconds means a dead source.
+        frame_bytes = out_w * out_h * 3 // 2
+        # Constraining the framerate before videoscale upsets negotiation on
+        # some GNOME/PipeWire builds, so try it both ways like the gst path.
+        rate_variants = [("rate", ["!", "videorate", "skip-to-first=true",
+                                   "!", f"video/x-raw,framerate={self.config.fps}/1"]),
+                         ("no-rate", [])]
         for label, selector in attempts:
-            gst_cmd = [
-                "gst-launch-1.0", "-q",
-                "pipewiresrc", f"fd={session.pw_fd}", *selector, *extra_src,
-                "do-timestamp=true", "always-copy=false", "keepalive-time=33",
-                "!", "queue", "max-size-buffers=64", "leaky=downstream",
-                "!", "videorate", "skip-to-first=true",
-                "!", f"video/x-raw,framerate={self.config.fps}/1",
-                "!", "videoconvert",
-                "!", "videoscale",
-                "!", f"video/x-raw,width={out_w},height={out_h}",
-                "!", "videoconvert",
-                "!", f"video/x-raw,format=I420,width={out_w},height={out_h}",
-                "!", "fdsink", "fd=1", "sync=false",
-            ]
-            print(f"[FluxCast WFD Media] Portal attempt       : selector={label}")
-            if not self._spawn_capture_pipe(gst_cmd, ffmpeg_cmd, errors, label):
-                continue
-            return
-        raise WFDNotReady("portal->ffmpeg capture produced no video (" + "; ".join(errors) + ")")
+            for rate_label, rate_chain in rate_variants:
+                gst_cmd = [
+                    "gst-launch-1.0", "-q",
+                    # No always-copy=false here: it hands out DMABUF memory
+                    # that videoconvert cannot always negotiate, and the
+                    # encoder lives in another process anyway (#84).
+                    "pipewiresrc", f"fd={session.pw_fd}", *selector, *extra_src,
+                    "do-timestamp=true", "keepalive-time=33",
+                    "!", "queue", "max-size-buffers=64", "leaky=downstream",
+                    *rate_chain,
+                    "!", "videoconvert",
+                    "!", "videoscale",
+                    "!", f"video/x-raw,width={out_w},height={out_h}",
+                    "!", "videoconvert",
+                    "!", f"video/x-raw,format=I420,width={out_w},height={out_h}",
+                    "!", "fdsink", "fd=1", "sync=false",
+                ]
+                attempt = f"{label}/{rate_label}"
+                print(f"[FluxCast WFD Media] Portal attempt       : {attempt}")
+                if self._spawn_capture_pipe(gst_cmd, ffmpeg_cmd, errors, attempt,
+                                            min_bytes=frame_bytes):
+                    return
+        raise WFDNotReady(
+            "portal capture delivered no video frames (" + "; ".join(errors) + "). "
+            "The portal session opened but pipewiresrc produced nothing."
+        )
 
-    def _spawn_capture_pipe(self, producer_cmd, consumer_cmd, errors, label) -> bool:
-        """Run producer | consumer and confirm bytes actually reach the wire."""
+    def _spawn_capture_pipe(self, producer_cmd, consumer_cmd, errors, label,
+                            min_bytes: int = 1) -> bool:
+        """
+        Run producer | consumer and confirm the capture really emits frames.
+
+        Counting bytes on the network interface is not enough: with audio
+        enabled the encoder keeps sending RTP even when the capture delivers
+        nothing, which is exactly how a silent portal looked like success
+        (#84). /proc/<pid>/io tracks what the capture itself wrote into the
+        pipe, so audio cannot mask a dead video source.
+        """
         producer = subprocess.Popen(producer_cmd, stdout=subprocess.PIPE)
         if producer.stdout is None:
             producer.kill()
@@ -1327,15 +1362,18 @@ class WFDMediaPipeline:
         producer.stdout.close()
         self.processes = [consumer, producer]
 
-        before = _netdev_tx_bytes(self.tx_interface)
+        before = _process_written_bytes(producer.pid)
         time.sleep(3.0)
         alive = producer.poll() is None and consumer.poll() is None
-        after = _netdev_tx_bytes(self.tx_interface)
-        sent = (after - before) if (before is not None and after is not None) else None
-        if alive and (sent is None or sent > 0):
+        after = _process_written_bytes(producer.pid)
+
+        if not alive:
+            reason = "capture pipeline exited" if producer.poll() is not None else "encoder exited"
+        elif before is not None and after is not None and after - before < min_bytes:
+            reason = f"capture produced no frames ({after - before} B in 3s)"
+        else:
             return True
 
-        reason = "capture or encoder exited" if not alive else "no RTP left the interface"
         for proc in (consumer, producer):
             if proc.poll() is None:
                 proc.terminate()
