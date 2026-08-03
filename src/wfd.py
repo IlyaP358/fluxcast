@@ -288,6 +288,13 @@ def _gst_has_element(name: str) -> bool:
     return result.returncode == 0
 
 
+def _letterbox_vf(out_res: str) -> str:
+    """ffmpeg filter that fits the source into out_res without stretching."""
+    width, height = out_res.split("x")
+    return (f"scale={width}:{height}:force_original_aspect_ratio=decrease:out_range=tv,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p")
+
+
 def _process_written_bytes(pid: int) -> Optional[int]:
     """Bytes a process has written, pipes included (Linux /proc/<pid>/io)."""
     try:
@@ -1308,9 +1315,10 @@ class WFDMediaPipeline:
 
         errors: list[str] = []
         frame_bytes = out_w * out_h * 3 // 2
-        # A bare video/x-raw filter excludes memory:DMABuf, which videoconvert
-        # cannot consume on GNOME. Try system memory first, DMABuf second.
-        memory_variants = [("sysmem", ["!", "video/x-raw"]), ("any", [])]
+        # caps=video/x-raw excludes memory:DMABuf, which videoconvert cannot
+        # always consume on GNOME.
+        memory_variants = [("sysmem", ["!", "capsfilter", "caps=video/x-raw"]),
+                           ("any", [])]
         for label, selector in attempts:
             for mem_label, mem_caps in memory_variants:
                 gst_cmd = [
@@ -1322,8 +1330,10 @@ class WFDMediaPipeline:
                     "!", "videoconvert",
                     "!", "videoscale",
                     "!", "videorate", "skip-to-first=true",
+                    # pixel-aspect-ratio=1/1 lets videoscale add-borders
+                    # letterbox instead of stretching (#84).
                     "!", f"video/x-raw,format=I420,width={out_w},height={out_h},"
-                         f"framerate={self.config.fps}/1",
+                         f"framerate={self.config.fps}/1,pixel-aspect-ratio=1/1",
                     "!", "fdsink", "fd=1", "sync=false",
                 ]
                 attempt = f"{label}/{mem_label}"
@@ -1579,13 +1589,15 @@ class WFDMediaPipeline:
                 *_gst_dump_branch(self.config.dump_ts_path),
             ]
 
+        # pixel-aspect-ratio=1/1 lets videoscale add-borders letterbox
+        # instead of stretching a non-16:9 monitor (#84).
         caps_strict = (
             f"video/x-raw,width={out_w},height={out_h},"
-            f"framerate={self.config.fps}/1"
+            f"framerate={self.config.fps}/1,pixel-aspect-ratio=1/1"
         )
 
         caps_no_fps = (
-            f"video/x-raw,width={out_w},height={out_h}"
+            f"video/x-raw,width={out_w},height={out_h},pixel-aspect-ratio=1/1"
         )
         caps_attempts = [
             ("strict", caps_strict),
@@ -1776,7 +1788,7 @@ class WFDMediaPipeline:
         if out_res == src_res:
             ffmpeg_cmd += ["-vf", "format=yuv420p"]
         else:
-            ffmpeg_cmd += ["-vf", f"scale={out_res.replace('x', ':')}:out_range=tv,format=yuv420p"]
+            ffmpeg_cmd += ["-vf", _letterbox_vf(out_res)]
 
         ffmpeg_cmd += [
             "-c:v", "libx264",
@@ -1881,7 +1893,7 @@ class WFDMediaPipeline:
         if out_res == src_res:
             ffmpeg_cmd += ["-vf", "format=yuv420p"]
         else:
-            ffmpeg_cmd += ["-vf", f"scale={out_res.replace('x', ':')}:out_range=tv,format=yuv420p"]
+            ffmpeg_cmd += ["-vf", _letterbox_vf(out_res)]
 
         ffmpeg_cmd += [
             "-c:v", "libx264",
@@ -2000,7 +2012,7 @@ class WFDMediaPipeline:
             "!", f"video/x-raw,framerate={self.config.fps}/1",
             "!", "videoconvert",
             "!", "videoscale",
-            "!", f"video/x-raw,width={out_w},height={out_h}",
+            "!", f"video/x-raw,width={out_w},height={out_h},pixel-aspect-ratio=1/1",
             "!", "videoconvert",
             "!", "video/x-raw,format=I420",
             "!", "x264enc",

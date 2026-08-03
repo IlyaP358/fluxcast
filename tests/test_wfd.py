@@ -165,6 +165,88 @@ class AospTablesVersionTest(unittest.TestCase):
         self.assertLess(args.index("-tables_version"), args.index("-f"))
 
 
+class AspectRatioTest(unittest.TestCase):
+    """A portrait monitor must be letterboxed into the WFD mode, not stretched."""
+
+    def test_ffmpeg_filter_fits_without_stretching(self):
+        vf = wfd._letterbox_vf("1280x720")
+        self.assertIn("force_original_aspect_ratio=decrease", vf)
+        self.assertIn("pad=1280:720:(ow-iw)/2:(oh-ih)/2", vf)
+        self.assertIn("setsar=1", vf)
+
+    def _gst_commands(self):
+        """Generated gst argv for every WFD pipeline that scales."""
+        class Mon:
+            name, width, height, x, y, display = "eDP-1", 1080, 1920, 0, 0, ":0"
+
+        class Sess:
+            session_handle, pw_node_id, pw_fd, restore_token = "/h", 7, 42, None
+            source_type, position, size = 1, (0, 0), (1080, 1920)
+            stream_label, runtime, bus = "m", None, None
+
+        captured = []
+
+        class Proc:
+            returncode = 0
+            pid = 4242
+
+            def __init__(self):
+                self.stdout = io.BytesIO()
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def communicate(self, *a, **k):
+                return (b"", b"")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        config = wfd.WFDMediaConfig(monitor=Mon(), output_resolution="1280x720", fps=30,
+                                    bitrate="4M", no_audio=True, peer_name="X")
+        pipeline = wfd.WFDMediaPipeline(config, tv_ip="10.42.0.2", local_ip="10.42.0.1",
+                                        sink_rtp_port=35034)
+        pipeline.tx_interface = "lo"
+        with (
+            mock.patch.object(wfd.shutil, "which", side_effect=lambda n: "/usr/bin/" + n),
+            mock.patch.object(wfd, "_gst_has_element", return_value=True),
+            mock.patch.object(wfd, "_detect_audio_monitor", return_value="m"),
+            mock.patch.object(wfd, "_gst_pipewiresrc_properties", return_value=set()),
+            mock.patch.object(wfd, "_gst_x264enc_properties", return_value=set()),
+            mock.patch.object(wfd, "_pipewiresrc_selector_attempts",
+                              return_value=[("path", ["path=7"])]),
+            mock.patch.object(wfd, "start_portal_capture", return_value=Sess()),
+            mock.patch.object(wfd, "close_portal_capture"),
+            mock.patch.object(wfd, "_process_written_bytes", return_value=None),
+            mock.patch.object(wfd.subprocess, "Popen",
+                              side_effect=lambda cmd, *a, **k: (captured.append(list(cmd)),
+                                                                Proc())[1]),
+            mock.patch.object(wfd.time, "sleep"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            pipeline._start_desktop_gst_x11()
+            pipeline._start_desktop_portal()
+            config.aosp_pmt_pid = True
+            pipeline._start_desktop_portal_ffmpeg()
+        return [c for c in captured if c and c[0].startswith("gst-launch")]
+
+    def test_generated_pipelines_never_stretch(self):
+        commands = self._gst_commands()
+        self.assertGreaterEqual(len(commands), 3, "expected one argv per gst pipeline")
+        for cmd in commands:
+            index = cmd.index("videoscale")
+            caps = next(a for a in cmd[index:] if a.startswith("video/x-raw") and "width=" in a)
+            self.assertIn("pixel-aspect-ratio=1/1", caps)
+
 def _sequence(values):
     """Yield the given values, then repeat the last one forever."""
     state = list(values)
