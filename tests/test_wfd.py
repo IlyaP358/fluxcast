@@ -1,4 +1,5 @@
 import contextlib
+import inspect
 import io
 import os
 import subprocess
@@ -10,6 +11,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import ts_probe  # noqa: E402
 import wfd  # noqa: E402
+
+
+def _round4(value):
+    """GST_ROUND_UP_4, how GStreamer sizes an I420 plane stride."""
+    return (value + 3) & ~3
 
 
 def _completed(stdout="", returncode=0, stderr=""):
@@ -170,7 +176,7 @@ class AspectRatioTest(unittest.TestCase):
 
     def test_fit_inside_keeps_ratio_and_even_dimensions(self):
         for src, expected in [((1920, 1080), (1280, 720)), ((2560, 1440), (1280, 720)),
-                              ((1080, 1920), (404, 720)), ((1024, 768), (960, 720)),
+                              ((1080, 1920), (400, 710)), ((1024, 768), (960, 720)),
                               ((3440, 1440), (1280, 534))]:
             got = wfd._fit_inside(src[0], src[1], 1280, 720)
             self.assertEqual(got, expected, f"{src} fitted wrong")
@@ -178,8 +184,26 @@ class AspectRatioTest(unittest.TestCase):
             self.assertLessEqual(got[0], 1280)
             self.assertLessEqual(got[1], 720)
 
+    def test_fit_inside_keeps_the_i420_strides_unpadded(self):
+        """GStreamer pads I420 strides to 4 bytes; ffmpeg's rawvideo does not
+        expect that, so a width off a multiple of 8 drifts every frame (#84)."""
+        for src in [(1440, 2560), (1080, 1920), (2160, 3840), (1366, 768),
+                    (1920, 1080), (1024, 768), (3440, 1440), (0, 0)]:
+            for out in [(1280, 720), (1920, 1080), (1366, 768)]:
+                w, h = wfd._fit_inside(src[0], src[1], out[0], out[1])
+                self.assertEqual(w % 8, 0, f"{src}->{out} width {w} pads the Y stride")
+                self.assertEqual(_round4(w) * h + 2 * _round4(w // 2) * (h // 2),
+                                 w * h * 3 // 2,
+                                 f"{src}->{out} frame is not w*h*3/2 bytes")
+
     def test_fit_inside_survives_a_missing_source_size(self):
         self.assertEqual(wfd._fit_inside(0, 0, 1280, 720), (1280, 720))
+
+    def test_portrait_capture_size_drives_the_silent_capture_threshold(self):
+        """The pipe carries cap_w x cap_h frames, so the one-frame floor must
+        be measured on those, not on the padded output size (#84)."""
+        src = inspect.getsource(wfd.WFDMediaPipeline._start_desktop_portal_ffmpeg)
+        self.assertIn("frame_bytes = cap_w * cap_h * 3 // 2", src)
 
     def test_ffmpeg_filter_fits_without_stretching(self):
         vf = wfd._letterbox_vf("1280x720")

@@ -289,12 +289,14 @@ def _gst_has_element(name: str) -> bool:
 
 
 def _fit_inside(src_w: int, src_h: int, out_w: int, out_h: int) -> tuple[int, int]:
-    """Largest even size that fits src's aspect ratio inside out_w x out_h."""
+    """Fit src's aspect ratio inside out_w x out_h. Width stays a multiple of 8
+    so GStreamer leaves the I420 strides unpadded and a raw frame is exactly
+    width*height*3/2 bytes, which is what ffmpeg's rawvideo assumes (#84)."""
     if src_w <= 0 or src_h <= 0:
-        return out_w, out_h
+        src_w, src_h = out_w, out_h
     scale = min(out_w / src_w, out_h / src_h)
-    width = max(2, int(src_w * scale) & ~1)
-    height = max(2, int(src_h * scale) & ~1)
+    width = max(8, int(src_w * scale) // 8 * 8)
+    height = max(2, min(out_h, int(width * src_h / src_w)) & ~1)
     return width, height
 
 
@@ -1269,10 +1271,8 @@ class WFDMediaPipeline:
 
         # Scale to a size we compute ourselves and let ffmpeg add the bars,
         # instead of relying on how videoscale resolves the aspect ratio (#84).
-        if session.size:
-            cap_w, cap_h = _fit_inside(session.size[0], session.size[1], out_w, out_h)
-        else:
-            cap_w, cap_h = out_w, out_h
+        src_w, src_h = session.size or (out_w, out_h)
+        cap_w, cap_h = _fit_inside(src_w, src_h, out_w, out_h)
 
         props = _gst_pipewiresrc_properties()
         extra_src = [flag for flag, prop in (
@@ -1339,7 +1339,7 @@ class WFDMediaPipeline:
               f"padded to {out_w}x{out_h}")
 
         errors: list[str] = []
-        frame_bytes = out_w * out_h * 3 // 2
+        frame_bytes = cap_w * cap_h * 3 // 2
         # caps=video/x-raw excludes memory:DMABuf, which videoconvert cannot
         # always consume on GNOME.
         memory_variants = [("sysmem", ["!", "capsfilter", "caps=video/x-raw"]),
@@ -1355,8 +1355,8 @@ class WFDMediaPipeline:
                     "!", "videoconvert",
                     "!", "videoscale",
                     "!", "videorate", "skip-to-first=true",
-                    # pixel-aspect-ratio=1/1 lets videoscale add-borders
-                    # letterbox instead of stretching (#84).
+                    # pixel-aspect-ratio=1/1 stops videoscale from encoding the
+                    # aspect ratio as PAR instead of actually scaling (#84).
                     "!", f"video/x-raw,format=I420,width={cap_w},height={cap_h},"
                          f"framerate={self.config.fps}/1,pixel-aspect-ratio=1/1",
                     "!", "fdsink", "fd=1", "sync=false",
