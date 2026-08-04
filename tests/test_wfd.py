@@ -168,6 +168,19 @@ class AospTablesVersionTest(unittest.TestCase):
 class AspectRatioTest(unittest.TestCase):
     """A portrait monitor must be letterboxed into the WFD mode, not stretched."""
 
+    def test_fit_inside_keeps_ratio_and_even_dimensions(self):
+        for src, expected in [((1920, 1080), (1280, 720)), ((2560, 1440), (1280, 720)),
+                              ((1080, 1920), (404, 720)), ((1024, 768), (960, 720)),
+                              ((3440, 1440), (1280, 534))]:
+            got = wfd._fit_inside(src[0], src[1], 1280, 720)
+            self.assertEqual(got, expected, f"{src} fitted wrong")
+            self.assertEqual((got[0] % 2, got[1] % 2), (0, 0), "yuv420p needs even sizes")
+            self.assertLessEqual(got[0], 1280)
+            self.assertLessEqual(got[1], 720)
+
+    def test_fit_inside_survives_a_missing_source_size(self):
+        self.assertEqual(wfd._fit_inside(0, 0, 1280, 720), (1280, 720))
+
     def test_ffmpeg_filter_fits_without_stretching(self):
         vf = wfd._letterbox_vf("1280x720")
         self.assertIn("force_original_aspect_ratio=decrease", vf)

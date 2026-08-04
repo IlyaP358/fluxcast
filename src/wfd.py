@@ -288,6 +288,16 @@ def _gst_has_element(name: str) -> bool:
     return result.returncode == 0
 
 
+def _fit_inside(src_w: int, src_h: int, out_w: int, out_h: int) -> tuple[int, int]:
+    """Largest even size that fits src's aspect ratio inside out_w x out_h."""
+    if src_w <= 0 or src_h <= 0:
+        return out_w, out_h
+    scale = min(out_w / src_w, out_h / src_h)
+    width = max(2, int(src_w * scale) & ~1)
+    height = max(2, int(src_h * scale) & ~1)
+    return width, height
+
+
 def _letterbox_vf(out_res: str) -> str:
     """ffmpeg filter that fits the source into out_res without stretching."""
     width, height = out_res.split("x")
@@ -1257,6 +1267,13 @@ class WFDMediaPipeline:
         attempts = _pipewiresrc_selector_attempts(session.pw_node_id,
                                                   stream_label=session.stream_label)
 
+        # Scale to a size we compute ourselves and let ffmpeg add the bars,
+        # instead of relying on how videoscale resolves the aspect ratio (#84).
+        if session.size:
+            cap_w, cap_h = _fit_inside(session.size[0], session.size[1], out_w, out_h)
+        else:
+            cap_w, cap_h = out_w, out_h
+
         props = _gst_pipewiresrc_properties()
         extra_src = [flag for flag, prop in (
             ("max-buffers=64", "max-buffers"),
@@ -1271,7 +1288,7 @@ class WFDMediaPipeline:
             "-thread_queue_size", "1024",
             "-f", "rawvideo",
             "-pix_fmt", "yuv420p",
-            "-s", f"{out_w}x{out_h}",
+            "-s", f"{cap_w}x{cap_h}",
             "-r", str(self.config.fps),
             "-i", "pipe:0",
         ]
@@ -1283,6 +1300,11 @@ class WFDMediaPipeline:
             ]
         else:
             ffmpeg_cmd += ["-map", "0:v:0"]
+        if (cap_w, cap_h) != (out_w, out_h):
+            ffmpeg_cmd += ["-vf", f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2,"
+                                  "setsar=1,format=yuv420p"]
+        else:
+            ffmpeg_cmd += ["-vf", "format=yuv420p"]
         ffmpeg_cmd += [
             "-c:v", "libx264",
             "-preset", "ultrafast" if out_h > 1080 else "veryfast",
@@ -1311,7 +1333,10 @@ class WFDMediaPipeline:
 
         print(f"[FluxCast WFD Media] Capturing via portal node : {session.pw_node_id}")
         print(f"[FluxCast WFD Media] Pipeline             : portal->ffmpeg (AOSP TS)")
-        print(f"[FluxCast WFD Media] Scaling output       : {out_w}x{out_h}")
+        source = f"{session.size[0]}x{session.size[1]}" if session.size else "unknown"
+        print(f"[FluxCast WFD Media] Portal source        : {source}")
+        print(f"[FluxCast WFD Media] Scaling output       : {cap_w}x{cap_h} "
+              f"padded to {out_w}x{out_h}")
 
         errors: list[str] = []
         frame_bytes = out_w * out_h * 3 // 2
@@ -1332,7 +1357,7 @@ class WFDMediaPipeline:
                     "!", "videorate", "skip-to-first=true",
                     # pixel-aspect-ratio=1/1 lets videoscale add-borders
                     # letterbox instead of stretching (#84).
-                    "!", f"video/x-raw,format=I420,width={out_w},height={out_h},"
+                    "!", f"video/x-raw,format=I420,width={cap_w},height={cap_h},"
                          f"framerate={self.config.fps}/1,pixel-aspect-ratio=1/1",
                     "!", "fdsink", "fd=1", "sync=false",
                 ]
