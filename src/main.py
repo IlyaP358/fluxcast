@@ -36,6 +36,7 @@ Wi-Fi Display (Miracast) Options:
     --wfd-peer PEER          Peer selector: index, MAC, or name
     --wfd-dry-run            Print D-Bus call without activating connection
     --wfd-test-pattern       Stream generated test video instead of the desktop
+    --wfd-ffmpeg-stats       Show ffmpeg progress statistics for WFD streams
     --wfd-media-pipeline auto|ffmpeg|gst
                              RTP media sender (default: auto)
     --wfd-capture-backend auto|portal|wf-recorder|x11grab
@@ -136,6 +137,8 @@ def parse_args() -> argparse.Namespace:
                      help="Print WFD connection D-Bus call without activating it")
     wfd.add_argument("--wfd-test-pattern", action="store_true", dest="wfd_test_pattern",
                      help="For --protocol wfd, stream generated test video instead of the desktop")
+    wfd.add_argument("--wfd-ffmpeg-stats", action="store_true", dest="wfd_ffmpeg_stats",
+                     help="For --protocol wfd, show ffmpeg progress statistics")
     wfd.add_argument("--wfd-media-pipeline", default="auto",
                      choices=["auto", "ffmpeg", "gst"],
                      dest="wfd_media_pipeline",
@@ -254,7 +257,7 @@ def main() -> None:
 
     if args.doctor or args.doctor_json:
         from diagnostics import print_report, run_diagnostics
-        report = run_diagnostics()
+        report = run_diagnostics(skip_firewall=getattr(args, "wfd_no_firewall", False))
         if args.doctor_json:
             print(report.to_json())
         else:

@@ -155,6 +155,7 @@ class WFDMediaConfig:
     audio_device: Optional[str] = None
     no_audio: bool = False
     test_pattern: bool = False
+    ffmpeg_stats: bool = False
     source_port: int = 19002
     media_pipeline: str = "auto"
     latency_log_path: Optional[str] = None
@@ -868,6 +869,16 @@ def _netdev_tx_bytes(interface: Optional[str]) -> Optional[int]:
     return None
 
 
+def _ffmpeg_sender_args(show_stats: bool = False) -> list[str]:
+    args = [
+        "ffmpeg", "-hide_banner", "-y",
+        "-loglevel", "warning",
+    ]
+    if show_stats:
+        args.append("-stats")
+    return args
+
+
 class WFDMediaPipeline:
     def __init__(
         self,
@@ -1019,8 +1030,7 @@ class WFDMediaPipeline:
         gop = _calculate_gop(self.config)
         _tp_h = (_parse_resolution(resolution) or (1280, 720))[1]
         cmd = [
-            "ffmpeg", "-hide_banner", "-y",
-            "-loglevel", "warning",
+            *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             "-re",
             "-f", "lavfi",
             "-i", f"testsrc2=size={resolution}:rate={self.config.fps}",
@@ -1282,8 +1292,7 @@ class WFDMediaPipeline:
         ) if prop in props]
 
         ffmpeg_cmd = [
-            "ffmpeg", "-hide_banner", "-y",
-            "-loglevel", "warning",
+            *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             "-fflags", "+genpts",
             "-thread_queue_size", "1024",
             "-f", "rawvideo",
@@ -1791,8 +1800,7 @@ class WFDMediaPipeline:
         ]
 
         ffmpeg_cmd = [
-            "ffmpeg", "-hide_banner", "-y",
-            "-loglevel", "warning",
+            *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             "-fflags", "+genpts",
             "-thread_queue_size", "1024",
             "-f", "nut",
@@ -1895,8 +1903,7 @@ class WFDMediaPipeline:
 
         display = os.environ.get("DISPLAY", monitor.display or ":0")
         ffmpeg_cmd = [
-            "ffmpeg", "-hide_banner", "-y",
-            "-loglevel", "warning",
+            *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             "-thread_queue_size", "1024",
             "-f", "x11grab",
             "-framerate", str(self.config.fps),
@@ -3388,6 +3395,21 @@ def _deactivate_connection(active_path: str) -> None:
         print(f"[FluxCast WFD] NetworkManager deactivate warning: {text}")
 
 
+def _cleanup_step(label: str, action) -> None:
+    """Run one teardown step without letting it skip the ones after it.
+
+    Pressing Ctrl+C again while a session is being torn down used to abort the
+    rest of the cleanup, which left the P2P connection up and the GO intent
+    still lowered, so the next run needed a NetworkManager restart (#86).
+    """
+    try:
+        action()
+    except KeyboardInterrupt:
+        print(f"[FluxCast WFD] Interrupted during {label}; finishing cleanup anyway.")
+    except Exception as exc:
+        print(f"[FluxCast WFD] Cleanup step '{label}' failed: {exc}")
+
+
 def _select_peer(peers: list[WFDPeer], selector: Optional[str]) -> WFDPeer:
     if not peers:
         raise WFDNotReady("No Wi-Fi Direct peers found. Put the TV into Screen Share/Wireless Display mode.")
@@ -3838,7 +3860,7 @@ def _active_rtsp_probe(
 
 
 def start_experimental_backend(args) -> None:
-    report = run_diagnostics()
+    report = run_diagnostics(skip_firewall=getattr(args, "wfd_no_firewall", False))
     print_report(report)
     print()
 
@@ -3906,6 +3928,7 @@ def start_experimental_backend(args) -> None:
         audio_device=getattr(args, "wfd_audio_device", None),
         no_audio=no_audio,
         test_pattern=getattr(args, "wfd_test_pattern", False),
+        ffmpeg_stats=getattr(args, "wfd_ffmpeg_stats", False),
         source_port=getattr(args, "wfd_rtp_source_port", 19002),
         media_pipeline=getattr(args, "wfd_media_pipeline", "auto"),
         latency_log_path=getattr(args, "wfd_latency_log", None),
@@ -3925,7 +3948,6 @@ def start_experimental_backend(args) -> None:
         media_config=media_config,
         port=rtsp_port,
     )
-    connected = False
     firewall_opened = False
     uibc_firewall_opened = False
     active_path = ""
@@ -3947,7 +3969,6 @@ def start_experimental_backend(args) -> None:
             peer,
             rtsp_port=rtsp_port,
         )
-        connected = True
         _wait_for_nm_activation(active_path)
 
         if not getattr(args, "wfd_no_firewall", False):
@@ -3970,15 +3991,22 @@ def start_experimental_backend(args) -> None:
     except KeyboardInterrupt:
         print("\n[FluxCast WFD] Stopping WFD session...")
     finally:
-        rtsp.stop_all_media()
-        report_ts_dump(media_config.dump_ts_path)
-        rtsp.stop()
+        _cleanup_step("media shutdown", rtsp.stop_all_media)
+        _cleanup_step("TS dump report",
+                      lambda: report_ts_dump(media_config.dump_ts_path))
+        _cleanup_step("RTSP server shutdown", rtsp.stop)
         if firewall_opened:
-            _close_wfd_firewall_port(rtsp_port)
+            _cleanup_step("firewall close", lambda: _close_wfd_firewall_port(rtsp_port))
         if uibc_firewall_opened:
-            _close_wfd_firewall_port(WFD_UIBC_PORT)
-        if connected:
-            _deactivate_connection(active_path)
-            _disconnect_device(device_path)
+            _cleanup_step("UIBC firewall close", lambda: _close_wfd_firewall_port(WFD_UIBC_PORT))
+        if active_path:
+            _cleanup_step("connection deactivate",
+                          lambda: _deactivate_connection(active_path))
+        _cleanup_step("P2P device disconnect", lambda: _disconnect_device(device_path))
         if previous_go_intent is not None:
-            _set_p2p_go_intent(args.wfd_interface, previous_go_intent, restoring=True)
+            _cleanup_step(
+                "GO intent restore",
+                lambda: _set_p2p_go_intent(
+                    args.wfd_interface, previous_go_intent, restoring=True
+                ),
+            )

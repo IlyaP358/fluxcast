@@ -56,6 +56,7 @@ python3 src/main.py --protocol cast
 - `--wfd-peer PEER`
 - `--wfd-dry-run`
 - `--wfd-test-pattern`
+- `--wfd-ffmpeg-stats`
 - `--wfd-media-pipeline auto|ffmpeg|gst`
 - `--wfd-capture-backend auto|portal|wf-recorder|x11grab|gst-x11`
   - `auto` uses `portal` first on KDE/GNOME Wayland, then `wf-recorder` fallback.
@@ -202,6 +203,10 @@ and protocol selection remain controlled by the tray and cannot be set here.
 
 - `--wfd-test-pattern`
   - Uses a generated test video/audio stream instead of desktop capture.
+- `--wfd-ffmpeg-stats`
+  - Shows ffmpeg's live progress line (`fps`, `dup`, `drop`) for the ffmpeg senders.
+  - Off by default, because the line refreshes continuously and overwrites FluxCast's own output.
+  - Useful when reporting stutter, since it tells a capture problem (frames dropped or duplicated) from a link problem.
 - `--wfd-media-pipeline`
   - `auto`: `gst` for test-pattern, `ffmpeg` for desktop.
   - `ffmpeg`: force ffmpeg sender.
