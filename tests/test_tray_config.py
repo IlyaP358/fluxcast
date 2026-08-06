@@ -7,7 +7,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import tray_config  # noqa: E402
+from ui import tray_config  # noqa: E402
 
 
 class TrayConfigTest(unittest.TestCase):

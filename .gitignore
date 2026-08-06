@@ -13,3 +13,4 @@ build/
 *.egg-info/
 dist/
 fluxcast_domains
+tools/

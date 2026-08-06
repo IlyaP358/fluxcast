@@ -333,7 +333,7 @@ def stop_capture(result: "Optional[CaptureResult]") -> None:
         except subprocess.TimeoutExpired:
             proc.kill()
     if result.portal_session is not None:
-        from portal_capture import close_portal_capture
+        from .portal_capture import close_portal_capture
         close_portal_capture(result.portal_session)
 
 
@@ -354,7 +354,7 @@ def _start_capture_portal(
             "portal backend requires missing GStreamer elements: " + ", ".join(missing)
         )
 
-    from portal_capture import (
+    from .portal_capture import (
         PortalCaptureError,
         close_portal_capture,
         start_portal_capture,

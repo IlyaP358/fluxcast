@@ -10,8 +10,35 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import ts_probe  # noqa: E402
+from wfd import ts_probe  # noqa: E402
 import wfd  # noqa: E402
+
+
+def patch_all(name, **kwargs):
+    """Patch `name` in every wfd module that binds it, with one shared mock.
+
+    A module that did `from ..gst import _gst_has_element` holds its own
+    reference, so patching the package facade stops working the moment the
+    caller moves into a submodule, and naming one submodule rots silently the
+    next time it moves again. Raising when nothing matched means a renamed or
+    deleted target fails loudly instead of quietly testing nothing.
+    """
+    replacement = mock.MagicMock(**kwargs)
+    targets = [module for modname, module in list(sys.modules.items())
+               if module is not None
+               and (modname == "wfd" or modname.startswith("wfd."))
+               and name in vars(module)]
+    if not targets:
+        raise AssertionError(f"{name} is not bound in any wfd module")
+
+    @contextlib.contextmanager
+    def _patched():
+        with contextlib.ExitStack() as stack:
+            for module in targets:
+                stack.enter_context(mock.patch.object(module, name, replacement))
+            yield replacement
+
+    return _patched()
 
 
 def _round4(value):
@@ -70,8 +97,8 @@ class FirewallPortTest(unittest.TestCase):
             return _completed("yes")
 
         with (
-            mock.patch.object(wfd, "_firewalld_active", return_value=True),
-            mock.patch.object(wfd, "_run", side_effect=fake_run),
+            patch_all("_firewalld_active", return_value=True),
+            patch_all("_run", side_effect=fake_run),
         ):
             opened = wfd._open_wfd_firewall_port(port)
 
@@ -90,8 +117,8 @@ class FirewallPortTest(unittest.TestCase):
             return _completed("success")
 
         with (
-            mock.patch.object(wfd, "_firewalld_active", return_value=True),
-            mock.patch.object(wfd, "_run", side_effect=fake_run),
+            patch_all("_firewalld_active", return_value=True),
+            patch_all("_run", side_effect=fake_run),
         ):
             opened = wfd._open_wfd_firewall_port(port)
 
@@ -109,8 +136,8 @@ class FirewallPortTest(unittest.TestCase):
 
         output = io.StringIO()
         with (
-            mock.patch.object(wfd, "_firewalld_active", return_value=True),
-            mock.patch.object(wfd, "_run", side_effect=fake_run),
+            patch_all("_firewalld_active", return_value=True),
+            patch_all("_run", side_effect=fake_run),
             contextlib.redirect_stdout(output),
         ):
             opened = wfd._open_wfd_firewall_port(port)
@@ -130,8 +157,8 @@ class FirewallPortTest(unittest.TestCase):
             raise subprocess.TimeoutExpired(args, timeout)
 
         with (
-            mock.patch.object(wfd, "_firewalld_active", return_value=True),
-            mock.patch.object(wfd, "_run", side_effect=fake_run),
+            patch_all("_firewalld_active", return_value=True),
+            patch_all("_run", side_effect=fake_run),
         ):
             opened = wfd._open_wfd_firewall_port(port)
 
@@ -271,15 +298,15 @@ class AspectRatioTest(unittest.TestCase):
         pipeline.tx_interface = "lo"
         with (
             mock.patch.object(wfd.shutil, "which", side_effect=lambda n: "/usr/bin/" + n),
-            mock.patch.object(wfd, "_gst_has_element", return_value=True),
-            mock.patch.object(wfd, "_detect_audio_monitor", return_value="m"),
-            mock.patch.object(wfd, "_gst_pipewiresrc_properties", return_value=set()),
-            mock.patch.object(wfd, "_gst_x264enc_properties", return_value=set()),
-            mock.patch.object(wfd, "_pipewiresrc_selector_attempts",
+            patch_all("_gst_has_element", return_value=True),
+            patch_all("_detect_audio_monitor", return_value="m"),
+            patch_all("_gst_pipewiresrc_properties", return_value=set()),
+            patch_all("_gst_x264enc_properties", return_value=set()),
+            patch_all("_pipewiresrc_selector_attempts",
                               return_value=[("path", ["path=7"])]),
-            mock.patch.object(wfd, "start_portal_capture", return_value=Sess()),
-            mock.patch.object(wfd, "close_portal_capture"),
-            mock.patch.object(wfd, "_process_written_bytes", return_value=None),
+            patch_all("start_portal_capture", return_value=Sess()),
+            patch_all("close_portal_capture"),
+            patch_all("_process_written_bytes", return_value=None),
             mock.patch.object(wfd.subprocess, "Popen",
                               side_effect=lambda cmd, *a, **k: (captured.append(list(cmd)),
                                                                 Proc())[1]),
@@ -339,7 +366,7 @@ class CapturePipeTest(unittest.TestCase):
         errors = []
         with (
             mock.patch.object(wfd.subprocess, "Popen", side_effect=fake_popen),
-            mock.patch.object(wfd, "_process_written_bytes",
+            patch_all("_process_written_bytes",
                               side_effect=written if callable(written)
                               else _sequence(written)),
             mock.patch.object(wfd.time, "sleep"),
@@ -399,7 +426,7 @@ class CapturePipeTest(unittest.TestCase):
                                         sink_rtp_port=35034)
         with (
             mock.patch.object(wfd.subprocess, "Popen", side_effect=fake_popen),
-            mock.patch.object(wfd, "_process_written_bytes", return_value=None),
+            patch_all("_process_written_bytes", return_value=None),
             mock.patch.object(wfd.time, "sleep"),
         ):
             pipeline._spawn_capture_pipe(["gst"], ["ffmpeg"], [], "path", pass_fds=(42,))
@@ -471,8 +498,8 @@ class StartBackendDiagnosticsTest(unittest.TestCase):
         report = SimpleNamespace(wfd_candidate=False)
 
         with (
-            mock.patch.object(wfd, "run_diagnostics", return_value=report) as run,
-            mock.patch.object(wfd, "print_report"),
+            patch_all("run_diagnostics", return_value=report) as run,
+            patch_all("print_report"),
             self.assertRaises(wfd.WFDNotReady),
         ):
             wfd.start_experimental_backend(args)

@@ -9,9 +9,10 @@ os.environ.setdefault("PYSTRAY_BACKEND", "appindicator")
 from PIL import Image
 import pystray
 
-from tray_config import load_preferred_monitor, load_profile
+from ui.tray_config import load_preferred_monitor, load_profile
 
-_BASE = os.path.dirname(os.path.abspath(__file__))
+# assets/ and main.py sit at the root of src/, one level above this package.
+_BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ICON_PATH = os.path.join(_BASE, "assets", "flcast_logo_512x512.png")
 _MAIN = os.path.join(_BASE, "main.py")
 _PY = sys.executable

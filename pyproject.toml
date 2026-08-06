@@ -51,7 +51,7 @@ fluxcast-install-system = "pypi_sysinstall:main"
 sources = {"src" = ""}
 include = [
     "src/*.py",
-    "src/drivers/",
+    "src/**/*.py",
     "src/assets/*.png",
 ]
 
