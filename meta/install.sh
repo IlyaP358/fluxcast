@@ -20,7 +20,9 @@ mkdir -p "$DESTDIR/opt/fluxcast"
 while IFS= read -r rel; do
     install -Dm644 "$SRCDIR/src/$rel" "$DESTDIR/opt/fluxcast/$rel"
 done < <(cd "$SRCDIR/src" && find . -name "*.py" -not -path "*/__pycache__/*" | sed 's|^\./||' | sort)
-install -Dm644 "$SRCDIR/src/assets/flcast_logo_512x512.png" -t "$DESTDIR/opt/fluxcast/assets/"
+while IFS= read -r rel; do
+    install -Dm644 "$SRCDIR/src/assets/$rel" "$DESTDIR/opt/fluxcast/assets/$rel"
+done < <(cd "$SRCDIR/src/assets" && find . -type f | sed 's|^\./||' | sort)
 
 # Install system integration
 install -Dm644 "$SRCDIR/meta/fluxcast.desktop" -t "$DESTDIR/usr/share/applications/"

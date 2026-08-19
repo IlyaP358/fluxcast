@@ -14,6 +14,10 @@ from ui.tray_config import load_preferred_monitor, load_profile
 # assets/ and main.py sit at the root of src/, one level above this package.
 _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ICON_PATH = os.path.join(_BASE, "assets", "flcast_logo_512x512.png")
+_TRAY_ICON_PATHS = {
+    "idle": os.path.join(_BASE, "assets", "tray-idle.png"),
+    "casting": os.path.join(_BASE, "assets", "tray-casting.png"),
+}
 _MAIN = os.path.join(_BASE, "main.py")
 _PY = sys.executable
 _LOG_PATH = "/tmp/fluxcast-cast.log"
@@ -37,6 +41,8 @@ _lock = threading.Lock()
 _proc = None
 _cast_target = ""
 _icon = None
+_icon_state = ""
+_tray_image_cache: dict = {}
 _refresh_pending = False
 
 _wfd_peers: list = []
@@ -73,9 +79,17 @@ def _refresh() -> None:
         _refresh_pending = True
 
     def _do_update():
-        global _refresh_pending
+        global _refresh_pending, _icon_state
         with _lock:
             _refresh_pending = False
+        try:
+            state = _cast_state()
+            if state != _icon_state:
+                _icon.icon = _tray_image(state)
+                _icon_state = state
+                _log(f"tray icon -> {state}")
+        except Exception as e:
+            _log(f"icon swap error: {e}")
         try:
             items = _build_menu()
             if hasattr(_icon, '_appindicator') and hasattr(_icon, '_create_menu'):
@@ -108,16 +122,40 @@ def _refresh() -> None:
             pass
 
 
-def _load_image() -> Image.Image:
+def _load_image(path: str = _ICON_PATH) -> Image.Image:
     try:
-        with Image.open(_ICON_PATH) as img:
+        with Image.open(path) as img:
             img.load()
             out = img.convert("RGBA")
-        _log(f"icon loaded: {_ICON_PATH} ({out.size})")
+        _log(f"icon loaded: {path} ({out.size})")
         return out
     except Exception as e:
         _log(f"icon load FAILED ({e}); using red 64x64 fallback")
         return Image.new("RGBA", (64, 64), (255, 0, 0, 255))
+
+
+def _tray_image(state: str) -> Image.Image:
+    """Tray icon for `state`, decoded once and kept.
+
+    Falls back to the application logo rather than the red error square, so a
+    package that ships only flcast_logo_512x512.png still looks sane.
+    """
+    cached = _tray_image_cache.get(state)
+    if cached is not None:
+        return cached
+    path = _TRAY_ICON_PATHS.get(state, _ICON_PATH)
+    if not os.path.isfile(path):
+        _log(f"tray icon for '{state}' missing at {path}; falling back to the logo")
+        path = _ICON_PATH
+    image = _load_image(path)
+    _tray_image_cache[state] = image
+    return image
+
+
+def _cast_state() -> str:
+    with _lock:
+        proc = _proc
+    return "casting" if proc is not None and proc.poll() is None else "idle"
 
 
 # ── subprocess management ─────────────────────────────────────────────────────
@@ -325,6 +363,7 @@ def _show_about() -> None:
         FG = "#e5e7eb"
         ACCENT = "#30D987"
         LINK = "#60a5fa"
+        KOFI = "#ff5e5b"
         SEP = "#1e3a26"
         BTN_BG = "#1a2e1f"
 
@@ -366,7 +405,7 @@ def _show_about() -> None:
         tk.Frame(frame, bg=SEP, height=1).pack(fill="x", pady=(0, 10))
 
         for text, url in [
-            ("fluxcast.secweb.cloud", "https://fluxcast.secweb.cloud/"),
+            ("fluxcast.dev", "https://fluxcast.dev/"),
             ("github.com/IlyaP358/fluxcast", "https://github.com/IlyaP358/fluxcast"),
         ]:
             lbl = tk.Label(frame, text=text, fg=LINK, cursor="hand2",
@@ -374,18 +413,56 @@ def _show_about() -> None:
             lbl.pack(anchor="w")
             lbl.bind("<Button-1>", lambda _, u=url: webbrowser.open(u))
 
+        kofi_canvas = tk.Canvas(
+            frame, 
+            width=int(320 * _scale), 
+            height=int(55 * _scale), 
+            bg=BG, 
+            bd=0, 
+            highlightthickness=0
+        )
+        kofi_canvas.pack(anchor="center", pady=(12, 0))
+
+        def draw_rounded(canvas, x1, y1, x2, y2, r, **kwargs):
+            pts = [x1+r, y1, x1+r, y1, x2-r, y1, x2-r, y1, x2, y1, x2, y1+r, x2, y1+r, x2, y2-r, x2, y2-r, x2, y2, x2-r, y2, x2-r, y2, x1+r, y2, x1+r, y2, x1, y2, x1, y2-r, x1, y2-r, x1, y1+r, x1, y1+r, x1, y1]
+            return canvas.create_polygon(pts, **kwargs, smooth=True)
+
+        draw_rounded(kofi_canvas, 2, 2, int(318 * _scale), int(53 * _scale), 14, fill="#2b1818") 
+        draw_rounded(kofi_canvas, 4, 4, int(316 * _scale), int(51 * _scale), 13, fill="#522423") 
+        draw_rounded(kofi_canvas, 6, 6, int(314 * _scale), int(49 * _scale), 12, fill="#913a38") 
+
+        btn_body = draw_rounded(kofi_canvas, 8, 8, int(312 * _scale), int(47 * _scale), 11, fill=KOFI)
+
+        btn_text = kofi_canvas.create_text(
+            int(160 * _scale), 
+            int(27 * _scale), 
+            text="Help continue FluxCast development", 
+            fill="#ffffff", 
+            font=("sans-serif", int(10 * _scale), "bold")
+        )
+
+        def on_enter(e): kofi_canvas.itemconfig(btn_body, fill="#FF4A47")
+        def on_leave(e): kofi_canvas.itemconfig(btn_body, fill=KOFI)
+        def on_click(e): webbrowser.open("https://ko-fi.com/fluxcast")
+
+        kofi_canvas.bind("<Enter>", on_enter)
+        kofi_canvas.bind("<Leave>", on_leave)
+        kofi_canvas.bind("<Button-1>", on_click)
+
         tk.Frame(frame, bg=SEP, height=1).pack(fill="x", pady=(12, 10))
 
         FG_DIM = "#6b7280"
         for text, url in [
             ("illia.pukalov@teleinformatika.eu", "mailto:illia.pukalov@teleinformatika.eu"),
-            ("Join our Discord", "https://discord.gg/Qa2UTZPpPh"),
-            ("View Contributors", "https://fluxcast.secweb.cloud/contributors.html"),
+            ("Join our Discord", "https://discord.gg/GCmPNpJZM7"),
+            ("View Contributors", "https://fluxcast.dev/contributors.html"),
         ]:
             lbl = tk.Label(frame, text=text, fg=FG_DIM, cursor="hand2",
                            font=("sans-serif", int(8 * _scale), "underline"), bg=BG)
             lbl.pack()
             lbl.bind("<Button-1>", lambda _, u=url: webbrowser.open(u))
+
+        tk.Frame(frame, bg=SEP, height=1).pack(fill="x", pady=(12, 10))
 
         tk.Label(frame, text="Author: IlyaP358  |  Code licensed under GPL-3.0",
                  font=("sans-serif", int(7 * _scale)), bg=BG, fg=FG_DIM).pack(pady=(8, 0))
@@ -522,12 +599,12 @@ def _build_menu():
 
 
 def run_tray() -> None:
-    global _icon
+    global _icon, _icon_state
     _log("run_tray() starting")
-    img = _load_image()
+    _icon_state = _cast_state()
     icon = pystray.Icon(
         "FluxCast",
-        img,
+        _tray_image(_icon_state),
         title="FluxCast",
         menu=pystray.Menu(lambda: _build_menu()),
     )
