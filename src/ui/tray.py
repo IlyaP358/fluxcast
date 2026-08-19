@@ -6,7 +6,7 @@ import webbrowser
 
 os.environ.setdefault("PYSTRAY_BACKEND", "appindicator")
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 import pystray
 
 from ui.tray_config import load_preferred_monitor, load_profile
@@ -135,11 +135,6 @@ def _load_image(path: str = _ICON_PATH) -> Image.Image:
 
 
 def _tray_image(state: str) -> Image.Image:
-    """Tray icon for `state`, decoded once and kept.
-
-    Falls back to the application logo rather than the red error square, so a
-    package that ships only flcast_logo_512x512.png still looks sane.
-    """
     cached = _tray_image_cache.get(state)
     if cached is not None:
         return cached
@@ -157,6 +152,32 @@ def _cast_state() -> str:
         proc = _proc
     return "casting" if proc is not None and proc.poll() is None else "idle"
 
+
+def _glow_button_image(canvas_w: int, canvas_h: int, btn_w: int, btn_h: int,
+                       radius: int, colour: str, bg: str,
+                       scale: float = 1.0) -> Image.Image:
+    
+    box = ((canvas_w - btn_w) // 2, (canvas_h - btn_h) // 2,
+           (canvas_w + btn_w) // 2, (canvas_h + btn_h) // 2)
+    shape = Image.new("L", (canvas_w, canvas_h), 0)
+    ImageDraw.Draw(shape).rounded_rectangle(box, radius=radius, fill=255)
+
+    base = Image.new("RGB", (canvas_w, canvas_h), bg)
+    tint = Image.new("RGB", (canvas_w, canvas_h), colour)
+    rgb = tint.getpixel((0, 0))
+    for blur, strength in ((5, 0.7), (14, 0.55)):
+        halo = shape.filter(ImageFilter.GaussianBlur(blur * scale))
+        halo = halo.point(lambda v, s=strength: int(v * s))
+        glow = Image.merge("RGB", [halo.point(lambda v, c=c: v * c // 255)
+                                   for c in rgb])
+        base = ImageChops.add(base, glow)
+
+    ss = 4
+    crisp = Image.new("L", (canvas_w * ss, canvas_h * ss), 0)
+    ImageDraw.Draw(crisp).rounded_rectangle(
+        [c * ss for c in box], radius=radius * ss, fill=255)
+    base.paste(tint, mask=crisp.resize((canvas_w, canvas_h), Image.LANCZOS))
+    return base
 
 # ── subprocess management ─────────────────────────────────────────────────────
 
@@ -413,36 +434,41 @@ def _show_about() -> None:
             lbl.pack(anchor="w")
             lbl.bind("<Button-1>", lambda _, u=url: webbrowser.open(u))
 
+        KOFI_W, KOFI_H, KOFI_R = 300, 60, 13
+        KOFI_GLOW_PAD = 27
+        KOFI_FONT = 11
+
+        btn_w, btn_h = int(KOFI_W * _scale), int(KOFI_H * _scale)
+        pad = int(KOFI_GLOW_PAD * _scale)
+        kofi_w, kofi_h = btn_w + pad * 2, btn_h + pad * 2
         kofi_canvas = tk.Canvas(
-            frame, 
-            width=int(320 * _scale), 
-            height=int(55 * _scale), 
-            bg=BG, 
-            bd=0, 
+            frame,
+            width=kofi_w,
+            height=kofi_h,
+            bg=BG,
+            bd=0,
             highlightthickness=0
         )
-        kofi_canvas.pack(anchor="center", pady=(12, 0))
+        kofi_canvas.pack(anchor="center", pady=(0, 0))
 
-        def draw_rounded(canvas, x1, y1, x2, y2, r, **kwargs):
-            pts = [x1+r, y1, x1+r, y1, x2-r, y1, x2-r, y1, x2, y1, x2, y1+r, x2, y1+r, x2, y2-r, x2, y2-r, x2, y2, x2-r, y2, x2-r, y2, x1+r, y2, x1+r, y2, x1, y2, x1, y2-r, x1, y2-r, x1, y1+r, x1, y1+r, x1, y1]
-            return canvas.create_polygon(pts, **kwargs, smooth=True)
+        kofi_frames = {
+            colour: ImageTk.PhotoImage(_glow_button_image(
+                kofi_w, kofi_h, btn_w, btn_h,
+                int(KOFI_R * _scale), colour, BG, _scale))
+            for colour in (KOFI, "#ff4a47")
+        }
+        kofi_canvas.kofi_frames = kofi_frames
 
-        draw_rounded(kofi_canvas, 2, 2, int(318 * _scale), int(53 * _scale), 14, fill="#2b1818") 
-        draw_rounded(kofi_canvas, 4, 4, int(316 * _scale), int(51 * _scale), 13, fill="#522423") 
-        draw_rounded(kofi_canvas, 6, 6, int(314 * _scale), int(49 * _scale), 12, fill="#913a38") 
+        btn_image = kofi_canvas.create_image(
+            kofi_w // 2, kofi_h // 2, image=kofi_frames[KOFI])
+        kofi_canvas.create_text(
+            kofi_w // 2, kofi_h // 2,
+            text="Help continue FluxCast development",
+            fill="#ffffff",
+            font=("sans-serif", int(KOFI_FONT * _scale), "bold"))
 
-        btn_body = draw_rounded(kofi_canvas, 8, 8, int(312 * _scale), int(47 * _scale), 11, fill=KOFI)
-
-        btn_text = kofi_canvas.create_text(
-            int(160 * _scale), 
-            int(27 * _scale), 
-            text="Help continue FluxCast development", 
-            fill="#ffffff", 
-            font=("sans-serif", int(10 * _scale), "bold")
-        )
-
-        def on_enter(e): kofi_canvas.itemconfig(btn_body, fill="#FF4A47")
-        def on_leave(e): kofi_canvas.itemconfig(btn_body, fill=KOFI)
+        def on_enter(e): kofi_canvas.itemconfig(btn_image, image=kofi_frames["#ff4a47"])
+        def on_leave(e): kofi_canvas.itemconfig(btn_image, image=kofi_frames[KOFI])
         def on_click(e): webbrowser.open("https://ko-fi.com/fluxcast")
 
         kofi_canvas.bind("<Enter>", on_enter)
