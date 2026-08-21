@@ -3,6 +3,7 @@ import sys
 import subprocess
 import threading
 import webbrowser
+from i18n import _l
 
 os.environ.setdefault("PYSTRAY_BACKEND", "appindicator")
 
