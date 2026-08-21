@@ -1,2 +1,118 @@
 {
+  "● Casting: {target}": {
+    "en": "● Casting: {target}",
+    "ru": "● Трансляция: {target}"
+  },
+  "● Idle": {
+    "en": "● Idle",
+    "ru": "● Ожидание"
+  },
+  "Stop Casting": {
+    "en": "Stop Casting",
+    "ru": "Остановить трансляцию"
+  },
+  "Monitor": {
+    "en": "Monitor",
+    "ru": "Монитор"
+  },
+  "Monitor: scanning…": {
+    "en": "Monitor: scanning…",
+    "ru": "Монитор: сканирование…"
+  },
+  "Select a monitor first": {
+    "en": "Select a monitor first",
+    "ru": "Сначала выберите монитор"
+  },
+  "↻ Refreshing…": {
+    "en": "↻ Refreshing…",
+    "ru": "↻ Обновление…"
+  },
+  "Scanning…": {
+    "en": "Scanning…",
+    "ru": "Сканирование…"
+  },
+  "No WFD devices found": {
+    "en": "No WFD devices found",
+    "ru": "WFD-устройства не найдены"
+  },
+  "Cast via Miracast (WFD, portal dialog)   ": {
+    "en": "Cast via Miracast (WFD, portal dialog)   ",
+    "ru": "Транслировать через Miracast (WFD, диалог portal)   "
+  },
+  "Cast via Miracast (WFD)": {
+    "en": "Cast via Miracast (WFD)",
+    "ru": "Транслировать через Miracast (WFD)"
+  },
+  "No DLNA devices found": {
+    "en": "No DLNA devices found",
+    "ru": "DLNA-устройства не найдены"
+  },
+  "Cast via DLNA/UPnP": {
+    "en": "Cast via DLNA/UPnP",
+    "ru": "Транслировать через DLNA/UPnP"
+  },
+  "No Chromecast devices found": {
+    "en": "No Chromecast devices found",
+    "ru": "Chromecast-устройства не найдены"
+  },
+  "Cast via Chromecast": {
+    "en": "Cast via Chromecast",
+    "ru": "Транслировать через Chromecast"
+  },
+  "Rescan Devices": {
+    "en": "Rescan Devices",
+    "ru": "Повторный поиск"
+  },
+  "About FluxCast": {
+    "en": "About FluxCast",
+    "ru": "О FluxCast"
+  },
+  "Exit": {
+    "en": "Exit",
+    "ru": "Выход"
+  },
+  "Desktop → Smart TV streaming for Linux": {
+    "en": "Desktop → Smart TV streaming for Linux",
+    "ru": "Трансляция рабочего стола на Smart TV для Linux"
+  },
+  "I wanted to watch movies by streaming my Linux desktop to a TV — nothing worked. gnome-network-displays gave me one frame and then froze. miraclecast hasn't been meaningfully updated in years.\n\nSo I built FluxCast from scratch: Wi-Fi Direct via NetworkManager, full RTSP handshake, RTP media stream. ~1 second latency, video and audio. It actually works.": {
+    "en": "I wanted to watch movies by streaming my Linux desktop to a TV — nothing worked. gnome-network-displays gave me one frame and then froze. miraclecast hasn't been meaningfully updated in years.\n\nSo I built FluxCast from scratch: Wi-Fi Direct via NetworkManager, full RTSP handshake, RTP media stream. ~1 second latency, video and audio. It actually works.",
+    "ru": "Я просто хотел смотреть фильмы, транслируя свой рабочий стол Linux на телевизор — ничего не работало. gnome-network-displays выдавал один кадр и зависал. miraclecast годами не получал значимых обновлений.\n\nПоэтому я создал FluxCast с нуля: Wi-Fi Direct через NetworkManager, полный хендшейк RTSP, медиапоток RTP с задержкой около 1 секунды, видео и звук. И это реально работает!"
+  },
+  "Help continue FluxCast development": {
+    "en": "Help continue FluxCast development",
+    "ru": "Поддержать разработку FluxCast"
+  },
+  "Author: IlyaP358  |  Code licensed under GPL-3.0": {
+    "en": "Author: IlyaP358  |  Code licensed under GPL-3.0",
+    "ru": "Автор: IlyaP358  |  Код распространяется под лицензией GPL-3.0"
+  },
+  "Join our Discord": {
+    "en": "Join our Discord",
+    "ru": "Присоединяйтесь к нашему Discord"
+  },
+  "View Contributors": {
+    "en": "View Contributors",
+    "ru": "Посмотреть контрибьюторов"
+  },
+  "Close": {
+    "en": "Close",
+    "ru": "Закрыть"
+  },
+  "FluxCast stopped": {
+    "en": "FluxCast stopped",
+    "ru": "FluxCast остановлен"
+  },
+  "Cast to {target} ended cleanly.": {
+    "en": "Cast to {target} ended cleanly.",
+    "ru": "Трансляция на {target} успешно завершена."
+  },
+  "Cast to {target} exited (code {rc}).": {
+    "en": "Cast to {target} exited (code {rc}).",
+    "ru": "Трансляция на {target} завершилась (код {rc})."
+  },
+  "Starting cast to {target}… (log: {path})": {
+    "en": "Starting cast to {target}… (log: {path})",
+    "ru": "Запуск трансляции на {target}… (лог: {path})"
+  }
 }
