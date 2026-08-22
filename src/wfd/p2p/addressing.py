@@ -6,6 +6,10 @@ from typing import Optional
 from ..proc import _run
 
 
+def _is_p2p_group_iface(iface: str) -> bool:
+    return iface.startswith("p2p-") and not iface.startswith("p2p-dev-")
+
+
 def _get_peer_ip_from_arp(peer_mac: str) -> Optional[str]:
     """Return the IP for peer_mac from the kernel ARP/neighbour table."""
     if not shutil.which("ip"):
@@ -16,13 +20,19 @@ def _get_peer_ip_from_arp(peer_mac: str) -> Optional[str]:
             return None
         mac = peer_mac.lower().replace("-", ":")
         for line in result.stdout.splitlines():
-            if mac in line.lower():
-                parts = line.split()
-                if parts and re.fullmatch(r"\d+\.\d+\.\d+\.\d+", parts[0]):
+            parts = line.split()
+            if len(parts) >= 3 and parts[1] == "dev":
+                iface = parts[2]
+                if (
+                    mac in line.lower()
+                    and _is_p2p_group_iface(iface)
+                    and re.fullmatch(r"\d+\.\d+\.\d+\.\d+", parts[0])
+                ):
                     return parts[0]
     except Exception:
         pass
     return None
+
 
 def _get_peer_ip_from_p2p_iface() -> Optional[str]:
     """Fallback: find TV IP from ARP on any active P2P group interface.
@@ -40,12 +50,13 @@ def _get_peer_ip_from_p2p_iface() -> Optional[str]:
             parts = line.split()
             if len(parts) >= 3 and parts[1] == "dev":
                 iface = parts[2]
-                if iface.startswith("p2p-") and not iface.startswith("p2p-dev-"):
+                if _is_p2p_group_iface(iface):
                     if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", parts[0]):
                         return parts[0]
     except Exception:
         pass
     return None
+
 
 def _wait_for_peer_ip(peer_mac: str, timeout: float = 12.0) -> Optional[str]:
     """Poll ARP until the peer's IP appears (DHCP may take a few seconds)."""
