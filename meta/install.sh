@@ -19,7 +19,7 @@ echo -e "\e[1m\e[34m>>>\e[0m Installing fluxcast to ${DESTDIR:-/}..."
 mkdir -p "$DESTDIR/opt/fluxcast"
 while IFS= read -r rel; do
     install -Dm644 "$SRCDIR/src/$rel" "$DESTDIR/opt/fluxcast/$rel"
-done < <(cd "$SRCDIR/src" && find . -name "*.py" -not -path "*/__pycache__/*" | sed 's|^\./||' | sort)
+done < <(cd "$SRCDIR/src" && find . \( -name "*.py" -o -name "*.json" \) -not -path "*/__pycache__/*" | sed 's|^\./||' | sort)
 while IFS= read -r rel; do
     install -Dm644 "$SRCDIR/src/assets/$rel" "$DESTDIR/opt/fluxcast/assets/$rel"
 done < <(cd "$SRCDIR/src/assets" && find . -type f | sed 's|^\./||' | sort)

@@ -6,14 +6,26 @@ def _lang_of(value: str) -> str:
     return value.split(".")[0].split("@")[0].split("_")[0].strip().lower()
 
 def _get_system_lang() -> str:
-    forced = os.environ.get("FLUXCAST_LANG")
-    if forced and forced.strip():
+    forced = os.environ.get("FLUXCAST_LANG", "").strip()
+    if forced:
         return _lang_of(forced)
+
+    locale_lang = ""
     for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
-        value = os.environ.get(var)
-        if value and _lang_of(value) not in ("", "c", "posix"):
-            return _lang_of(value)
-    return "en"
+        value = os.environ.get(var, "").strip()
+        if value:
+            locale_lang = _lang_of(value)
+            break
+
+    if locale_lang in ("c", "posix"):
+        return "en"
+
+    for entry in os.environ.get("LANGUAGE", "").split(":"):
+        lang = _lang_of(entry)
+        if lang:
+            return lang
+
+    return locale_lang or "en"
 
 _USER_LANG = _get_system_lang()
 

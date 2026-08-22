@@ -32,6 +32,19 @@ Current limitation:
 - KDE/GNOME Wayland desktop capture uses `xdg-desktop-portal` in WFD mode.
 - For portal mode, install Python dependency `dbus-next` and allow screen-share in the desktop picker dialog.
 
+## Translations
+
+The tray picks your language up from the system locale, no configuration needed.
+
+| Language | Maintainer |
+|---|---|
+| English | [IlyaP358](https://github.com/IlyaP358) |
+| Русский | [IlyaP358](https://github.com/IlyaP358) |
+| Čeština | [IlyaP358](https://github.com/IlyaP358) |
+
+Adding your language means editing one JSON file and no code at all.
+See [CONTRIBUTING.md](CONTRIBUTING.md#translations).
+
 ## Quick Start
 
 Default WFD run (interactive monitor/peer selection):
