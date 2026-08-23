@@ -3,6 +3,7 @@ import sys
 import subprocess
 import threading
 import webbrowser
+from i18n import _l
 
 os.environ.setdefault("PYSTRAY_BACKEND", "appindicator")
 
@@ -190,9 +191,15 @@ def _watch(proc: "subprocess.Popen", target: str) -> None:
             _cast_target = ""
     rc = proc.returncode
     if rc == 0:
-        _notify("FluxCast stopped", f"Cast to {target} ended cleanly.")
+        _notify(
+            _l("FluxCast stopped"), 
+            _l("Cast to {target} ended cleanly.").format(target=target)
+        )
     else:
-        _notify("FluxCast stopped", f"Cast to {target} exited (code {rc}).")
+        _notify(
+            _l("FluxCast stopped"), 
+            _l("Cast to {target} exited (code {rc}).").format(target=target, rc=rc)
+        )
     _refresh()
 
 
@@ -205,7 +212,10 @@ def _launch(cmd: list, target: str) -> None:
     with _lock:
         _proc = proc
         _cast_target = target
-    _notify("FluxCast", f"Starting cast to {target}… (log: {_LOG_PATH})")
+    _notify(
+        "FluxCast", 
+        _l("Starting cast to {target}… (log: {path})").format(target=target, path=_LOG_PATH)
+    )
     _log(f"launched: {' '.join(cmd)}")
     _refresh()
     threading.Thread(target=_watch, args=(proc, target), daemon=True).start()
@@ -407,12 +417,12 @@ def _show_about() -> None:
 
         tk.Label(frame, text="FluxCast", font=("sans-serif", int(16 * _scale), "bold"),
                  bg=BG, fg=FG).pack()
-        tk.Label(frame, text="Desktop → Smart TV streaming for Linux",
+        tk.Label(frame, text=_l("Desktop → Smart TV streaming for Linux"),
                  font=("sans-serif", int(10 * _scale)), bg=BG, fg=ACCENT).pack(pady=(2, 14))
 
         tk.Frame(frame, bg=SEP, height=1).pack(fill="x", pady=(0, 12))
 
-        story = (
+        story = _l(
             "I wanted to watch movies by streaming my Linux desktop to a TV — "
             "nothing worked. gnome-network-displays gave me one frame and then "
             "froze. miraclecast hasn't been meaningfully updated in years.\n\n"
@@ -463,7 +473,7 @@ def _show_about() -> None:
             kofi_w // 2, kofi_h // 2, image=kofi_frames[KOFI])
         kofi_canvas.create_text(
             kofi_w // 2, kofi_h // 2,
-            text="Help continue FluxCast development",
+            text=_l("Help continue FluxCast development"),
             fill="#ffffff",
             font=("sans-serif", int(KOFI_FONT * _scale), "bold"))
 
@@ -483,17 +493,17 @@ def _show_about() -> None:
             ("Join our Discord", "https://discord.gg/GCmPNpJZM7"),
             ("View Contributors", "https://fluxcast.dev/contributors.html"),
         ]:
-            lbl = tk.Label(frame, text=text, fg=FG_DIM, cursor="hand2",
+            lbl = tk.Label(frame, text=_l(text), fg=FG_DIM, cursor="hand2",
                            font=("sans-serif", int(8 * _scale), "underline"), bg=BG)
             lbl.pack()
             lbl.bind("<Button-1>", lambda _, u=url: webbrowser.open(u))
 
         tk.Frame(frame, bg=SEP, height=1).pack(fill="x", pady=(12, 10))
 
-        tk.Label(frame, text="Author: IlyaP358  |  Code licensed under GPL-3.0",
+        tk.Label(frame, text=_l("Author: IlyaP358  |  Code licensed under GPL-3.0"),
                  font=("sans-serif", int(7 * _scale)), bg=BG, fg=FG_DIM).pack(pady=(8, 0))
 
-        tk.Button(frame, text="Close", command=root.destroy, width=10,
+        tk.Button(frame, text=_l("Close"), command=root.destroy, width=10,
                   bg=BTN_BG, fg=FG, activebackground="#253d2a",
                   activeforeground=FG, relief="flat",
                   cursor="hand2").pack(pady=(12, 0))
@@ -529,12 +539,12 @@ def _build_menu():
     items = []
 
     casting = proc is not None and proc.poll() is None
-    status = f"● Casting: {target}" if casting else "● Idle"
+    status = _l("● Casting: {target}").format(target=target) if casting else _l("● Idle")
     items.append(pystray.MenuItem(status, None, enabled=False))
     items.append(pystray.Menu.SEPARATOR)
 
     if casting:
-        items.append(pystray.MenuItem("Stop Casting", lambda *_: _stop()))
+        items.append(pystray.MenuItem(_l("Stop Casting"), lambda *_: _stop()))
     else:
         if monitors:
             sel_mon = min(sel_mon, len(monitors) - 1)
@@ -546,9 +556,9 @@ def _build_menu():
                 )
                 for i, m in enumerate(monitors)
             ]
-            items.append(pystray.MenuItem("Monitor", pystray.Menu(*mon_items)))
+            items.append(pystray.MenuItem(_l("Monitor"), pystray.Menu(*mon_items)))
         elif sc_mon:
-            items.append(pystray.MenuItem("Monitor: scanning…", None, enabled=False))
+            items.append(pystray.MenuItem(_l("Monitor: scanning…"), None, enabled=False))
 
         sel = monitors[sel_mon] if monitors else None  # sel_mon already clamped above
         wfd_via_portal = _wfd_uses_portal()
@@ -563,15 +573,15 @@ def _build_menu():
                     for p in peers
                 ]
             else:
-                peer_items = [pystray.MenuItem("Select a monitor first", None, enabled=False)]
+                peer_items = [pystray.MenuItem(_l("Select a monitor first"), None, enabled=False)]
             if sc_wfd:
-                peer_items.append(pystray.MenuItem("↻ Refreshing…", None, enabled=False))
+                peer_items.append(pystray.MenuItem(_l("↻ Refreshing…"), None, enabled=False))
             wfd_sub = pystray.Menu(*peer_items)
         elif sc_wfd:
-            wfd_sub = pystray.Menu(pystray.MenuItem("Scanning…", None, enabled=False))
+            wfd_sub = pystray.Menu(pystray.MenuItem(_l("Scanning…"), None, enabled=False))
         else:
-            wfd_sub = pystray.Menu(pystray.MenuItem("No WFD devices found", None, enabled=False))
-        wfd_label = "Cast via Miracast (WFD, portal dialog)   " if wfd_via_portal else "Cast via Miracast (WFD)"
+            wfd_sub = pystray.Menu(pystray.MenuItem(_l("No WFD devices found"), None, enabled=False))
+        wfd_label = _l("Cast via Miracast (WFD, portal dialog)   ") if wfd_via_portal else _l("Cast via Miracast (WFD)")
         items.append(pystray.MenuItem(wfd_label, wfd_sub))
 
         if dlna:
@@ -584,15 +594,15 @@ def _build_menu():
                     for d in dlna
                 ]
             else:
-                dlna_items = [pystray.MenuItem("Select a monitor first", None, enabled=False)]
+                dlna_items = [pystray.MenuItem(_l("Select a monitor first"), None, enabled=False)]
             if sc_dlna:
-                dlna_items.append(pystray.MenuItem("↻ Refreshing…", None, enabled=False))
+                dlna_items.append(pystray.MenuItem(_l("↻ Refreshing…"), None, enabled=False))
             dlna_sub = pystray.Menu(*dlna_items)
         elif sc_dlna:
-            dlna_sub = pystray.Menu(pystray.MenuItem("Scanning…", None, enabled=False))
+            dlna_sub = pystray.Menu(pystray.MenuItem(_l("Scanning…"), None, enabled=False))
         else:
-            dlna_sub = pystray.Menu(pystray.MenuItem("No DLNA devices found", None, enabled=False))
-        items.append(pystray.MenuItem("Cast via DLNA/UPnP", dlna_sub))
+            dlna_sub = pystray.Menu(pystray.MenuItem(_l("No DLNA devices found"), None, enabled=False))
+        items.append(pystray.MenuItem(_l("Cast via DLNA/UPnP"), dlna_sub))
 
         if cast_devs:
             if sel is not None:
@@ -604,22 +614,22 @@ def _build_menu():
                     for d in cast_devs
                 ]
             else:
-                cast_items = [pystray.MenuItem("Select a monitor first", None, enabled=False)]
+                cast_items = [pystray.MenuItem(_l("Select a monitor first"), None, enabled=False)]
             if sc_cast:
-                cast_items.append(pystray.MenuItem("↻ Refreshing…", None, enabled=False))
+                cast_items.append(pystray.MenuItem(_l("↻ Refreshing…"), None, enabled=False))
             cast_sub = pystray.Menu(*cast_items)
         elif sc_cast:
-            cast_sub = pystray.Menu(pystray.MenuItem("Scanning…", None, enabled=False))
+            cast_sub = pystray.Menu(pystray.MenuItem(_l("Scanning…"), None, enabled=False))
         else:
-            cast_sub = pystray.Menu(pystray.MenuItem("No Chromecast devices found", None, enabled=False))
-        items.append(pystray.MenuItem("Cast via Chromecast", cast_sub))
+            cast_sub = pystray.Menu(pystray.MenuItem(_l("No Chromecast devices found"), None, enabled=False))
+        items.append(pystray.MenuItem(_l("Cast via Chromecast"), cast_sub))
 
         items.append(pystray.Menu.SEPARATOR)
-        items.append(pystray.MenuItem("Rescan Devices", lambda *_: _rescan_all()))
+        items.append(pystray.MenuItem(_l("Rescan Devices"), lambda *_: _rescan_all()))
 
     items.append(pystray.Menu.SEPARATOR)
-    items.append(pystray.MenuItem("About FluxCast", lambda *_: _show_about()))
-    items.append(pystray.MenuItem("Exit", _on_exit))
+    items.append(pystray.MenuItem(_l("About FluxCast"), lambda *_: _show_about()))
+    items.append(pystray.MenuItem(_l("Exit"), _on_exit))
 
     return items
 

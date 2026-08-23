@@ -53,6 +53,7 @@ include = [
     "src/*.py",
     "src/**/*.py",
     "src/assets/*.png",
+    "src/i18n/*.json",
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
