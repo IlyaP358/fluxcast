@@ -40,6 +40,7 @@ class X11Mixin:
         display = os.environ.get("DISPLAY", monitor.display or ":0")
         ffmpeg_cmd = [
             *_ffmpeg_sender_args(self.config.ffmpeg_stats),
+            "-fflags", "+genpts",
             "-thread_queue_size", "1024",
             "-f", "x11grab",
             "-framerate", str(self.config.fps),
