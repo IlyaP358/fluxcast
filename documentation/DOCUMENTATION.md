@@ -258,7 +258,12 @@ the port while a session is active and closes it on exit:
   firewalld reload or reboot, and is removed automatically when FluxCast exits.
 - A port you already opened yourself is left untouched.
 - Other firewalls (`nftables`, `iptables`, `ufw`) are not modified — open the
-  RTSP port manually there, e.g. `sudo ufw allow 7236/tcp`.
+  WFD ports manually there. For ufw:
+
+  ```bash
+  sudo ufw allow 7236/tcp
+  sudo ufw allow 5353/udp
+  ```
 
 Pass `--wfd-no-firewall` to skip this entirely and manage the firewall yourself.
 
