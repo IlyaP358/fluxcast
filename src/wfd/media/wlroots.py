@@ -3,6 +3,7 @@ import subprocess
 import time
 
 from ..config import WFDNotReady
+from ..wf_recorder import find_wf_recorder
 from ..encoding import (
     _bitrate_to_kbits, _calculate_gop, _kbits_to_bitrate_text, _letterbox_vf,
     _parse_resolution, _quality_floor_kbits, _vbv_bufsize,
@@ -14,7 +15,8 @@ from ..net import _ffmpeg_sender_args
 
 class WlrootsMixin:
     def _start_desktop_wf_recorder(self) -> None:
-        if not shutil.which("wf-recorder"):
+        wf_recorder = find_wf_recorder()
+        if not wf_recorder:
             raise WFDNotReady("wf-recorder is required for WFD desktop streaming.")
 
         monitor = self.config.monitor
@@ -36,7 +38,7 @@ class WlrootsMixin:
             )
 
         wf_cmd = [
-            "wf-recorder",
+            wf_recorder,
             "-y",
             "-D",
             "-r", str(self.config.fps),

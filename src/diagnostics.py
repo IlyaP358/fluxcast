@@ -9,6 +9,8 @@ import subprocess
 from dataclasses import asdict, dataclass
 from typing import Optional
 
+from wfd.wf_recorder import find_wf_recorder
+
 
 STATUS_OK = "ok"
 STATUS_WARN = "warn"
@@ -80,6 +82,22 @@ def _command_check(
 
     status = STATUS_FAIL if required else STATUS_WARN
     return Check(binary, status, purpose, "not found in PATH")
+
+
+def _wf_recorder_check() -> Check:
+    path = shutil.which("wf-recorder")
+    if not path:
+        return Check(
+            "wf-recorder", STATUS_WARN, "Wayland/wlroots screen capture",
+            "not found in PATH; install wf-recorder",
+        )
+    if find_wf_recorder():
+        return Check("wf-recorder", STATUS_OK, "Wayland/wlroots screen capture", path)
+    return Check(
+        "wf-recorder", STATUS_WARN,
+        "wf-recorder was found but could not be executed",
+        "the AppImage wrapper needs the system wf-recorder package; install wf-recorder",
+    )
 
 
 def _gst_element_check(element: str, purpose: str, install_hint: str) -> Check:
@@ -237,7 +255,7 @@ def _portal_process_check() -> Check:
 def _display_capture_check() -> Check:
     wayland = os.environ.get("WAYLAND_DISPLAY")
     x11 = os.environ.get("DISPLAY")
-    wf_recorder = _find_binary("wf-recorder")
+    wf_recorder = find_wf_recorder()
     xrandr = shutil.which("xrandr")
     portal = _find_binary(
         "xdg-desktop-portal",
@@ -671,7 +689,7 @@ def run_diagnostics(skip_firewall: bool = False) -> DiagnosticReport:
     checks = [
         _python_check(),
         _command_check("ffmpeg", "video/audio transcoding", required=True),
-        _command_check("wf-recorder", "Wayland/wlroots screen capture"),
+        _wf_recorder_check(),
         _portal_process_check(),
         _command_check("pactl", "PulseAudio/PipeWire-Pulse audio monitor detection"),
         _command_check("xrandr", "X11 monitor detection fallback"),
