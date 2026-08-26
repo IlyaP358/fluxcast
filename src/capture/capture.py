@@ -7,7 +7,19 @@ import sys
 import time
 from typing import Any, Optional, NamedTuple
 
+import server as stream_server
+
 FFMPEG_PATH = shutil.which("ffmpeg") or "/usr/sbin/ffmpeg"
+
+
+def _prepare_capture_hls_dir() -> str:
+    hls_dir = stream_server.HLS_DIR
+    os.makedirs(hls_dir, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(hls_dir, 0o700)
+    except OSError:
+        pass
+    return hls_dir
 
 
 class Monitor(NamedTuple):
@@ -272,6 +284,7 @@ def _start_capture_wf_recorder(
         out_w, out_h = 1920, 1080
 
     audio_monitor = _default_audio_monitor()
+    hls_dir = _prepare_capture_hls_dir()
 
     cmd = [
         "wf-recorder",
@@ -292,17 +305,12 @@ def _start_capture_wf_recorder(
         "-p", "hls_flags=append_list",
         "-p", "pix_fmt=yuv420p",
         "-p", "profile=main",
-        "-f", "/tmp/fluxcast/stream.m3u8",
+        "-f", os.path.join(hls_dir, "stream.m3u8"),
         "-o", monitor.name,
     ]
 
     print(f"[FluxCast] Capturing Wayland monitor : {monitor.name} ({src_res})")
     print(f"[FluxCast] Output: {out_w}x{out_h}, audio: {audio_monitor}")
-
-    hls_dir = "/tmp/fluxcast"
-    if os.path.exists(hls_dir):
-        shutil.rmtree(hls_dir)
-    os.makedirs(hls_dir, exist_ok=True)
 
     try:
         process = subprocess.Popen(
@@ -376,10 +384,7 @@ def _start_capture_portal(
         except (ValueError, AttributeError):
             pass
 
-    hls_dir = "/tmp/fluxcast"
-    if os.path.exists(hls_dir):
-        shutil.rmtree(hls_dir)
-    os.makedirs(hls_dir, exist_ok=True)
+    hls_dir = _prepare_capture_hls_dir()
 
     audio_monitor = _default_audio_monitor()
     audio_enc = (
@@ -503,11 +508,7 @@ def _start_capture_x11grab(
     src_res = f"{monitor.width}x{monitor.height}"
     out_res = output_resolution or src_res
     audio_monitor = _default_audio_monitor()
-    hls_dir = "/tmp/fluxcast"
-
-    if os.path.exists(hls_dir):
-        shutil.rmtree(hls_dir)
-    os.makedirs(hls_dir, exist_ok=True)
+    hls_dir = _prepare_capture_hls_dir()
 
     cmd = [
         ffmpeg,
