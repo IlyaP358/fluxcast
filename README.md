@@ -24,7 +24,7 @@ Current validated scope:
 - `dlna` works as fallback.
 - `cast` is experimental and currently not working in the tested Samsung setup.
 
-The project currently focuses on **WFD/Miracast on Linux (Hyprland/wlroots class setups)**.
+The project currently focuses on **WFD/Miracast on Linux (Hyprland/wlroots class setups)**.  
 DLNA and Cast are available, but they are best treated as fallback or experimental paths.
 
 Current limitation:
@@ -44,6 +44,9 @@ The tray picks your language up from the system locale, no configuration needed.
 | Danish | [normann](https://github.com/peternormann) |
 | Deutsch | [therealresonix](https://github.com/therealresonix) |
 | Français | [t0mab](https://github.com/t0mab) |
+
+Adding your language means editing one JSON file and no code at all.
+See [CONTRIBUTING.md](CONTRIBUTING.md#translations).
 
 ## Quick Start
 
@@ -183,10 +186,37 @@ Note: on **firewalld** systems, FluxCast opens the WFD RTSP port (`7236/tcp`) fo
 
 ## Documentation
 
-Detailed flags, modes, and usage examples:
+Detailed flags, modes, and usage examples:  
 [documentation/DOCUMENTATION.md](documentation/DOCUMENTATION.md)
 
 ## Tested Environment
+
+### TVs and receivers:
+
+| Device | Protocol | Source |
+|---|---|---|
+| Samsung UE55TU7092U | WFD, DLNA | [IlyaP358](https://github.com/IlyaP358) |
+| LG OLED55B87LC | WFD | [#72](https://github.com/IlyaP358/fluxcast/issues/72) |
+| LG OLED55BX9LB | WFD | [#11](https://github.com/IlyaP358/fluxcast/issues/11) |
+| LG webOS UN8000PTA | WFD | [#10](https://github.com/IlyaP358/fluxcast/issues/10) |
+| LG webOS SM8100PTA | WFD | [#30](https://github.com/IlyaP358/fluxcast/issues/30) |
+| LG LED-43UD81 | WFD | [#44](https://github.com/IlyaP358/fluxcast/issues/44) |
+| Hisense VIDAA 32A5NQ | WFD | [#56](https://github.com/IlyaP358/fluxcast/issues/56) |
+| X1BQ-8461 projector | WFD | [#84](https://github.com/IlyaP358/fluxcast/issues/84) |
+| Samsung UN55DU8000GXZD | WFD | [#12](https://github.com/IlyaP358/fluxcast/issues/12) |
+| Samsung Galaxy Tab S9 FE | WFD | [#48](https://github.com/IlyaP358/fluxcast/pull/48) |
+| Microsoft 4K Wireless Display Adapter | WFD | [#40](https://github.com/IlyaP358/fluxcast/issues/40) |
+| Vizio TV with built-in Chromecast | Cast | [#51](https://github.com/IlyaP358/fluxcast/issues/51) |
+
+### Wi-Fi adapters:
+
+| Adapter | P2P support | Source |
+|---|---|---|
+| Intel AX201 | yes | [#12](https://github.com/IlyaP358/fluxcast/issues/12), [#72](https://github.com/IlyaP358/fluxcast/issues/72) |
+| Intel AX210 | yes | [#87](https://github.com/IlyaP358/fluxcast/issues/87) |
+| TP-Link Archer T4U Plus (USB) | yes | [#56](https://github.com/IlyaP358/fluxcast/issues/56) |
+| Realtek RTL88x2bu (USB) | no | [#56](https://github.com/IlyaP358/fluxcast/issues/56) |
+| Realtek RTL8822CE | no | [#45](https://github.com/IlyaP358/fluxcast/issues/45) |
 
 ### Hardware:
 
@@ -200,7 +230,7 @@ Detailed flags, modes, and usage examples:
 </details>
 
 <details>
-<summary>Dell XPS 13 Plus</summary>
+<summary>Dell XPS 13 Plus — @alba4k</summary>
 
 - CPU: Intel i5-1260P (16 threads) up to 4.70 GHz
 - GPU: Intel Iris Xe Graphics
@@ -217,17 +247,65 @@ Detailed flags, modes, and usage examples:
 
 </details>
 
+<details>
+<summary>HP ZBook Fury G8, i9 and i5 — #72, #87</summary>
+
+- Wi-Fi: Intel AX210
+- OS: EndeavourOS, KDE Plasma (X11)
+
+</details>
+
+<details>
+<summary>Lenovo ThinkBook 16 G6 ABP — #40</summary>
+
+- CPU: AMD Ryzen 5 7530U
+- OS: Fedora Linux 44
+
+</details>
+
+<details>
+<summary>Lenovo IdeaPad Slim 7 Pro 14IHUS — #53</summary>
+
+- CPU: Intel i7-11370H (8 threads) 3.30 GHz
+- OS: Arch Linux
+
+</details>
+
+<details>
+<summary>ASUS VivoBook X515JF — #44</summary>
+
+- OS: Arch Linux (zen kernel)
+
+</details>
+
+<details>
+<summary>Desktop PC — #12</summary>
+
+- Wi-Fi: Intel AX201
+- OS: EndeavourOS
+
+</details>
+
+<details>
+<summary>Steam Deck — #45</summary>
+
+- Wi-Fi: Realtek RTL8822CE
+- OS: SteamOS Holo 3.7.25
+
+</details>
+
 
 ### Software:
 
 <details>
 <summary>Arch Linux</summary>
 
-- Kernels: 7.0.8-arch1-1, 6.12.91-1-lts612
-- WMs: Hyprland (0.55.2)
+- Kernels: 7.1.3-arch2-1, 7.0.8-arch1-1, 6.12.91-1-lts612
+- WMs: Hyprland (0.55.4)
 - DEs (for testing): KDE Plasma (6.6.5) | GNOME (50.1)
-- Shell: zsh (5.9), fish (4.7.1)
-- Terminal: kitty (0.46.2, 0.47.1)
+- Shell: zsh (5.9.2), fish (4.7.1)
+- Terminal: kitty (0.47.4)
+- Also reported: kernels 7.0.10-arch1-1, 7.0.10-zen1-1-zen, 7.0.12-arch1-1, 7.1.6-arch1-1 on KDE Plasma ([#30](https://github.com/IlyaP358/fluxcast/issues/30), [#44](https://github.com/IlyaP358/fluxcast/issues/44), [#53](https://github.com/IlyaP358/fluxcast/issues/53), [#89](https://github.com/IlyaP358/fluxcast/issues/89))
 
 </details>
 
@@ -238,5 +316,51 @@ Detailed flags, modes, and usage examples:
 - DEs (for testing): KDE Plasma (6.6.4)
 - Shell: bash (5.3.9)
 - Terminal: konsole (26.4.0)
+- Also reported: kernels 7.0.5-2, 7.0.10-2 on KDE Plasma ([#10](https://github.com/IlyaP358/fluxcast/issues/10), [#40](https://github.com/IlyaP358/fluxcast/issues/40))
+
+</details>
+
+<details>
+<summary>EndeavourOS — #12, #72, #87</summary>
+
+- Kernels: 7.0.5-arch1-1, 6.18.38-3-lts
+- DEs: KDE Plasma (X11)
+
+</details>
+
+<details>
+<summary>Fedora Linux 44 — #40</summary>
+
+- Kernels: 7.0.11-200.fc44
+
+</details>
+
+<details>
+<summary>Manjaro Linux — #84</summary>
+
+- Kernels: 6.18.39-1-MANJARO
+- DEs: GNOME (50.3)
+
+</details>
+
+<details>
+<summary>Linux Mint 22.3 — #56</summary>
+
+- Kernels: 6.17.0-35-generic
+
+</details>
+
+<details>
+<summary>Xubuntu — #51</summary>
+
+- Kernels: 6.17.0-7-generic
+- DEs: XFCE (X11)
+
+</details>
+
+<details>
+<summary>SteamOS Holo 3.7.25 — #45</summary>
+
+- Kernels: 6.11.11-valve27
 
 </details>
