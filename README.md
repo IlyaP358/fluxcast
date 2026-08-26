@@ -41,10 +41,9 @@ The tray picks your language up from the system locale, no configuration needed.
 | English | [IlyaP358](https://github.com/IlyaP358) |
 | Русский | [IlyaP358](https://github.com/IlyaP358) |
 | Čeština | [IlyaP358](https://github.com/IlyaP358) |
-| Français | [IlyaP358](https://github.com/IlyaP358) |
-
-Adding your language means editing one JSON file and no code at all.
-See [CONTRIBUTING.md](CONTRIBUTING.md#translations).
+| Danish | [normann](https://github.com/peternormann) |
+| Deutsch | [therealresonix](https://github.com/therealresonix) |
+| Français | [t0mab](https://github.com/t0mab) |
 
 ## Quick Start
 
