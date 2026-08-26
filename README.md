@@ -24,7 +24,7 @@ Current validated scope:
 - `dlna` works as fallback.
 - `cast` is experimental and currently not working in the tested Samsung setup.
 
-The project currently focuses on **WFD/Miracast on Linux (Hyprland/wlroots class setups)**.  
+The project currently focuses on **WFD/Miracast on Linux (Hyprland/wlroots class setups)**.
 DLNA and Cast are available, but they are best treated as fallback or experimental paths.
 
 Current limitation:
@@ -41,6 +41,7 @@ The tray picks your language up from the system locale, no configuration needed.
 | English | [IlyaP358](https://github.com/IlyaP358) |
 | Русский | [IlyaP358](https://github.com/IlyaP358) |
 | Čeština | [IlyaP358](https://github.com/IlyaP358) |
+| Français | [IlyaP358](https://github.com/IlyaP358) |
 
 Adding your language means editing one JSON file and no code at all.
 See [CONTRIBUTING.md](CONTRIBUTING.md#translations).
@@ -183,7 +184,7 @@ Note: on **firewalld** systems, FluxCast opens the WFD RTSP port (`7236/tcp`) fo
 
 ## Documentation
 
-Detailed flags, modes, and usage examples:  
+Detailed flags, modes, and usage examples:
 [documentation/DOCUMENTATION.md](documentation/DOCUMENTATION.md)
 
 ## Tested Environment
