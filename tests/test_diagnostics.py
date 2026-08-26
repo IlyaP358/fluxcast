@@ -132,6 +132,55 @@ class FirewallCheckTest(unittest.TestCase):
         self.assertEqual(check.status, diagnostics.STATUS_WARN)
 
 
+class WpaDbusAdminGroupCheckTest(unittest.TestCase):
+    def test_member_of_wheel_is_ok(self):
+        with mock.patch("diagnostics._user_admin_groups", return_value=["wheel"]):
+            check = diagnostics._wpa_dbus_admin_group_check()
+        self.assertEqual(check.name, "wpa D-Bus group")
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+        self.assertIn("wheel", check.message)
+
+    def test_member_of_sudo_is_ok(self):
+        with mock.patch("diagnostics._user_admin_groups", return_value=["sudo"]):
+            check = diagnostics._wpa_dbus_admin_group_check()
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+        self.assertIn("sudo", check.message)
+
+    def test_missing_admin_group_warns(self):
+        with mock.patch("diagnostics._user_admin_groups", return_value=[]):
+            check = diagnostics._wpa_dbus_admin_group_check()
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("wheel", check.detail)
+        self.assertIn("sudo", check.detail)
+
+    def test_run_diagnostics_includes_admin_group_check(self):
+        with mock.patch("diagnostics._wpa_dbus_admin_group_check") as probe, \
+                mock.patch("diagnostics._firewall_check"):
+            probe.return_value = diagnostics.Check(
+                "wpa D-Bus group", diagnostics.STATUS_OK, "member of wheel",
+            )
+            report = diagnostics.run_diagnostics(skip_firewall=True)
+        probe.assert_called_once()
+        names = [check.name for check in report.checks]
+        self.assertIn("wpa D-Bus group", names)
+
+
+class WpaDbusPolicyConfTest(unittest.TestCase):
+    def test_shipped_policy_is_scoped_to_admin_groups(self):
+        conf_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "meta",
+            "zz-dev.fluxcast.wpa-supplicant.conf",
+        )
+        with open(conf_path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertNotRegex(text, r'<policy\s+context="default"')
+        self.assertIn('group="wheel"', text)
+        self.assertIn('group="sudo"', text)
+        self.assertIn('send_member="Set"', text)
+
+
 class SubnetConflictCheckTest(unittest.TestCase):
     def test_skips_when_ip_missing(self):
         with mock.patch("diagnostics.shutil.which", return_value=None):

@@ -1,6 +1,7 @@
 import json
 import importlib.util
 import ipaddress
+import grp
 import os
 import platform
 import re
@@ -8,6 +9,11 @@ import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from typing import Optional
+
+# Admin groups that may receive the FluxCast wpa_supplicant Properties.Set grant.
+# wheel: Arch/Fedora; sudo: Debian/Ubuntu. Desktop users who can already elevate
+# are typically in one of these.
+WPA_DBUS_ADMIN_GROUPS = ("wheel", "sudo")
 
 
 STATUS_OK = "ok"
@@ -506,6 +512,43 @@ def _subnet_conflict_check() -> Check:
     )
 
 
+def _user_admin_groups() -> list[str]:
+    """Return which of WPA_DBUS_ADMIN_GROUPS the current user belongs to."""
+    gids = set(os.getgroups())
+    gids.add(os.getgid())
+    names: set[str] = set()
+    for gid in gids:
+        try:
+            names.add(grp.getgrgid(gid).gr_name)
+        except KeyError:
+            continue
+    return [name for name in WPA_DBUS_ADMIN_GROUPS if name in names]
+
+
+def _wpa_dbus_admin_group_check() -> Check:
+    """Warn when the user cannot use the scoped wpa_supplicant D-Bus policy.
+
+    FluxCast's system.d policy grants Properties.Set only to wheel/sudo so
+    unprivileged accounts cannot write supplicant properties. Losing that
+    grant quietly breaks LG sinks (GO intent) and device naming.
+    """
+    membership = _user_admin_groups()
+    if membership:
+        joined = "/".join(membership)
+        return Check(
+            "wpa D-Bus group",
+            STATUS_OK,
+            f"member of {joined}; can set P2PDeviceConfig",
+            "",
+        )
+    return Check(
+        "wpa D-Bus group",
+        STATUS_WARN,
+        "not in an admin group; device name and GO intent Set may fail",
+        f"add your user to {' or '.join(WPA_DBUS_ADMIN_GROUPS)} (or re-login after usermod)",
+    )
+
+
 def _supplicant_capability_check() -> Check:
     if not shutil.which("gdbus"):
         return Check("wpa_supplicant P2P", STATUS_WARN, "gdbus was not found", "cannot query system D-Bus")
@@ -729,6 +772,7 @@ def run_diagnostics(skip_firewall: bool = False) -> DiagnosticReport:
         _iw_p2p_check(),
         _supplicant_capability_check(),
         _supplicant_wfd_check(),
+        _wpa_dbus_admin_group_check(),
         firewall_check,
     ]
 
