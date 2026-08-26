@@ -26,6 +26,13 @@ class FindWfRecorderTest(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess([], 0, "wf-recorder 0.6.0", "")
         self.assertEqual(find_wf_recorder(), "/usr/bin/wf-recorder")
 
+    @mock.patch("wfd.wf_recorder.subprocess.run")
+    @mock.patch("wfd.wf_recorder.shutil.which", return_value="/usr/bin/wf-recorder")
+    def test_accepts_recorder_without_version_flag(self, _which, run):
+        # Older builds may not support --version; only exit 127 is a hard reject.
+        run.return_value = subprocess.CompletedProcess([], 1, "", "unknown option")
+        self.assertEqual(find_wf_recorder(), "/usr/bin/wf-recorder")
+
 
 if __name__ == "__main__":
     unittest.main()

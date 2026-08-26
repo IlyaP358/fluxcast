@@ -262,7 +262,6 @@ the port while a session is active and closes it on exit:
 
   ```bash
   sudo ufw allow 7236/tcp
-  sudo ufw allow 5353/udp
   ```
 
 Pass `--wfd-no-firewall` to skip this entirely and manage the firewall yourself.

@@ -9,8 +9,6 @@ import subprocess
 from dataclasses import asdict, dataclass
 from typing import Optional
 
-from wfd.wf_recorder import find_wf_recorder
-
 
 STATUS_OK = "ok"
 STATUS_WARN = "warn"
@@ -85,6 +83,9 @@ def _command_check(
 
 
 def _wf_recorder_check() -> Check:
+    # Deferred: wfd/__init__.py imports diagnostics; a top-level import cycles.
+    from wfd.wf_recorder import find_wf_recorder
+
     path = shutil.which("wf-recorder")
     if not path:
         return Check(
@@ -253,6 +254,9 @@ def _portal_process_check() -> Check:
 
 
 def _display_capture_check() -> Check:
+    # Deferred: wfd/__init__.py imports diagnostics; a top-level import cycles.
+    from wfd.wf_recorder import find_wf_recorder
+
     wayland = os.environ.get("WAYLAND_DISPLAY")
     x11 = os.environ.get("DISPLAY")
     wf_recorder = find_wf_recorder()
