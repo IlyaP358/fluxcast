@@ -2,146 +2,175 @@
     "● Casting: {target}": {
         "en": "● Casting: {target}",
         "ru": "● Трансляция: {target}",
-        "cs": "● Vysílání: {target}"
+        "cs": "● Vysílání: {target}",
+        "de": "● Übertragung: {target}"
     },
     "● Idle": {
         "en": "● Idle",
         "ru": "● Ожидание",
-        "cs": "● Nečinný"
+        "cs": "● Nečinný",
+        "de": "● Bereit"
     },
     "Stop Casting": {
         "en": "Stop Casting",
         "ru": "Остановить трансляцию",
-        "cs": "Zastavit vysílání"
+        "cs": "Zastavit vysílání",
+        "de": "Übertragung beenden"
     },
     "Monitor": {
         "en": "Monitor",
         "ru": "Монитор",
-        "cs": "Monitor"
+        "cs": "Monitor",
+        "de": "Monitor"
     },
     "Monitor: scanning…": {
         "en": "Monitor: scanning…",
         "ru": "Монитор: сканирование…",
-        "cs": "Monitor: vyhledávání…"
+        "cs": "Monitor: vyhledávání…",
+        "de": "Monitor: wird gesucht…"
     },
     "Select a monitor first": {
         "en": "Select a monitor first",
         "ru": "Сначала выберите монитор",
-        "cs": "Nejprve vyberte monitor"
+        "cs": "Nejprve vyberte monitor",
+        "de": "Zuerst einen Monitor auswählen"
     },
     "↻ Refreshing…": {
         "en": "↻ Refreshing…",
         "ru": "↻ Обновление…",
-        "cs": "↻ Obnovování…"
+        "cs": "↻ Obnovování…",
+        "de": "↻ Wird aktualisiert…"
     },
     "Scanning…": {
         "en": "Scanning…",
         "ru": "Сканирование…",
-        "cs": "Vyhledávání…"
+        "cs": "Vyhledávání…",
+        "de": "Suche läuft…"
     },
     "No WFD devices found": {
         "en": "No WFD devices found",
         "ru": "WFD-устройства не найдены",
-        "cs": "Nenalezena žádná WFD zařízení"
+        "cs": "Nenalezena žádná WFD zařízení",
+        "de": "Keine WFD-Geräte gefunden"
     },
     "Cast via Miracast (WFD, portal dialog)   ": {
         "en": "Cast via Miracast (WFD, portal dialog)   ",
         "ru": "Транслировать через Miracast (WFD, диалог portal)   ",
-        "cs": "Vysílat přes Miracast (WFD, dialog portálu)   "
+        "cs": "Vysílat přes Miracast (WFD, dialog portálu)   ",
+        "de": "Über Miracast übertragen (WFD, Portal-Dialog)   "
     },
     "Cast via Miracast (WFD)": {
         "en": "Cast via Miracast (WFD)",
         "ru": "Транслировать через Miracast (WFD)",
-        "cs": "Vysílat přes Miracast (WFD)"
+        "cs": "Vysílat přes Miracast (WFD)",
+        "de": "Über Miracast übertragen (WFD)"
     },
     "No DLNA devices found": {
         "en": "No DLNA devices found",
         "ru": "DLNA-устройства не найдены",
-        "cs": "Nenalezena žádná DLNA zařízení"
+        "cs": "Nenalezena žádná DLNA zařízení",
+        "de": "Keine DLNA-Geräte gefunden"
     },
     "Cast via DLNA/UPnP": {
         "en": "Cast via DLNA/UPnP",
         "ru": "Транслировать через DLNA/UPnP",
-        "cs": "Vysílat přes DLNA/UPnP"
+        "cs": "Vysílat přes DLNA/UPnP",
+        "de": "Über DLNA/UPnP übertragen"
     },
     "No Chromecast devices found": {
         "en": "No Chromecast devices found",
         "ru": "Chromecast-устройства не найдены",
-        "cs": "Nenalezena žádná Chromecast zařízení"
+        "cs": "Nenalezena žádná Chromecast zařízení",
+        "de": "Keine Chromecast-Geräte gefunden"
     },
     "Cast via Chromecast": {
         "en": "Cast via Chromecast",
         "ru": "Транслировать через Chromecast",
-        "cs": "Vysílat přes Chromecast"
+        "cs": "Vysílat přes Chromecast",
+        "de": "Über Chromecast übertragen"
     },
     "Rescan Devices": {
         "en": "Rescan Devices",
         "ru": "Повторный поиск",
-        "cs": "Vyhledat znovu"
+        "cs": "Vyhledat znovu",
+        "de": "Geräte erneut suchen"
     },
     "About FluxCast": {
         "en": "About FluxCast",
         "ru": "О FluxCast",
-        "cs": "O FluxCastu"
+        "cs": "O FluxCastu",
+        "de": "Über FluxCast"
     },
     "Exit": {
         "en": "Exit",
         "ru": "Выход",
-        "cs": "Ukončit"
+        "cs": "Ukončit",
+        "de": "Beenden"
     },
     "Desktop → Smart TV streaming for Linux": {
         "en": "Desktop → Smart TV streaming for Linux",
         "ru": "Трансляция рабочего стола на Smart TV для Linux",
-        "cs": "Vysílání plochy → Smart TV pro Linux"
+        "cs": "Vysílání plochy → Smart TV pro Linux",
+        "de": "Desktop → Smart-TV-Streaming für Linux"
     },
     "I wanted to watch movies by streaming my Linux desktop to a TV — nothing worked. gnome-network-displays gave me one frame and then froze. miraclecast hasn't been meaningfully updated in years.\n\nSo I built FluxCast from scratch: Wi-Fi Direct via NetworkManager, full RTSP handshake, RTP media stream. ~1 second latency, video and audio. It actually works.": {
         "en": "I wanted to watch movies by streaming my Linux desktop to a TV — nothing worked. gnome-network-displays gave me one frame and then froze. miraclecast hasn't been meaningfully updated in years.\n\nSo I built FluxCast from scratch: Wi-Fi Direct via NetworkManager, full RTSP handshake, RTP media stream. ~1 second latency, video and audio. It actually works.",
         "ru": "Я просто хотел смотреть фильмы, транслируя свой рабочий стол Linux на телевизор — ничего не работало. gnome-network-displays выдавал один кадр и зависал. miraclecast годами не получал значимых обновлений.\n\nПоэтому я создал FluxCast с нуля: Wi-Fi Direct через NetworkManager, полный хендшейк RTSP, медиапоток RTP с задержкой около 1 секунды, видео и звук. И это реально работает!",
-        "cs": "Chtěl jsem sledovat filmy streamováním mého Linux desktopu na TV — nic nefungovalo. gnome-network-displays mi ukázal jeden snímek a pak zamrzl. miraclecast nebyl v posledních letech významně aktualizován.\n\nTakže jsem postavil FluxCast od nuly: Wi-Fi Direct přes NetworkManager, plný RTSP handshake, RTP mediální stream. ~1 sekunda latence, video a zvuk. A opravdu to funguje!"
+        "cs": "Chtěl jsem sledovat filmy streamováním mého Linux desktopu na TV — nic nefungovalo. gnome-network-displays mi ukázal jeden snímek a pak zamrzl. miraclecast nebyl v posledních letech významně aktualizován.\n\nTakže jsem postavil FluxCast od nuly: Wi-Fi Direct přes NetworkManager, plný RTSP handshake, RTP mediální stream. ~1 sekunda latence, video a zvuk. A opravdu to funguje!",
+        "de": "Ich wollte Filme sehen, indem ich meinen Linux-Desktop auf einen Fernseher streamte — nichts funktionierte. gnome-network-displays lieferte ein Einzelbild und frierte dann ein. miraclecast wurde seit Jahren nicht mehr sinnvoll aktualisiert.\n\nAlso habe ich FluxCast von Grund auf gebaut: Wi-Fi Direct über NetworkManager, vollständiger RTSP-Handshake, RTP-Medienstream. Etwa 1 Sekunde Latenz, Video und Audio. Es funktioniert tatsächlich."
     },
     "Help continue FluxCast development": {
         "en": "Help continue FluxCast development",
         "ru": "Поддержать разработку FluxCast",
-        "cs": "Podpořte další vývoj FluxCastu"
+        "cs": "Podpořte další vývoj FluxCastu",
+        "de": "Hilf mit, FluxCast weiterzuentwickeln"
     },
     "Author: IlyaP358  |  Code licensed under GPL-3.0": {
         "en": "Author: IlyaP358  |  Code licensed under GPL-3.0",
         "ru": "Автор: IlyaP358  |  Код распространяется под лицензией GPL-3.0",
-        "cs": "Autor: IlyaP358  |  Kód je licencován pod GPL-3.0"
+        "cs": "Autor: IlyaP358  |  Kód je licencován pod GPL-3.0",
+        "de": "Autor: IlyaP358  |  Code unter GPL-3.0 lizenziert"
     },
     "Join our Discord": {
         "en": "Join our Discord",
         "ru": "Присоединяйтесь к нашему Discord",
-        "cs": "Připojte se k nám na Discordu"
+        "cs": "Připojte se k nám na Discordu",
+        "de": "Tritt unserem Discord bei"
     },
     "View Contributors": {
         "en": "View Contributors",
         "ru": "Посмотреть контрибьюторов",
-        "cs": "Zobrazit přispěvatele"
+        "cs": "Zobrazit přispěvatele",
+        "de": "Mitwirkende ansehen"
     },
     "Close": {
         "en": "Close",
         "ru": "Закрыть",
-        "cs": "Zavřít"
+        "cs": "Zavřít",
+        "de": "Schließen"
     },
     "FluxCast stopped": {
         "en": "FluxCast stopped",
         "ru": "FluxCast остановлен",
-        "cs": "FluxCast zastaven"
+        "cs": "FluxCast zastaven",
+        "de": "FluxCast beendet"
     },
     "Cast to {target} ended cleanly.": {
         "en": "Cast to {target} ended cleanly.",
         "ru": "Трансляция на {target} успешно завершена.",
-        "cs": "Vysílání na {target} bylo úspěšně ukončeno."
+        "cs": "Vysílání na {target} bylo úspěšně ukončeno.",
+        "de": "Übertragung an {target} sauber beendet."
     },
     "Cast to {target} exited (code {rc}).": {
         "en": "Cast to {target} exited (code {rc}).",
         "ru": "Трансляция на {target} завершилась (код {rc}).",
-        "cs": "Vysílání na {target} skončilo (kód {rc})."
+        "cs": "Vysílání na {target} skončilo (kód {rc}).",
+        "de": "Übertragung an {target} beendet (Code {rc})."
     },
     "Starting cast to {target}… (log: {path})": {
         "en": "Starting cast to {target}… (log: {path})",
         "ru": "Запуск трансляции на {target}… (лог: {path})",
-        "cs": "Spouštění vysílání na {target}… (log: {path})"
+        "cs": "Spouštění vysílání na {target}… (log: {path})",
+        "de": "Übertragung an {target} wird gestartet… (Protokoll: {path})"
     }
 }
