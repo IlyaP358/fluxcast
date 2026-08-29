@@ -183,8 +183,29 @@ def parse_args() -> argparse.Namespace:
                      help="P2P group-owner intent (0-15); 0 forces the TV to be "
                           "the group owner, which most Miracast TVs require to "
                           "start the session (default: 0)")
+    wfd.add_argument("--wfd-p2p-channel", type=int, default=None, dest="wfd_p2p_channel",
+                     choices=[1, 6, 11],
+                     help="Force the P2P group onto this 2.4GHz channel instead of "
+                          "letting the driver pick (only used by --wfd-p2p-backend "
+                          "wpas). Some WFD sinks only support Wi-Fi Direct on "
+                          "2.4GHz, and silently never associate if the group forms "
+                          "on 5GHz - GO Negotiation completes fine, but the sink "
+                          "never shows up at the 802.11 level. Default: unset "
+                          "(driver picks the channel).")
     wfd.add_argument("--wfd-monitor", default=None, dest="monitor_name",
                      help="Deprecated alias for --monitor, kept for compatibility")
+    wfd.add_argument("--wfd-p2p-backend", default="nm", dest="wfd_p2p_backend",
+                     choices=["nm", "wpas"],
+                     help="How to bring up the P2P link: 'nm' uses "
+                          "NetworkManager (default); 'wpas' talks to "
+                          "wpa_supplicant directly instead, which exposes "
+                          "controls NetworkManager's own P2P API doesn't - "
+                          "notably --wfd-p2p-channel below. Also useful for "
+                          "debugging P2P/WPS negotiation issues, since it "
+                          "logs each step of the raw exchange. Needs the "
+                          "D-Bus policy in "
+                          "meta/zz-dev.fluxcast.wpa-supplicant.conf (root "
+                          "or netdev group).")
     wfd.add_argument("--wfd-uibc", action="store_true", dest="wfd_uibc",
                      help="Experimental: accept touch/mouse input back from the "
                           "sink (TV/tablet) and inject it locally via uinput. "

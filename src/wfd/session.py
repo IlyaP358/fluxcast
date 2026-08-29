@@ -14,6 +14,7 @@ from .p2p.nm import (
     _nm_p2p_device_path, _wait_for_nm_activation,
 )
 from .p2p.peers import _scan_and_select
+from .p2p.wpas import connect_via_wpa_supplicant, release_wpa_supplicant_connection
 from .probe import _active_rtsp_probe
 from .rtsp.rtsp_server import WFDRTSPServer
 
@@ -125,6 +126,8 @@ def start_experimental_backend(args) -> None:
     uibc_firewall_opened = False
     active_path = ""
     previous_go_intent = None
+    p2p_backend = getattr(args, "wfd_p2p_backend", "nm")
+    wpas_data_iface = None
     try:
         # Clear stale P2P device state from previous runs before new activation.
         try:
@@ -132,17 +135,28 @@ def start_experimental_backend(args) -> None:
         except Exception:
             pass
         rtsp.start()
-        # Lower our GO intent before negotiation so the TV becomes the group
-        # owner; most Miracast sinks only start the RTSP session in that role.
-        previous_go_intent = _set_p2p_go_intent(
-            args.wfd_interface, getattr(args, "wfd_go_intent", 0)
-        )
-        active_path = _connect_peer(
-            device_path,
-            peer,
-            rtsp_port=rtsp_port,
-        )
-        _wait_for_nm_activation(active_path)
+        if p2p_backend == "wpas":
+            # Bypasses NetworkManager's AddAndActivateConnection2 entirely -
+            # see wpas.py's module docstring for why. connect_via_wpa_supplicant
+            # handles GO-intent lowering internally, so it isn't done here.
+            wpas_data_iface = connect_via_wpa_supplicant(
+                args.wfd_interface, peer.address,
+                go_intent=getattr(args, "wfd_go_intent", 0),
+                rtsp_port=rtsp_port,
+                p2p_channel=getattr(args, "wfd_p2p_channel", None),
+            )
+        else:
+            # Lower our GO intent before negotiation so the TV becomes the group
+            # owner; most Miracast sinks only start the RTSP session in that role.
+            previous_go_intent = _set_p2p_go_intent(
+                args.wfd_interface, getattr(args, "wfd_go_intent", 0)
+            )
+            active_path = _connect_peer(
+                device_path,
+                peer,
+                rtsp_port=rtsp_port,
+            )
+            _wait_for_nm_activation(active_path)
 
         if not getattr(args, "wfd_no_firewall", False):
             firewall_opened = _open_wfd_firewall_port(rtsp_port)
@@ -175,6 +189,13 @@ def start_experimental_backend(args) -> None:
         if active_path:
             _cleanup_step("connection deactivate",
                           lambda: _deactivate_connection(active_path))
+        if wpas_data_iface:
+            _cleanup_step(
+                "wpa_supplicant connection release",
+                lambda: release_wpa_supplicant_connection(
+                    args.wfd_interface, wpas_data_iface
+                ),
+            )
         _cleanup_step("P2P device disconnect", lambda: _disconnect_device(device_path))
         if previous_go_intent is not None:
             _cleanup_step(

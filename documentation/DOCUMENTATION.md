@@ -69,6 +69,8 @@ python3 src/main.py --protocol cast
 - `--wfd-interface IFACE`
 - `--wfd-timeout SEC`
 - `--wfd-go-intent 0-15`
+- `--wfd-p2p-backend nm|wpas` talk to wpa_supplicant directly instead of NetworkManager (default `nm`)
+- `--wfd-p2p-channel 1|6|11` force the P2P group onto this 2.4GHz channel (`wpas` backend only)
 - `--wfd-uibc` enable the input back channel (control the desktop from the sink)
 - `--wfd-monitor NAME` **deprecated** alias for `--monitor` (kept for compatibility)
 
@@ -196,6 +198,21 @@ and protocol selection remain controlled by the tray and cannot be set here.
     session; raise it only if a specific sink requires a higher intent.
   - Does not claim or require that the TV becomes the group owner or that the
     P2P address range changes.
+- `--wfd-p2p-backend`
+  - `nm` (default) brings up the P2P link through NetworkManager.
+  - `wpas` talks to wpa_supplicant's own D-Bus interface directly instead,
+    which exposes controls NetworkManager's API doesn't - notably
+    `--wfd-p2p-channel` below. Also useful when a P2P connection needs
+    closer debugging, since it logs each step of the raw negotiation.
+  - Needs the D-Bus policy in `meta/zz-dev.fluxcast.wpa-supplicant.conf`
+    installed (root, or a user in the `netdev` group, can run it without
+    sudo - see the file for details).
+- `--wfd-p2p-channel`
+  - Forces the P2P group onto channel `1`, `6`, or `11` (2.4GHz) instead of
+    letting the driver pick. Only used by `--wfd-p2p-backend wpas`.
+  - Some sinks only support Wi-Fi Direct on 2.4GHz and silently never
+    associate if the group forms on 5GHz - GO Negotiation completes fine,
+    but the sink never shows up at the 802.11 level.
 - `--wfd-monitor NAME`
   - **Deprecated** alias for `--monitor`, kept for backward compatibility. Use `--monitor` instead.
 
