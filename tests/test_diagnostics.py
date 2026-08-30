@@ -132,37 +132,70 @@ class FirewallCheckTest(unittest.TestCase):
         self.assertEqual(check.status, diagnostics.STATUS_WARN)
 
 
-class WpaDbusAdminGroupCheckTest(unittest.TestCase):
-    def test_member_of_wheel_is_ok(self):
-        with mock.patch("diagnostics._user_admin_groups", return_value=["wheel"]):
-            check = diagnostics._wpa_dbus_admin_group_check()
-        self.assertEqual(check.name, "wpa D-Bus group")
+class WpaDbusSetCheckTest(unittest.TestCase):
+    def test_permitted_set_is_ok(self):
+        with mock.patch("diagnostics.shutil.which", return_value="/usr/bin/gdbus"), \
+                mock.patch(
+                    "diagnostics._run",
+                    return_value=_completed(
+                        "Error: GDBus.Error:org.freedesktop.DBus.Error.InvalidArgs: "
+                        "No such property",
+                        returncode=1,
+                    ),
+                ):
+            check = diagnostics._wpa_dbus_set_check()
+        self.assertEqual(check.name, "wpa D-Bus Set")
         self.assertEqual(check.status, diagnostics.STATUS_OK)
-        self.assertIn("wheel", check.message)
+        self.assertIn("permitted", check.message)
 
-    def test_member_of_sudo_is_ok(self):
-        with mock.patch("diagnostics._user_admin_groups", return_value=["sudo"]):
-            check = diagnostics._wpa_dbus_admin_group_check()
-        self.assertEqual(check.status, diagnostics.STATUS_OK)
-        self.assertIn("sudo", check.message)
-
-    def test_missing_admin_group_warns(self):
-        with mock.patch("diagnostics._user_admin_groups", return_value=[]):
-            check = diagnostics._wpa_dbus_admin_group_check()
+    def test_access_denied_without_admin_group_warns(self):
+        with mock.patch("diagnostics.shutil.which", return_value="/usr/bin/gdbus"), \
+                mock.patch("diagnostics._user_admin_groups", return_value=[]), \
+                mock.patch(
+                    "diagnostics._run",
+                    return_value=_completed(
+                        "Error: GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: "
+                        "Rejected send message",
+                        returncode=1,
+                    ),
+                ):
+            check = diagnostics._wpa_dbus_set_check()
         self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("denied", check.message)
         self.assertIn("wheel", check.detail)
         self.assertIn("sudo", check.detail)
 
-    def test_run_diagnostics_includes_admin_group_check(self):
-        with mock.patch("diagnostics._wpa_dbus_admin_group_check") as probe, \
+    def test_access_denied_with_admin_group_warns_about_policy(self):
+        with mock.patch("diagnostics.shutil.which", return_value="/usr/bin/gdbus"), \
+                mock.patch("diagnostics._user_admin_groups", return_value=["wheel"]), \
+                mock.patch(
+                    "diagnostics._run",
+                    return_value=_completed(
+                        "Error: GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: "
+                        "Rejected send message",
+                        returncode=1,
+                    ),
+                ):
+            check = diagnostics._wpa_dbus_set_check()
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("dbus", check.detail.lower())
+
+    def test_missing_gdbus_warns(self):
+        with mock.patch("diagnostics.shutil.which", return_value=None):
+            check = diagnostics._wpa_dbus_set_check()
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("gdbus", check.message)
+
+    def test_run_diagnostics_includes_set_check(self):
+        with mock.patch("diagnostics._wpa_dbus_set_check") as probe, \
                 mock.patch("diagnostics._firewall_check"):
             probe.return_value = diagnostics.Check(
-                "wpa D-Bus group", diagnostics.STATUS_OK, "member of wheel",
+                "wpa D-Bus Set", diagnostics.STATUS_OK, "Properties.Set on wpa_supplicant is permitted",
             )
             report = diagnostics.run_diagnostics(skip_firewall=True)
         probe.assert_called_once()
         names = [check.name for check in report.checks]
-        self.assertIn("wpa D-Bus group", names)
+        self.assertIn("wpa D-Bus Set", names)
 
 
 class WpaDbusPolicyConfTest(unittest.TestCase):
