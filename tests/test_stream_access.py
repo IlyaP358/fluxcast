@@ -10,6 +10,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import main  # noqa: E402
 import server  # noqa: E402
 
 
@@ -104,6 +105,8 @@ class SessionSetupTest(unittest.TestCase):
             self.assertTrue(os.path.isdir(path))
             mode = stat.S_IMODE(os.stat(path).st_mode)
             self.assertEqual(mode, 0o700)
+            base_mode = stat.S_IMODE(os.stat(tmp).st_mode)
+            self.assertEqual(base_mode, 0o700)
             self.assertEqual(server.HLS_DIR, path)
 
     def test_new_session_id_uses_secrets(self):
@@ -112,6 +115,29 @@ class SessionSetupTest(unittest.TestCase):
             session_id = server.new_session_id()
         token.assert_called_once()
         self.assertEqual(session_id, "session-tok123")
+
+
+class MainHlsDirBindingTest(unittest.TestCase):
+    def test_wait_for_hls_segments_follows_prepare_hls_dir(self):
+        """main must read server.HLS_DIR dynamically, not import it by value."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(server, "HLS_BASE", tmp):
+                session_dir = server.prepare_hls_dir("session-binding")
+            playlist = os.path.join(session_dir, "stream.m3u8")
+            with open(playlist, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "#EXTM3U\n#EXT-X-TARGETDURATION:1\n"
+                    "#EXTINF:1.0,\nstream0.ts\n"
+                    "#EXTINF:1.0,\nstream1.ts\n"
+                )
+            for name in ("stream0.ts", "stream1.ts"):
+                with open(os.path.join(session_dir, name), "wb") as fh:
+                    fh.write(b"\x00" * 64)
+
+            # Would time out if main still pointed at the pre-session HLS_DIR.
+            self.assertTrue(
+                main._wait_for_hls_segments(required_segments=2, timeout=1.0)
+            )
 
 
 class DeviceIpTest(unittest.TestCase):

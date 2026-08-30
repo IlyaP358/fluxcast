@@ -65,8 +65,8 @@ import sys
 import termios
 
 from capture import prompt_monitor, start_capture, stop_capture
+import server
 from server import (
-    HLS_DIR,
     CorsHLSRequestHandler,
     HLSRequestHandler,
     StreamServer,
@@ -223,12 +223,14 @@ def _restore_term(saved) -> None:
 
 
 def _wait_for_hls_segments(required_segments: int = 2, timeout: float = 15.0) -> bool:
-    playlist = os.path.join(HLS_DIR, "stream.m3u8")
+    # Read dynamically — prepare_hls_dir() reassigns server.HLS_DIR per session.
+    hls_dir = server.HLS_DIR
+    playlist = os.path.join(hls_dir, "stream.m3u8")
     start = time.monotonic()
 
     while time.monotonic() - start < timeout:
         segments = []
-        for path in glob.glob(os.path.join(HLS_DIR, "stream*.ts")):
+        for path in glob.glob(os.path.join(hls_dir, "stream*.ts")):
             try:
                 if os.path.getsize(path) > 0:
                     segments.append(path)

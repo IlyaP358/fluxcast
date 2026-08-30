@@ -43,7 +43,9 @@ def prepare_hls_dir(session_id: str) -> str:
     session_dir = os.path.join(HLS_BASE, session_id)
     if os.path.isdir(HLS_BASE):
         shutil.rmtree(HLS_BASE)
+    # makedirs only applies mode to the leaf; chmod both base and session dir.
     os.makedirs(session_dir, mode=0o700)
+    os.chmod(HLS_BASE, 0o700)
     os.chmod(session_dir, 0o700)
     HLS_DIR = session_dir
     PROGRESSIVE_TS_PATH = os.path.join(HLS_DIR, "progressive.ts")
@@ -278,8 +280,6 @@ class HLSRequestHandler(http.server.BaseHTTPRequestHandler):
             basename.startswith("stream") and basename.endswith(".ts")
         ):
             normalized = basename
-        elif basename in ("live.ts", "progressive.ts"):
-            return None
         return os.path.join(HLS_DIR, normalized)
 
     def _send_common_headers(self, local_path: str) -> None:
