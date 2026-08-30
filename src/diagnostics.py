@@ -1,6 +1,7 @@
 import json
 import importlib.util
 import ipaddress
+import grp
 import os
 import platform
 import re
@@ -8,6 +9,11 @@ import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from typing import Optional
+
+# Admin groups that may receive the FluxCast wpa_supplicant Properties.Set grant.
+# wheel: Arch/Fedora; sudo: Debian/Ubuntu. Desktop users who can already elevate
+# are typically in one of these.
+WPA_DBUS_ADMIN_GROUPS = ("wheel", "sudo")
 
 
 STATUS_OK = "ok"
@@ -506,6 +512,71 @@ def _subnet_conflict_check() -> Check:
     )
 
 
+def _user_admin_groups() -> list[str]:
+    """Return which of WPA_DBUS_ADMIN_GROUPS the current user belongs to."""
+    gids = set(os.getgroups())
+    gids.add(os.getgid())
+    names: set[str] = set()
+    for gid in gids:
+        try:
+            names.add(grp.getgrgid(gid).gr_name)
+        except KeyError:
+            continue
+    return [name for name in WPA_DBUS_ADMIN_GROUPS if name in names]
+
+
+def _wpa_dbus_set_check() -> Check:
+    """Probe whether Properties.Set on wpa_supplicant is permitted for this user.
+
+    FluxCast's system.d policy grants Properties.Set only to wheel/sudo so
+    unprivileged accounts cannot write supplicant properties. A Set on a
+    non-existent property is authoritative: AccessDenied means the bus policy
+    blocks the call; InvalidArgs / No such property means the grant is live.
+    """
+    name = "wpa D-Bus Set"
+    if not shutil.which("gdbus"):
+        return Check(name, STATUS_WARN, "gdbus was not found", "cannot probe wpa_supplicant D-Bus policy")
+
+    args = [
+        "gdbus", "call", "--system",
+        "--dest", "fi.w1.wpa_supplicant1",
+        "--object-path", "/fi/w1/wpa_supplicant1",
+        "--method", "org.freedesktop.DBus.Properties.Set",
+        "fi.w1.wpa_supplicant1",
+        "FluxCastDoctorProbe",
+        "<'probe'>",
+    ]
+    try:
+        result = _run(args, timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return Check(name, STATUS_WARN, "could not probe wpa_supplicant D-Bus policy", str(exc))
+
+    text = (result.stdout + result.stderr).strip()
+    if "AccessDenied" in text:
+        membership = _user_admin_groups()
+        if membership:
+            detail = (
+                "Properties.Set is blocked despite admin group membership; "
+                "install meta/zz-dev.fluxcast.wpa-supplicant.conf and reload dbus"
+            )
+        else:
+            detail = (
+                f"add your user to {' or '.join(WPA_DBUS_ADMIN_GROUPS)} "
+                "(or re-login after usermod), then install the FluxCast D-Bus policy"
+            )
+        return Check(
+            name,
+            STATUS_WARN,
+            "Properties.Set on wpa_supplicant is denied",
+            detail,
+        )
+    if "No such property" in text or "InvalidArgs" in text:
+        return Check(name, STATUS_OK, "Properties.Set on wpa_supplicant is permitted", text)
+    if result.returncode != 0:
+        return Check(name, STATUS_WARN, "wpa_supplicant D-Bus probe failed", text)
+    return Check(name, STATUS_OK, "Properties.Set on wpa_supplicant is permitted", text)
+
+
 def _supplicant_capability_check() -> Check:
     if not shutil.which("gdbus"):
         return Check("wpa_supplicant P2P", STATUS_WARN, "gdbus was not found", "cannot query system D-Bus")
@@ -729,6 +800,7 @@ def run_diagnostics(skip_firewall: bool = False) -> DiagnosticReport:
         _iw_p2p_check(),
         _supplicant_capability_check(),
         _supplicant_wfd_check(),
+        _wpa_dbus_set_check(),
         firewall_check,
     ]
 
