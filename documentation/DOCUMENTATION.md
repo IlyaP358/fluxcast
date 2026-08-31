@@ -205,8 +205,9 @@ and protocol selection remain controlled by the tray and cannot be set here.
     `--wfd-p2p-channel` below. Also useful when a P2P connection needs
     closer debugging, since it logs each step of the raw negotiation.
   - Needs the D-Bus policy in `meta/zz-dev.fluxcast.wpa-supplicant.conf`
-    installed (root, or a user in the `netdev` group, can run it without
-    sudo - see the file for details).
+    installed. On Debian/Ubuntu, a user in the `netdev` group can then run
+    it without sudo; elsewhere (including Arch, this project's primary
+    platform) it falls back to sudo - see the file for details.
 - `--wfd-p2p-channel`
   - Forces the P2P group onto channel `1`, `6`, or `11` (2.4GHz) instead of
     letting the driver pick. Only used by `--wfd-p2p-backend wpas`.
