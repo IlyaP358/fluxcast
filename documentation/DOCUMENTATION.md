@@ -214,6 +214,14 @@ and protocol selection remain controlled by the tray and cannot be set here.
   - Some sinks only support Wi-Fi Direct on 2.4GHz and silently never
     associate if the group forms on 5GHz - GO Negotiation completes fine,
     but the sink never shows up at the 802.11 level.
+  - Only takes effect when we end up as Group Owner, since that's the side
+    that picks the operating channel. `--wfd-go-intent` defaults to `0` so
+    the sink becomes GO on most sinks, which means this flag does nothing
+    by default - pair it with `--wfd-go-intent 15` if you need the channel
+    forced deterministically. FluxCast warns if it looks like that pairing
+    is missing, but never raises GO intent on its own: `go_intent 0` is a
+    deliberate fix for some sinks (see #72), and silently overriding it
+    would break those.
 - `--wfd-monitor NAME`
   - **Deprecated** alias for `--monitor`, kept for backward compatibility. Use `--monitor` instead.
 

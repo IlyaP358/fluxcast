@@ -238,6 +238,17 @@ def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
         data_iface = _wait_for_group_interface(interfaces_before)
         role = get_p2p_role(data_iface)
         print(f"[FluxCast WFD] P2P group formed on {data_iface}; our role: {role}")
+        if p2p_channel is not None and role != "P2P-GO":
+            # The operating channel is the Group Owner's call - forcing it
+            # on our end does nothing when the sink ends up as GO instead,
+            # which is the common case at the default go_intent=0. Warn
+            # rather than silently doing nothing, but never raise go_intent
+            # automatically: 0 is a deliberate fix for some sinks (#72),
+            # and overriding it here would break those.
+            print("[FluxCast WFD] Warning: --wfd-p2p-channel has no effect - "
+                  f"we ended up as {role}, not the Group Owner, so the sink "
+                  "picked the channel instead. Pair this with "
+                  "--wfd-go-intent 15 if you need the channel forced.")
 
         try:
             configure_ip(data_iface, peer_mac, role, physical_iface)
