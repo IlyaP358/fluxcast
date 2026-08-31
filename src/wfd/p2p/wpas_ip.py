@@ -162,8 +162,14 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
     if physical_iface:
         dnsmasq_cmd.append(f"--interface={physical_iface}")
     dnsmasq_cmd += [
+        # --dhcp-host sets the wfdsink tag on the sink's MAC. The range
+        # must then require that tag (tag:) to actually restrict who's
+        # eligible for it - set:wfdsink here would instead apply the tag
+        # to whoever happens to take an address, which doesn't restrict
+        # anything and would turn physical_iface into an open DHCP server
+        # for every other device on that network.
         f"--dhcp-host={peer_mac},set:wfdsink",
-        f"--dhcp-range=set:wfdsink,{WFD_P2P_SUBNET}.2,{WFD_P2P_SUBNET}.254,255.255.255.0,1h",
+        f"--dhcp-range=tag:wfdsink,{WFD_P2P_SUBNET}.2,{WFD_P2P_SUBNET}.254,255.255.255.0,1h",
         f"--dhcp-leasefile={lease_file}",
         "--port=0",  # DHCP only, no DNS service on this interface
         "--no-resolv", "--no-hosts",
