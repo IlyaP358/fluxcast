@@ -69,6 +69,8 @@ python3 src/main.py --protocol cast
 - `--wfd-interface IFACE`
 - `--wfd-timeout SEC`
 - `--wfd-go-intent 0-15`
+- `--wfd-p2p-backend nm|wpas` talk to wpa_supplicant directly instead of NetworkManager (default `nm`)
+- `--wfd-p2p-channel 1|6|11` force the P2P group onto this 2.4GHz channel (`wpas` backend only)
 - `--wfd-uibc` enable the input back channel (control the desktop from the sink)
 - `--wfd-monitor NAME` **deprecated** alias for `--monitor` (kept for compatibility)
 
@@ -196,6 +198,30 @@ and protocol selection remain controlled by the tray and cannot be set here.
     session; raise it only if a specific sink requires a higher intent.
   - Does not claim or require that the TV becomes the group owner or that the
     P2P address range changes.
+- `--wfd-p2p-backend`
+  - `nm` (default) brings up the P2P link through NetworkManager.
+  - `wpas` talks to wpa_supplicant's own D-Bus interface directly instead,
+    which exposes controls NetworkManager's API doesn't - notably
+    `--wfd-p2p-channel` below. Also useful when a P2P connection needs
+    closer debugging, since it logs each step of the raw negotiation.
+  - Needs the D-Bus policy in `meta/zz-dev.fluxcast.wpa-supplicant.conf`
+    installed. On Debian/Ubuntu, a user in the `netdev` group can then run
+    it without sudo; elsewhere (including Arch, this project's primary
+    platform) it falls back to sudo - see the file for details.
+- `--wfd-p2p-channel`
+  - Forces the P2P group onto channel `1`, `6`, or `11` (2.4GHz) instead of
+    letting the driver pick. Only used by `--wfd-p2p-backend wpas`.
+  - Some sinks only support Wi-Fi Direct on 2.4GHz and silently never
+    associate if the group forms on 5GHz - GO Negotiation completes fine,
+    but the sink never shows up at the 802.11 level.
+  - Only takes effect when we end up as Group Owner, since that's the side
+    that picks the operating channel. `--wfd-go-intent` defaults to `0` so
+    the sink becomes GO on most sinks, which means this flag does nothing
+    by default - pair it with `--wfd-go-intent 15` if you need the channel
+    forced deterministically. FluxCast warns if it looks like that pairing
+    is missing, but never raises GO intent on its own: `go_intent 0` is a
+    deliberate fix for some sinks (see #72), and silently overriding it
+    would break those.
 - `--wfd-monitor NAME`
   - **Deprecated** alias for `--monitor`, kept for backward compatibility. Use `--monitor` instead.
 

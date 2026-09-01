@@ -87,10 +87,43 @@ NM_DEVICE_REASON_NAMES = {
     54: "device-handler-failed",
 }
 
-def _gdbus_call(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
+def _gdbus_call(args: list[str], timeout: float = 5.0,
+                 privileged: bool = False) -> subprocess.CompletedProcess[str]:
+    """privileged=True marks a call that needs elevated D-Bus access:
+    P2PDevice.Find/Connect/StopFind/GroupRemove, which our D-Bus policy
+    (meta/zz-dev.fluxcast.wpa-supplicant.conf) grants to root, plus the
+    netdev group on Debian/Ubuntu (see that file's comment - Arch has no
+    such group, so there this always falls back to sudo below).
+
+    wpa_supplicant has no polkit integration, so unlike NetworkManager it
+    can't prompt for authorization at call time - the policy grant is
+    static, decided by the caller's uid/gid before the call is ever made.
+    Where it applies, the right caller needs no sudo at all here; everyone
+    else escalates, and only after actually seeing the bus reject the call.
+
+    Retrying under sudo after an AccessDenied is safe (not a double-fire of
+    a stateful action): dbus-daemon enforces this policy at the message-
+    routing layer, before the call ever reaches wpa_supplicant, so a denied
+    first attempt has no observable side effect to duplicate.
+    """
     if not shutil.which("gdbus"):
         raise WFDNotReady("gdbus is required for NetworkManager Wi-Fi P2P discovery.")
-    return _run(["gdbus", "call", "--system", *args], timeout=timeout)
+    cmd = ["gdbus", "call", "--system", *args]
+    method = args[args.index("--method") + 1] if "--method" in args else "gdbus call"
+    try:
+        if not privileged:
+            return _run(cmd, timeout=timeout)
+
+        result = _run(cmd, timeout=timeout)
+        if result.returncode == 0 or "AccessDenied" not in (result.stderr or result.stdout or ""):
+            return result
+        # No -n: sudo's password prompt goes straight to the controlling
+        # terminal (/dev/tty) regardless of stdout/stderr capture here, so
+        # this still works interactively. Falls through instantly if the
+        # session's sudo timestamp is already cached from an earlier command.
+        return _run(["sudo", *cmd], timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise WFDNotReady(f"{method} timed out after {timeout:.0f}s") from exc
 
 def _nm_get_property(path: str, interface: str, prop: str) -> str:
     result = _gdbus_call([

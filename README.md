@@ -84,6 +84,20 @@ python3 src/main.py --protocol wfd --wfd-capture-backend wf-recorder
 python3 src/main.py --protocol wfd --wfd-capture-backend x11grab
 ```
 
+WFD P2P connection troubleshooting - talk to wpa_supplicant directly instead
+of going through NetworkManager, and optionally pin the group to a 2.4GHz
+channel for sinks that don't support Wi-Fi Direct on 5GHz:
+
+```bash
+python3 src/main.py --protocol wfd --wfd-p2p-backend wpas
+python3 src/main.py --protocol wfd --wfd-p2p-backend wpas --wfd-p2p-channel 6
+```
+
+Needs the D-Bus policy in `meta/zz-dev.fluxcast.wpa-supplicant.conf`
+installed to `/usr/share/dbus-1/system.d/`. On Debian/Ubuntu, a user in the
+`netdev` group can then run it without sudo; elsewhere (including Arch)
+it falls back to sudo - see the file for details.
+
 ## What Works Best
 
 ### WFD (Primary)
