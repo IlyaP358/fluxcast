@@ -45,6 +45,7 @@ The tray picks your language up from the system locale, no configuration needed.
 | Deutsch | [therealresonix](https://github.com/therealresonix) |
 | Français | [t0mab](https://github.com/t0mab) |
 | Español | [Jemo121](https://github.com/Jemo121) |
+| Português (Brasil) | [Jemo121](https://github.com/Jemo121) |
 
 Adding your language means editing one JSON file and no code at all.
 See [CONTRIBUTING.md](CONTRIBUTING.md#translations).
