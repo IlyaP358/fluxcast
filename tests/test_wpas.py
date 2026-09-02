@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wfd.config import WFDNotReady  # noqa: E402
 from wfd.ie import _wfd_ie_device_info  # noqa: E402
-from wfd.p2p import dbus, device, wpas_ip  # noqa: E402
+from wfd.p2p import dbus, device, wpas, wpas_ip  # noqa: E402
 from wfd.p2p.dbus import _wfd_source_ie  # noqa: E402
 
 
@@ -122,6 +122,44 @@ class RunAsGoDnsmasqCommandTest(unittest.TestCase):
         self.assertIn("tag:wfdsink", range_arg)
         self.assertNotIn("set:wfdsink", range_arg)
         self.assertIn("set:wfdsink", host_arg)
+
+
+def _access_denied():
+    return _completed(
+        returncode=1,
+        stderr="Error: GDBus.Error:org.freedesktop.DBus.Error.AccessDenied: "
+               "Sender is not authorized to send message",
+    )
+
+
+class WpaSupplicantPropertyPrivilegeTest(unittest.TestCase):
+    """Regression test for a real, already-shipped incident: #104 restricted
+    wpa_supplicant's Properties.Get/Set to wheel/sudo, which silently broke
+    every unprivileged call this backend was making to them - a netdev-only
+    caller with no wheel/sudo saw peer discovery quietly find nothing, and
+    _set_wfd_ies (which raises rather than warns) failed outright. Every
+    wpa_supplicant Properties.Get/Set call here must carry privileged=True
+    so it retries under sudo instead of failing silently or hard.
+    """
+
+    def test_set_wfd_ies_retries_under_sudo(self):
+        calls = [_access_denied(), _completed()]
+        with mock.patch.object(dbus, "_run", side_effect=calls) as run:
+            wpas._set_wfd_ies(7236)  # raises on failure - not raising is the assertion
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[1][0][0][0], "sudo")
+
+    def test_p2p_device_iface_paths_retries_under_sudo(self):
+        calls = [
+            _access_denied(),
+            _completed(stdout="(<[objectpath '/fi/w1/wpa_supplicant1/Interfaces/1']>,)"),
+        ]
+        with mock.patch.object(dbus, "_run", side_effect=calls) as run, \
+             mock.patch.object(device, "_nm_get_string", return_value="wlan0"):
+            paths = device._p2p_device_iface_paths("wlan0")
+        self.assertEqual(paths, ["/fi/w1/wpa_supplicant1/Interfaces/1"])
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[1][0][0][0], "sudo")
 
 
 if __name__ == "__main__":

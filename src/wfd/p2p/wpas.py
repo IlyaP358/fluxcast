@@ -41,6 +41,12 @@ def _wpas_get_property(path: str, interface: str, prop: str) -> str:
     path this module works with lives under wpa_supplicant's own service
     (fi.w1.wpa_supplicant1), a completely different one. This small wrapper
     just makes sure Peers/Ifname lookups actually ask the right service.
+
+    privileged=True because wpa_supplicant's D-Bus policy grants
+    Properties.Get only to wheel/sudo, not netdev - without the sudo
+    fallback, a netdev-only caller (no wheel/sudo) would see every one of
+    these silently return "", making peer discovery look like it just
+    never finds anything instead of failing loudly.
     """
     result = _gdbus_call([
         "--dest", WPA_DEST,
@@ -48,7 +54,7 @@ def _wpas_get_property(path: str, interface: str, prop: str) -> str:
         "--method", "org.freedesktop.DBus.Properties.Get",
         interface,
         prop,
-    ])
+    ], privileged=True)
     if result.returncode != 0:
         return ""
     return result.stdout
@@ -86,6 +92,12 @@ def _set_wfd_ies(rtsp_port: int) -> None:
     declared us a Sink rather than a Source. Setting it ourselves here,
     before Find/Connect, means this backend always advertises correctly and
     never depends on any prior manual setup.
+
+    privileged=True: wpa_supplicant's D-Bus policy grants Properties.Set
+    only to wheel/sudo, not netdev - and unlike the read-only lookups
+    elsewhere in this module, this one raises on failure, so a netdev-only
+    caller without the sudo fallback would hit a hard WFDNotReady on every
+    single connection attempt.
     """
     result = _gdbus_call([
         "--dest", WPA_DEST,
@@ -93,7 +105,7 @@ def _set_wfd_ies(rtsp_port: int) -> None:
         "--method", "org.freedesktop.DBus.Properties.Set",
         WPA_DEST, "WFDIEs",
         f"<{_variant_byte_array(_wfd_source_ie(rtsp_port))}>",
-    ], timeout=5.0)
+    ], timeout=5.0, privileged=True)
     if result.returncode != 0:
         raise WFDNotReady(
             f"Failed to set WFD Device Info IE: {(result.stderr or result.stdout).strip()}"
@@ -168,7 +180,7 @@ def _list_wpas_interfaces() -> set[str]:
         "--object-path", "/fi/w1/wpa_supplicant1",
         "--method", "org.freedesktop.DBus.Properties.Get",
         WPA_DEST, "Interfaces",
-    ])
+    ], privileged=True)  # see _wpas_get_property's docstring
     if result.returncode != 0:
         return set()
     return set(_object_paths(result.stdout))
