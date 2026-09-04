@@ -289,7 +289,7 @@ def _start_capture_wf_recorder(
         "-p", "tune=zerolatency",
         "-p", "hls_time=1",
         "-p", "hls_list_size=3",
-        "-p", "hls_flags=append_list",
+        "-p", "hls_flags=delete_segments",
         "-p", "pix_fmt=yuv420p",
         "-p", "profile=main",
         "-f", "/tmp/fluxcast/stream.m3u8",
@@ -548,7 +548,7 @@ def _start_capture_x11grab(
         "-f", "hls",
         "-hls_time", "2",
         "-hls_list_size", "6",
-        "-hls_flags", "append_list",
+        "-hls_flags", "delete_segments",
         "-hls_segment_filename", os.path.join(hls_dir, "stream%d.ts"),
         os.path.join(hls_dir, "stream.m3u8"),
     ]
