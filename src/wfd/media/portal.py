@@ -62,11 +62,6 @@ class PortalMixin:
         # Without this the pipeline keeps pushing the last captured frame, so a
         # closed window stays on the TV until the user notices (#62).
         session.on_closed = _end_session_on_portal_revoke
-        if session.source_type == 2 and self.config.aosp_pmt_pid:
-            # This path pins the scaled frame size for ffmpeg's rawvideo
-            # reader, so a window resized mid-session gets squashed.
-            print("[FluxCast WFD Media] WARNING window capture with --wfd-aosp-pmt-pid "
-                  "cannot re-letterbox; do not resize the window while casting.")
         return session
     def _start_desktop_portal_ffmpeg(self) -> None:
         """

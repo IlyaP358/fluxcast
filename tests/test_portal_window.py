@@ -63,8 +63,8 @@ class OpenPortalSessionTest(unittest.TestCase):
             self.config = config
             self.portal_session = None
 
-    def _open(self, source_type, aosp=False):
-        config = WFDMediaConfig(monitor=None, aosp_pmt_pid=aosp)
+    def _open(self, source_type):
+        config = WFDMediaConfig(monitor=None)
         session = mock.MagicMock(source_type=source_type, size=(800, 600))
         with mock.patch.object(media_portal, "start_portal_capture", return_value=session), \
              mock.patch.object(media_portal, "close_portal_capture"), \
@@ -84,13 +84,6 @@ class OpenPortalSessionTest(unittest.TestCase):
             session, _ = self._open(source_type)
             self.assertIs(session.on_closed, media_portal._end_session_on_portal_revoke)
 
-    def test_monitor_capture_stays_quiet(self):
-        _, printed = self._open(1)
-        self.assertFalse(any("re-letterbox" in str(call) for call in printed.call_args_list))
-
-    def test_window_plus_aosp_warns_about_resizing(self):
-        _, printed = self._open(2, aosp=True)
-        self.assertTrue(any("re-letterbox" in str(call) for call in printed.call_args_list))
 
 
 class PortalRevokeTest(unittest.TestCase):
