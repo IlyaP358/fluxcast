@@ -216,6 +216,7 @@ _PORTAL_BACKENDS = [
     "xdg-desktop-portal-gnome",
     "xdg-desktop-portal-wlr",
     "xdg-desktop-portal-lxqt",
+    "xdg-desktop-portal-cosmic",
 ]
 
 
