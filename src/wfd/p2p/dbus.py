@@ -38,6 +38,9 @@ def _variant_uint_tuple(text: str) -> tuple[Optional[int], Optional[int]]:
         return None, None
     return int(matches[-2]), int(matches[-1])
 
+NM_DEVICE_TYPE_WIFI_P2P = 30
+
+
 NM_ACTIVE_STATE_NAMES = {
     0: "unknown",
     1: "activating",
