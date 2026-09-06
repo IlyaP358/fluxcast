@@ -12,6 +12,12 @@ def _p2p_device_iface_paths(iface: Optional[str]) -> list[str]:
     The p2p-dev-<iface> control interface is preferred, then the physical
     interface, then anything else. Returns [] if wpa_supplicant can't be
     queried, so callers degrade to a warning instead of raising.
+
+    privileged=True: wpa_supplicant's D-Bus policy grants Properties.Get
+    only to wheel/sudo, not netdev - without the sudo fallback, every
+    caller of this function (which is most of the wpas backend) would see
+    an empty list and a misleading "P2P interface not found" instead of
+    the real cause.
     """
     wpa_dest = "fi.w1.wpa_supplicant1"
     wpa_root = "/fi/w1/wpa_supplicant1"
@@ -23,7 +29,7 @@ def _p2p_device_iface_paths(iface: Optional[str]) -> list[str]:
             "--object-path", wpa_root,
             "--method", "org.freedesktop.DBus.Properties.Get",
             wpa_dest, "Interfaces",
-        ], timeout=3.0)
+        ], timeout=3.0, privileged=True)
     except Exception:
         return []
 
@@ -64,7 +70,7 @@ def _set_p2p_device_name(iface: Optional[str], name: str = _DEVICE_NAME) -> None
                 "--method", "org.freedesktop.DBus.Properties.Set",
                 f"{wpa_iface}.P2PDevice", "P2PDeviceConfig",
                 f"<{{'DeviceName': <'{name}'>}}>",
-            ], timeout=3.0)
+            ], timeout=3.0, privileged=True)
             if result.returncode == 0:
                 print(f"[FluxCast WFD] P2P device name set to '{name}'.")
                 return
@@ -74,7 +80,14 @@ def _set_p2p_device_name(iface: Optional[str], name: str = _DEVICE_NAME) -> None
     print("[FluxCast WFD] Warning: could not set P2P device name (cosmetic, connection will proceed).")
 
 def _read_p2p_go_intent(iface_path: str) -> Optional[int]:
-    """Read the current P2P GO intent from a wpa_supplicant interface, or None."""
+    """Read the current P2P GO intent from a wpa_supplicant interface, or None.
+
+    privileged=True for the same reason as _p2p_device_iface_paths - and
+    the failure mode here is quieter than a missing interface: a None
+    return makes _set_p2p_go_intent's caller think there was nothing to
+    restore, so a netdev-only caller without the sudo fallback would leave
+    the GO intent changed for good instead of restoring it on cleanup.
+    """
     wpa_dest = "fi.w1.wpa_supplicant1"
     wpa_iface = "fi.w1.wpa_supplicant1.Interface"
     try:
@@ -83,7 +96,7 @@ def _read_p2p_go_intent(iface_path: str) -> Optional[int]:
             "--object-path", iface_path,
             "--method", "org.freedesktop.DBus.Properties.Get",
             f"{wpa_iface}.P2PDevice", "P2PDeviceConfig",
-        ], timeout=3.0)
+        ], timeout=3.0, privileged=True)
     except Exception:
         return None
     if result.returncode != 0:
@@ -113,7 +126,7 @@ def _set_p2p_go_intent(iface: Optional[str], value: int,
                 "--method", "org.freedesktop.DBus.Properties.Set",
                 f"{wpa_iface}.P2PDevice", "P2PDeviceConfig",
                 f"<{{'GOIntent': <uint32 {value}>}}>",
-            ], timeout=3.0)
+            ], timeout=3.0, privileged=True)
             if result.returncode == 0:
                 if restoring:
                     print(f"[FluxCast WFD] Restored P2P GO intent to {value}.")
@@ -162,7 +175,7 @@ def _set_p2p_oper_channel(iface: Optional[str], channel: int, reg_class: int = 8
                 f"{wpa_iface}.P2PDevice", "P2PDeviceConfig",
                 f"<{{'OperRegClass': <uint32 {reg_class}>, "
                 f"'OperChannel': <uint32 {channel}>}}>",
-            ], timeout=3.0)
+            ], timeout=3.0, privileged=True)
             if result.returncode == 0:
                 print(f"[FluxCast WFD] P2P operating channel forced to channel "
                       f"{channel} (2.4GHz, reg class {reg_class}).")
