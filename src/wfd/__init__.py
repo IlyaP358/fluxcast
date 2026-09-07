@@ -163,7 +163,7 @@ from .rtsp.rtsp_server import _ThreadingTCPServer, WFDRTSPServer
 from .proc import _run
 
 
-from .firewall import _firewalld_active, _FIREWALL_AUTH_TIMEOUT, _FIREWALL_QUERY_TIMEOUT, _WFD_FIREWALL_ZONE, _print_firewall_manual_hint, _open_wfd_firewall_port, _close_wfd_firewall_port
+from .firewall import _firewalld_active, _FIREWALL_AUTH_TIMEOUT, _WFD_FIREWALL_ZONE, _print_firewall_manual_hint, _open_wfd_firewall_port, _close_wfd_firewall_port
 
 
 

@@ -1,21 +1,9 @@
-import shutil
 import subprocess
+
+from diagnostics import _FIREWALL_AUTH_TIMEOUT, _firewalld_active
 
 from .proc import _run
 
-
-def _firewalld_active() -> bool:
-    if not shutil.which("firewall-cmd"):
-        return False
-    try:
-        result = _run(["systemctl", "is-active", "firewalld"], timeout=3.0)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0 and result.stdout.strip() == "active"
-
-_FIREWALL_AUTH_TIMEOUT = 60.0
-
-_FIREWALL_QUERY_TIMEOUT = 3.0
 
 _WFD_FIREWALL_ZONE = "nm-shared"
 
@@ -38,6 +26,8 @@ def _open_wfd_firewall_port(port: int) -> bool:
     if not _firewalld_active():
         return False
 
+    # Polkit can gate the read-only query as well, so it gets the same budget
+    # as the --add-port it precedes (#114).
     try:
         query = _run(
             [
@@ -45,7 +35,7 @@ def _open_wfd_firewall_port(port: int) -> bool:
                 f"--zone={_WFD_FIREWALL_ZONE}",
                 f"--query-port={port}/tcp",
             ],
-            timeout=_FIREWALL_QUERY_TIMEOUT,
+            timeout=_FIREWALL_AUTH_TIMEOUT,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         _print_firewall_manual_hint(port, f"could not check existing rule: {exc}")

@@ -51,47 +51,65 @@ class FirewallCheckTest(unittest.TestCase):
         self.assertEqual(check.status, diagnostics.STATUS_OK)
 
     def test_firewalld_running_without_port_warns(self):
-        def fake_run(args, timeout=3.0):
-            if "--state" in args:
-                return _completed("running")
-            return _completed("no", returncode=1)
-
         with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/bin/firewall-cmd" if b == "firewall-cmd" else None), \
-                mock.patch("diagnostics._run", side_effect=fake_run):
+                mock.patch("diagnostics._firewalld_active", return_value=True), \
+                mock.patch("diagnostics._run", return_value=_completed("no", returncode=1)):
             check = diagnostics._firewall_check()
         self.assertEqual(check.name, "firewall (firewalld)")
         self.assertEqual(check.status, diagnostics.STATUS_WARN)
         self.assertIn(f"{diagnostics.WFD_RTSP_PORT}/tcp", check.detail)
 
     def test_firewalld_not_running_is_ok(self):
+        # Answered by systemd alone: firewall-cmd never runs, so no Polkit dialog.
         with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/bin/firewall-cmd" if b == "firewall-cmd" else None), \
-                mock.patch("diagnostics._run", return_value=_completed("not running", returncode=252)):
+                mock.patch("diagnostics._firewalld_active", return_value=False), \
+                mock.patch("diagnostics._run") as run:
             check = diagnostics._firewall_check()
         self.assertEqual(check.status, diagnostics.STATUS_OK)
+        run.assert_not_called()
 
-    def test_firewalld_state_auth_failure_does_not_give_all_clear(self):
-        # polkit-gated `--state` fails with an auth error, not "not running";
-        # a non-zero exit must not be read as a clean firewall.
-        err = "Authorization failed.\n    Make sure polkit agent is running or run the application as superuser."
-        with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/bin/firewall-cmd" if b == "firewall-cmd" else None), \
-                mock.patch("diagnostics._run", return_value=_completed("", returncode=1, stderr=err)):
-            check = diagnostics._firewall_check()
-        self.assertEqual(check.name, "firewall (firewalld)")
-        self.assertEqual(check.status, diagnostics.STATUS_WARN)
-        self.assertIn("could not verify", check.message)
-
-    def test_firewalld_query_auth_failure_is_not_reported_closed(self):
-        # `--state` says running, but the port probe hits an auth error; that is
-        # "couldn't verify", not a definitive "port closed".
-        err = "Authorization failed."
+    def test_firewalld_active_asks_systemd_not_firewall_cmd(self):
+        # `firewall-cmd --state` is Polkit-gated on some hosts and times out
+        # before the dialog can be answered; `systemctl is-active` is not.
+        calls = []
 
         def fake_run(args, timeout=3.0):
-            if "--state" in args:
-                return _completed("running")
-            return _completed("", returncode=1, stderr=err)
+            calls.append(args)
+            return _completed("active")
 
         with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/bin/firewall-cmd" if b == "firewall-cmd" else None), \
                 mock.patch("diagnostics._run", side_effect=fake_run):
+            self.assertTrue(diagnostics._firewalld_active())
+        self.assertEqual(calls, [["systemctl", "is-active", "firewalld"]])
+
+    def test_firewalld_active_is_false_when_unit_inactive(self):
+        with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/bin/firewall-cmd" if b == "firewall-cmd" else None), \
+                mock.patch("diagnostics._run", return_value=_completed("inactive", returncode=3)):
+            self.assertFalse(diagnostics._firewalld_active())
+
+    def test_firewalld_query_waits_for_polkit(self):
+        # The read-only query can block on a Polkit dialog too (#114); it must
+        # get the authorization budget, not the 3 s probe budget.
+        timeouts = []
+
+        def fake_run(args, timeout=3.0):
+            timeouts.append(timeout)
+            return _completed("yes")
+
+        with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/bin/firewall-cmd" if b == "firewall-cmd" else None), \
+                mock.patch("diagnostics._firewalld_active", return_value=True), \
+                mock.patch("diagnostics._run", side_effect=fake_run):
+            check = diagnostics._firewall_check()
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+        self.assertEqual(timeouts, [diagnostics._FIREWALL_AUTH_TIMEOUT])
+
+    def test_firewalld_query_auth_failure_is_not_reported_closed(self):
+        # firewalld is running, but the port probe hits an auth error; that is
+        # "couldn't verify", not a definitive "port closed".
+        err = "Authorization failed."
+        with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/bin/firewall-cmd" if b == "firewall-cmd" else None), \
+                mock.patch("diagnostics._firewalld_active", return_value=True), \
+                mock.patch("diagnostics._run", return_value=_completed("", returncode=1, stderr=err)):
             check = diagnostics._firewall_check()
         self.assertEqual(check.status, diagnostics.STATUS_WARN)
         self.assertIn("could not verify", check.message)
@@ -121,11 +139,10 @@ class FirewallCheckTest(unittest.TestCase):
         def fake_run(args, timeout=3.0):
             if args[0] == "ufw":
                 return _completed("Status: inactive")
-            if "--state" in args:
-                return _completed("running")
             return _completed("no", returncode=1)
 
         with mock.patch("diagnostics.shutil.which", side_effect=lambda b: f"/usr/bin/{b}" if b in ("ufw", "firewall-cmd") else None), \
+                mock.patch("diagnostics._firewalld_active", return_value=True), \
                 mock.patch("diagnostics._run", side_effect=fake_run):
             check = diagnostics._firewall_check()
         self.assertEqual(check.name, "firewall (firewalld)")

@@ -125,6 +125,8 @@ class FirewallPortTest(unittest.TestCase):
         self.assertTrue(opened)
         self.assertIn(f"--query-port={port}/tcp", calls[0][0])
         self.assertIn(f"--add-port={port}/tcp", calls[1][0])
+        # Both calls can block on the same Polkit dialog (#114).
+        self.assertEqual(calls[0][1], calls[1][1])
 
     def test_query_error_fails_closed_without_add(self):
         port = wfd.WFD_RTSP_PORT

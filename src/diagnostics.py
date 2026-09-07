@@ -666,44 +666,43 @@ def _ufw_check() -> Optional[Check]:
     )
 
 
+# firewalld gates every firewall-cmd call through Polkit, read-only queries
+# included, so on some hosts `--query-port` blocks until the user answers a
+# dialog. Give it the same budget as `--add-port` rather than a 3 s probe.
+_FIREWALL_AUTH_TIMEOUT = 60.0
+
+
+def _firewalld_active() -> bool:
+    # `firewall-cmd --state` goes through Polkit too; asking systemd does not.
+    if not shutil.which("firewall-cmd"):
+        return False
+    try:
+        result = _run(["systemctl", "is-active", "firewalld"], timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "active"
+
+
 def _firewalld_check() -> Optional[Check]:
     if not shutil.which("firewall-cmd"):
         return None
 
-    try:
-        state = _run(["firewall-cmd", "--state"], timeout=3.0)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return Check("firewall (firewalld)", STATUS_WARN, "could not query firewalld state", str(exc))
-
-    # firewalld gates firewall-cmd through polkit, so on a headless/gated host
-    # `--state` and `--query-port` can fail with an authorization error rather
-    # than a real answer. Trust only what firewall-cmd literally prints: a
-    # non-zero exit is not proof the firewall is down, so an auth failure must
-    # never become a definitive OK-or-closed. Report "couldn't verify" instead.
-    state_out = state.stdout.strip()
-    state_all = (state.stdout + state.stderr).strip()
-    if state_out != "running":
-        if "not running" in state_all.lower():
-            return Check(
-                "firewall (firewalld)",
-                STATUS_OK,
-                "firewalld is not running; port not blocked",
-                state_all,
-            )
+    if not _firewalld_active():
         return Check(
             "firewall (firewalld)",
-            STATUS_WARN,
-            "could not verify firewalld state (firewall-cmd did not report running/not running)",
-            state_all,
+            STATUS_OK,
+            "firewalld is not running; port not blocked",
         )
 
     try:
-        query = _run(["firewall-cmd", f"--query-port={WFD_RTSP_PORT}/tcp"], timeout=3.0)
+        query = _run(["firewall-cmd", f"--query-port={WFD_RTSP_PORT}/tcp"], timeout=_FIREWALL_AUTH_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return Check("firewall (firewalld)", STATUS_WARN, "could not query firewalld port", str(exc))
 
     # `--query-port` prints `yes`/`no` (exit 0/1) for a real answer; anything
     # else — empty output, an auth error — means we could not check the port.
+    # A non-zero exit is not proof the port is closed, so an auth failure must
+    # never become a definitive OK-or-closed. Report "couldn't verify" instead.
     query_out = query.stdout.strip()
     if query_out == "yes":
         return Check(
