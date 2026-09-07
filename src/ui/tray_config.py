@@ -52,6 +52,16 @@ def _port(value: str) -> str:
     return str(parsed)
 
 
+def _go_intent(value: str) -> str:
+    try:
+        parsed = int(value.strip())
+    except ValueError as exc:
+        raise ValueError("expected an integer from 0 to 15") from exc
+    if not 0 <= parsed <= 15:
+        raise ValueError("expected an integer from 0 to 15")
+    return str(parsed)
+
+
 def _resolution(value: str) -> str:
     match = re.fullmatch(r"\s*(\d+)[xX](\d+)\s*", value)
     if match is None:
@@ -116,6 +126,7 @@ _MODE_OPTIONS = {
             _choice("auto", "portal", "wf-recorder", "x11grab", "gst-x11")
         ),
         "wfd-latency-log": _Option(_text),
+        "wfd-aosp-pmt-pid": _Option(_boolean, is_flag=True),
         "wfd-no-audio": _Option(_boolean, is_flag=True),
         "wfd-audio-device": _Option(_text),
         "wfd-rtsp-port": _Option(_port),
@@ -123,6 +134,8 @@ _MODE_OPTIONS = {
         "wfd-rtp-source-port": _Option(_port),
         "wfd-interface": _Option(_text),
         "wfd-timeout": _Option(_positive_int),
+        "wfd-go-intent": _Option(_go_intent),
+        "wfd-uibc": _Option(_boolean, is_flag=True),
     },
     "dlna": _DLNA_CAST_OPTIONS,
     "cast": _DLNA_CAST_OPTIONS,

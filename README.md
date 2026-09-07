@@ -86,6 +86,13 @@ python3 src/main.py --protocol wfd --wfd-capture-backend wf-recorder
 python3 src/main.py --protocol wfd --wfd-capture-backend x11grab
 ```
 
+Android-based sinks (TV boxes, projectors) that connect but stay on a black
+screen:
+
+```bash
+python3 src/main.py --protocol wfd --wfd-aosp-pmt-pid
+```
+
 WFD P2P connection troubleshooting - talk to wpa_supplicant directly instead
 of going through NetworkManager, and optionally pin the group to a 2.4GHz
 channel for sinks that don't support Wi-Fi Direct on 5GHz:

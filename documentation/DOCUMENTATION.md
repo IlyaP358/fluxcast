@@ -61,6 +61,7 @@ python3 src/main.py --protocol cast
 - `--wfd-capture-backend auto|portal|wf-recorder|x11grab|gst-x11`
   - `auto` uses `portal` first on KDE/GNOME Wayland, then `wf-recorder` fallback.
 - `--wfd-latency-log [PATH]`
+- `--wfd-aosp-pmt-pid` write MPEG-TS tables the way Android (AOSP) sinks expect them
 - `--wfd-no-audio`
 - `--wfd-audio-device DEVICE`
 - `--wfd-rtsp-port PORT`
@@ -129,6 +130,7 @@ sections also accept `host`, `port`, `discover-timeout`, `transport`, and
 - `wfd-media-pipeline`
 - `wfd-capture-backend`
 - `wfd-latency-log`
+- `wfd-aosp-pmt-pid`
 - `wfd-no-audio`
 - `wfd-audio-device`
 - `wfd-rtsp-port`
@@ -136,6 +138,8 @@ sections also accept `host`, `port`, `discover-timeout`, `transport`, and
 - `wfd-rtp-source-port`
 - `wfd-interface`
 - `wfd-timeout`
+- `wfd-go-intent`
+- `wfd-uibc`
 
 `monitor` preselects the capture output for that mode by its name (as shown by
 `wlr-randr`/`xrandr`, e.g. `HDMI-A-1`), so tray launches skip the monitor
@@ -244,6 +248,14 @@ and protocol selection remain controlled by the tray and cannot be set here.
   - `x11grab`: useful for X11 sessions.
   - `gst-x11`: X11 capture routed through the GStreamer MPEG-TS pipeline (the same one the test pattern uses) instead of ffmpeg. Opt-in and never chosen by `auto`. Use it when a sink connects and streams but shows a black screen on the default ffmpeg path (confirmed on Hisense Vidaa). Requires `gst-launch-1.0`, `ximagesrc` (gst-plugins-good), and `x264enc` (gst-plugins-ugly).
   - `portal` backend requirements: `dbus-next`, `xdg-desktop-portal`, desktop portal backend, and `gst-launch-1.0`.
+- `--wfd-aosp-pmt-pid`
+  - Writes the MPEG-TS PAT/PMT the way Android (AOSP) Miracast sinks expect
+    them (PMT on PID `0x0100`, table version `1`). Use it when the session
+    connects and RTP flows but the sink stays on a black screen - seen on
+    Android TV boxes and projectors (see #84).
+  - Off by default, since the standard layout works on most TVs. Muxes with
+    ffmpeg: `auto` picks the ffmpeg sender, and `gst`/`gst-x11` warn because
+    mpegtsmux cannot set the table version.
 - `--wfd-no-audio`
   - **Video-only mode** - May cause immediate disconnects on Samsung TVs during WFD negotiation.
   - Use primarily for diagnostic/testing purposes.
