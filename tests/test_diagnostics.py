@@ -85,14 +85,49 @@ class FirewallCheckTest(unittest.TestCase):
     def test_firewalld_active_is_false_when_unit_inactive(self):
         with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/bin/firewall-cmd" if b == "firewall-cmd" else None), \
                 mock.patch("diagnostics._run", return_value=_completed("inactive", returncode=3)):
-            self.assertFalse(diagnostics._firewalld_active())
+            self.assertIs(diagnostics._firewalld_active(), False)
 
-    def test_firewalld_query_waits_for_polkit(self):
-        # The read-only query can block on a Polkit dialog too (#114); it must
-        # get the authorization budget, not the 3 s probe budget.
+    def test_firewalld_doctor_reports_each_systemctl_outcome(self):
+        # Only a definite answer from systemd may become a definite verdict.
+        # "Couldn't ask" (no systemctl, no systemd, hang) must not turn into
+        # "not running; port not blocked": firewalld may be up and blocking.
+        no_systemd = _completed(
+            "", returncode=1,
+            stderr="System has not been booted with systemd as init system (PID 1). Can't operate.",
+        )
+        cases = [
+            ("active", _completed("active"), diagnostics.STATUS_OK, "allows port", True),
+            ("inactive", _completed("inactive", returncode=3), diagnostics.STATUS_OK, "not running", False),
+            ("no systemd", no_systemd, diagnostics.STATUS_WARN, "could not verify", False),
+            ("systemctl missing", FileNotFoundError("systemctl"), diagnostics.STATUS_WARN, "could not verify", False),
+            ("systemctl hangs", subprocess.TimeoutExpired(cmd="systemctl", timeout=3.0), diagnostics.STATUS_WARN, "could not verify", False),
+        ]
+        for name, systemctl_reply, status, message, queries_port in cases:
+            calls = []
+
+            def fake_run(args, timeout=None):
+                calls.append(args)
+                if args[0] == "systemctl":
+                    if isinstance(systemctl_reply, BaseException):
+                        raise systemctl_reply
+                    return systemctl_reply
+                return _completed("yes")
+
+            with self.subTest(name), \
+                    mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/bin/firewall-cmd" if b == "firewall-cmd" else None), \
+                    mock.patch("diagnostics._run", side_effect=fake_run):
+                check = diagnostics._firewall_check()
+                self.assertEqual(check.status, status)
+                self.assertIn(message, check.message)
+                self.assertEqual(any(args[0] == "firewall-cmd" for args in calls), queries_port)
+
+    def test_firewalld_doctor_query_keeps_short_budget(self):
+        # run_diagnostics() runs at every session start, so the informational
+        # query must not sit on a Polkit dialog for the 60 s auth budget; that
+        # budget belongs to the session path in wfd/firewall.py only.
         timeouts = []
 
-        def fake_run(args, timeout=3.0):
+        def fake_run(args, timeout=None):
             timeouts.append(timeout)
             return _completed("yes")
 
@@ -101,7 +136,16 @@ class FirewallCheckTest(unittest.TestCase):
                 mock.patch("diagnostics._run", side_effect=fake_run):
             check = diagnostics._firewall_check()
         self.assertEqual(check.status, diagnostics.STATUS_OK)
-        self.assertEqual(timeouts, [diagnostics._FIREWALL_AUTH_TIMEOUT])
+        self.assertEqual(timeouts, [3.0])
+
+    def test_firewalld_doctor_query_timeout_is_could_not_verify(self):
+        with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/bin/firewall-cmd" if b == "firewall-cmd" else None), \
+                mock.patch("diagnostics._firewalld_active", return_value=True), \
+                mock.patch("diagnostics._run", side_effect=subprocess.TimeoutExpired(cmd="firewall-cmd", timeout=3.0)):
+            check = diagnostics._firewall_check()
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("could not verify", check.message)
+        self.assertNotIn("closed", check.message)
 
     def test_firewalld_query_auth_failure_is_not_reported_closed(self):
         # firewalld is running, but the port probe hits an auth error; that is

@@ -1,9 +1,14 @@
 import subprocess
 
-from diagnostics import _FIREWALL_AUTH_TIMEOUT, _firewalld_active
+from diagnostics import _firewalld_active
 
 from .proc import _run
 
+
+# firewalld gates every firewall-cmd call through Polkit, read-only queries
+# included, so on some hosts `--query-port` blocks until the user answers a
+# dialog. Give it the same budget as `--add-port` rather than a 3 s probe.
+_FIREWALL_AUTH_TIMEOUT = 60.0
 
 _WFD_FIREWALL_ZONE = "nm-shared"
 
@@ -23,6 +28,7 @@ def _open_wfd_firewall_port(port: int) -> bool:
     exit. Returns True only if WE opened it, so the caller knows to undo it; a
     port the user already had open is left untouched.
     """
+    # None ("couldn't ask systemd") is treated like inactive: nothing to open.
     if not _firewalld_active():
         return False
 
