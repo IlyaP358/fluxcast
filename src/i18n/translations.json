@@ -7,7 +7,8 @@
         "de": "● Übertrage: {target}",
         "fr": "● Diffusion : {target}",
         "es": "● Transmitiendo: {target}",
-        "pt": "● Transmitindo: {target}"
+        "pt": "● Transmitindo: {target}",
+        "sv": "● Sänder: {target}"
     },
     "● Idle": {
         "en": "● Idle",
@@ -17,7 +18,8 @@
         "de": "● Inaktiv",
         "fr": "● Inactif",
         "es": "● Inactivo",
-        "pt": "● Inativo"
+        "pt": "● Inativo",
+        "sv": "● Inaktiv"
     },
     "Stop Casting": {
         "en": "Stop Casting",
@@ -27,7 +29,8 @@
         "de": "Übertragung beenden",
         "fr": "Arrêter la diffusion",
         "es": "Detener transmisión",
-        "pt": "Parar transmissão"
+        "pt": "Parar transmissão",
+        "sv": "Sluta sända"
     },
     "Monitor": {
         "en": "Monitor",
@@ -37,7 +40,8 @@
         "de": "Bildschirm",
         "fr": "Écran",
         "es": "Monitor",
-        "pt": "Monitor"
+        "pt": "Monitor",
+        "sv": "Skärm"
     },
     "Monitor: scanning…": {
         "en": "Monitor: scanning…",
@@ -47,7 +51,8 @@
         "de": "Bildschirm: Suche läuft…",
         "fr": "Écran : analyse en cours…",
         "es": "Monitor: buscando…",
-        "pt": "Monitor: procurando…"
+        "pt": "Monitor: procurando…",
+        "sv": "Skärm: söker…"
     },
     "Select a monitor first": {
         "en": "Select a monitor first",
@@ -57,7 +62,8 @@
         "de": "Wähle zuerst einen Bildschirm aus",
         "fr": "Sélectionnez d'abord un écran",
         "es": "Selecciona primero un monitor",
-        "pt": "Selecione um monitor primeiro"
+        "pt": "Selecione um monitor primeiro",
+        "sv": "Välj en skärm först"
     },
     "↻ Refreshing…": {
         "en": "↻ Refreshing…",
@@ -67,7 +73,8 @@
         "de": "↻ Aktualisiere…",
         "fr": "↻ Actualisation…",
         "es": "↻ Actualizando…",
-        "pt": "↻ Atualizando…"
+        "pt": "↻ Atualizando…",
+        "sv": "↻ Uppdaterar…"
     },
     "Scanning…": {
         "en": "Scanning…",
@@ -77,7 +84,8 @@
         "de": "Suche läuft…",
         "fr": "Analyse en cours…",
         "es": "Buscando…",
-        "pt": "Procurando…"
+        "pt": "Procurando…",
+        "sv": "Söker…"
     },
     "No WFD devices found": {
         "en": "No WFD devices found",
@@ -87,7 +95,8 @@
         "de": "Es wurden keine WiFi-Direct fähigen Geräte gefunden",
         "fr": "Aucun appareil WFD trouvé",
         "es": "No se encontraron dispositivos WFD",
-        "pt": "Nenhum dispositivo WFD encontrado"
+        "pt": "Nenhum dispositivo WFD encontrado",
+        "sv": "Inga WFD-enheter hittade"
     },
     "Cast via Miracast (WFD, portal dialog)   ": {
         "en": "Cast via Miracast (WFD, portal dialog)   ",
@@ -97,7 +106,8 @@
         "de": "Übertragung über Miracast (WiFi-Direct, portaldialog)   ",
         "fr": "Diffuser via Miracast (WFD, Dialog Portal)   ",
         "es": "Transmitir vía Miracast (WFD, diálogo de portal)   ",
-        "pt": "Transmitir via Miracast (WFD, diálogo do portal)   "
+        "pt": "Transmitir via Miracast (WFD, diálogo do portal)   ",
+        "sv": "Sänd via Miracast (WFD, portaldialog)   "
     },
     "Cast via Miracast (WFD)": {
         "en": "Cast via Miracast (WFD)",
@@ -107,7 +117,8 @@
         "de": "Übertragung über Miracast (WiFi-Direct)",
         "fr": "Diffuser via Miracast (WFD)",
         "es": "Transmitir vía Miracast (WFD)",
-        "pt": "Transmitir via Miracast (WFD)"
+        "pt": "Transmitir via Miracast (WFD)",
+        "sv": "Sänd via Miracast (WFD)"
     },
     "No DLNA devices found": {
         "en": "No DLNA devices found",
@@ -117,7 +128,8 @@
         "de": "Es wurden keine DLNA fähigen Geräte gefunden",
         "fr": "Aucun appareil DLNA trouvé",
         "es": "No se encontraron dispositivos DLNA",
-        "pt": "Nenhum dispositivo DLNA encontrado"
+        "pt": "Nenhum dispositivo DLNA encontrado",
+        "sv": "Inga DLNA-enheter hittade"
     },
     "Cast via DLNA/UPnP": {
         "en": "Cast via DLNA/UPnP",
@@ -127,7 +139,8 @@
         "de": "Übertragung über DLNA/UPnP",
         "fr": "Diffuser via DLNA/UPnP",
         "es": "Transmitir vía DLNA/UPnP",
-        "pt": "Transmitir via DLNA/UPnP"
+        "pt": "Transmitir via DLNA/UPnP",
+        "sv": "Sänd via DLNA/UPnP"
     },
     "No Chromecast devices found": {
         "en": "No Chromecast devices found",
@@ -137,7 +150,8 @@
         "de": "Es wurden keine Chromecast fähigen Geräte gefunden",
         "fr": "Aucun appareil Chromecast trouvé",
         "es": "No se encontraron dispositivos Chromecast",
-        "pt": "Nenhum dispositivo Chromecast encontrado"
+        "pt": "Nenhum dispositivo Chromecast encontrado",
+        "sv": "Inga Chromecast-enheter hittade"
     },
     "Cast via Chromecast": {
         "en": "Cast via Chromecast",
@@ -147,7 +161,8 @@
         "de": "Übertragung über Chromecast",
         "fr": "Diffuser via Chromecast",
         "es": "Transmitir vía Chromecast",
-        "pt": "Transmitir via Chromecast"
+        "pt": "Transmitir via Chromecast",
+        "sv": "Sänd via Chromecast"
     },
     "Rescan Devices": {
         "en": "Rescan Devices",
@@ -157,7 +172,8 @@
         "de": "Suche erneut nach Geräten",
         "fr": "Rechercher des appareils",
         "es": "Volver a buscar dispositivos",
-        "pt": "Procurar dispositivos novamente"
+        "pt": "Procurar dispositivos novamente",
+        "sv": "Omsök enheter"
     },
     "About FluxCast": {
         "en": "About FluxCast",
@@ -167,7 +183,8 @@
         "de": "Über FluxCast",
         "fr": "À propos de FluxCast",
         "es": "Acerca de FluxCast",
-        "pt": "Sobre o FluxCast"
+        "pt": "Sobre o FluxCast",
+        "sv": "Om FluxCast"
     },
     "Exit": {
         "en": "Exit",
@@ -177,7 +194,8 @@
         "de": "Beenden",
         "fr": "Quitter",
         "es": "Salir",
-        "pt": "Sair"
+        "pt": "Sair",
+        "sv": "Avsluta"
     },
     "Desktop → Smart TV streaming for Linux": {
         "en": "Desktop → Smart TV streaming for Linux",
@@ -187,7 +205,8 @@
         "de": "Desktop → Smart-TV Streaming für Linux",
         "fr": "Diffusion du bureau vers Smart TV pour Linux",
         "es": "Transmisión de escritorio → Smart TV para Linux",
-        "pt": "Transmissão de desktop → Smart TV para Linux"
+        "pt": "Transmissão de desktop → Smart TV para Linux",
+        "sv": "Skrivbord → Smart TV sändare för Linux"
     },
     "I wanted to watch movies by streaming my Linux desktop to a TV — nothing worked. gnome-network-displays gave me one frame and then froze. miraclecast hasn't been meaningfully updated in years.\n\nSo I built FluxCast from scratch: Wi-Fi Direct via NetworkManager, full RTSP handshake, RTP media stream. ~1 second latency, video and audio. It actually works.": {
         "en": "I wanted to watch movies by streaming my Linux desktop to a TV — nothing worked. gnome-network-displays gave me one frame and then froze. miraclecast hasn't been meaningfully updated in years.\n\nSo I built FluxCast from scratch: Wi-Fi Direct via NetworkManager, full RTSP handshake, RTP media stream. ~1 second latency, video and audio. It actually works.",
@@ -197,7 +216,8 @@
         "de": "Ich wollte Filme von meinem Linux Desktop auf den Fernseher streamen, aber nichts hat funktioniert. Das Programm Gnome-Network-Displays zeigte mir nur Einzelbilder an und fror dann ein. Das Programm Miraclecast wurde seit Jahren nicht mehr nennenswert aktualisiert.\n\nAlso habe ich FluxCast von Grund auf neu entwickelt: Wi-Fi Direct über NetworkManager, vollständiger RTSP-Handshake, RTP-Medienstream. ~1 Sekunde Latenz, Video und Audio. Jetzt funktioniert es endlich.",
         "fr": "Je voulais regarder des films en diffusant mon bureau Linux sur une TV — rien ne fonctionnait. gnome-network-displays m'a donné une seule image puis a gelé. miraclecast n'a pas reçu de mise à jour significative depuis des années.\n\nJ'ai donc créé FluxCast à partir de zéro : Wi-Fi Direct via NetworkManager, négociation RTSP complète, flux média RTP. Latence d'environ 1 seconde, vidéo et audio. Ça fonctionne vraiment.",
         "es": "Quería ver películas transmitiendo mi escritorio de Linux a una TV — nada funcionaba. gnome-network-displays me mostraba un solo fotograma y luego se congelaba. miraclecast no ha tenido actualizaciones importantes en años.\n\nAsí que construí FluxCast desde cero: Wi-Fi Direct vía NetworkManager, negociación RTSP completa, transmisión de medios RTP. ~1 segundo de latencia, video y audio. Realmente funciona.",
-        "pt": "Eu queria assistir filmes transmitindo meu desktop Linux para uma TV — nada funcionava. O gnome-network-displays me mostrava só um fotograma e depois travava. O miraclecast não recebe atualizações significativas há anos.\n\nEntão eu criei o FluxCast do zero: Wi-Fi Direct via NetworkManager, negociação RTSP completa, transmissão de mídia RTP. ~1 segundo de latência, vídeo e áudio. E realmente funciona."
+        "pt": "Eu queria assistir filmes transmitindo meu desktop Linux para uma TV — nada funcionava. O gnome-network-displays me mostrava só um fotograma e depois travava. O miraclecast não recebe atualizações significativas há anos.\n\nEntão eu criei o FluxCast do zero: Wi-Fi Direct via NetworkManager, negociação RTSP completa, transmissão de mídia RTP. ~1 segundo de latência, vídeo e áudio. E realmente funciona.",
+        "sv": "Jag ville se film genom att sända filmer från mitt Linux skrivbord till en TV — inget funkade. gnome-network-displays gav mig en bild och sedan frös. miraclecast har inte fått en meningsfull uppdatering på flera år.\n\nSå jag byggde FluxCast från grunden: Wi-Fi Direct via NetworkManager, full RTSP-handshake, RTP-mediaström. ~1 sekunds latens, video och ljud. Det fungerar faktiskt."
     },
     "Help continue FluxCast development": {
         "en": "Help continue FluxCast development",
@@ -207,7 +227,8 @@
         "de": "Hilf bei der Weiterentwicklung von FluxCast",
         "fr": "Soutenir le développement de FluxCast",
         "es": "Ayuda a continuar el desarrollo de FluxCast",
-        "pt": "Ajude a continuar o desenvolvimento do FluxCast"
+        "pt": "Ajude a continuar o desenvolvimento do FluxCast",
+        "sv": "Bidra till FluxCast utveckling"
     },
     "Author: IlyaP358  |  Code licensed under GPL-3.0": {
         "en": "Author: IlyaP358  |  Code licensed under GPL-3.0",
@@ -217,7 +238,8 @@
         "de": "Autor: IlyaP358  |  Code lizenziert unter GPL-3.0",
         "fr": "Auteur : IlyaP358  |  Code sous licence GPL-3.0",
         "es": "Autor: IlyaP358  |  Código bajo licencia GPL-3.0",
-        "pt": "Autor: IlyaP358  |  Código licenciado sob GPL-3.0"
+        "pt": "Autor: IlyaP358  |  Código licenciado sob GPL-3.0",
+        "sv": "Skapare: IlyaP358  |  Koden är licensierad under GPL-3.0"
     },
     "Join our Discord": {
         "en": "Join our Discord",
@@ -227,7 +249,8 @@
         "de": "Unserem Discord beitreten",
         "fr": "Rejoignez notre Discord",
         "es": "Únete a nuestro Discord",
-        "pt": "Entre no nosso Discord"
+        "pt": "Entre no nosso Discord",
+        "sv": "Gå med i vår Discord"
     },
     "View Contributors": {
         "en": "View Contributors",
@@ -237,7 +260,8 @@
         "de": "Mitwirkende anzeigen",
         "fr": "Voir les contributeurs",
         "es": "Ver colaboradores",
-        "pt": "Ver colaboradores"
+        "pt": "Ver colaboradores",
+        "sv": "Se bidragare"
     },
     "Close": {
         "en": "Close",
@@ -247,7 +271,8 @@
         "de": "Schließen",
         "fr": "Fermer",
         "es": "Cerrar",
-        "pt": "Fechar"
+        "pt": "Fechar",
+        "sv": "Stäng"
     },
     "FluxCast stopped": {
         "en": "FluxCast stopped",
@@ -257,7 +282,8 @@
         "de": "FluxCast wurde gestoppt",
         "fr": "FluxCast arrêté",
         "es": "FluxCast se detuvo",
-        "pt": "FluxCast parado"
+        "pt": "FluxCast parado",
+        "sv": "FluxCast stoppat"
     },
     "Cast to {target} ended cleanly.": {
         "en": "Cast to {target} ended cleanly.",
@@ -267,7 +293,8 @@
         "de": "Die Übertragung zu {target} wurde erfolgreich beendet, ohne dass Fehler auftraten.",
         "fr": "La diffusion vers {target} s'est terminée correctement.",
         "es": "La transmisión a {target} terminó correctamente.",
-        "pt": "A transmissão para {target} terminou corretamente."
+        "pt": "A transmissão para {target} terminou corretamente.",
+        "sv": "Sändning till {target} avslutades korrekt."
     },
     "Cast to {target} exited (code {rc}).": {
         "en": "Cast to {target} exited (code {rc}).",
@@ -277,7 +304,8 @@
         "de": "Die Übertragung zu {target} wurde unerwartet beendet (Fehlercode: {rc}).",
         "fr": "La diffusion vers {target} s'est arrêtée (code {rc}).",
         "es": "La transmisión a {target} finalizó (código {rc}).",
-        "pt": "A transmissão para {target} terminou (código {rc})."
+        "pt": "A transmissão para {target} terminou (código {rc}).",
+        "sv": "Sändning till {target} avslutade (kod {rc})."
     },
     "Starting cast to {target}… (log: {path})": {
         "en": "Starting cast to {target}… (log: {path})",
@@ -287,6 +315,7 @@
         "de": "Starte Übertragung auf {target}… (log: {path})",
         "fr": "Démarrage de la diffusion vers {target}… (journal : {path})",
         "es": "Iniciando transmisión a {target}… (registro: {path})",
-        "pt": "Iniciando transmissão para {target}… (log: {path})"
+        "pt": "Iniciando transmissão para {target}… (log: {path})",
+        "sv": "Påbörjar sändning till {target}… (logg: {path})"
     }
 }
