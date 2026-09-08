@@ -125,6 +125,21 @@ class FirewallPortTest(unittest.TestCase):
         self.assertTrue(opened)
         self.assertIn(f"--query-port={port}/tcp", calls[0][0])
         self.assertIn(f"--add-port={port}/tcp", calls[1][0])
+        # Both calls can block on the same Polkit dialog (#114).
+        self.assertEqual(calls[0][1], calls[1][1])
+        self.assertEqual(calls[0][1], wfd._FIREWALL_AUTH_TIMEOUT)
+
+    def test_unknown_firewalld_state_skips_without_querying(self):
+        # None ("couldn't ask systemd") is treated like inactive here: no
+        # firewall-cmd call, no Polkit dialog, nothing to undo on exit.
+        with (
+            patch_all("_firewalld_active", return_value=None),
+            patch_all("_run") as run,
+        ):
+            opened = wfd._open_wfd_firewall_port(wfd.WFD_RTSP_PORT)
+
+        self.assertFalse(opened)
+        run.assert_not_called()
 
     def test_query_error_fails_closed_without_add(self):
         port = wfd.WFD_RTSP_PORT
