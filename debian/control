@@ -15,6 +15,10 @@ Rules-Requires-Root: no
 
 Package: fluxcast
 Architecture: amd64
+# Kept to what FluxCast cannot start or cast without. The capture and
+# transcode stacks are large and most desktops already have them, so they are
+# Recommends: apt still pulls them by default, but the closure stays optional
+# for anyone installing with --no-install-recommends.
 Depends:
  ${misc:Depends},
  ${fluxcast:PythonBound},
@@ -27,21 +31,22 @@ Depends:
  wpasupplicant,
  iw,
  ffmpeg,
- gstreamer1.0-tools,
- gstreamer1.0-plugins-base,
- gstreamer1.0-plugins-good,
- gstreamer1.0-pipewire,
+Recommends:
+ pulseaudio-utils,
  pipewire,
  wireplumber,
- pulseaudio-utils,
-Recommends:
+ gstreamer1.0-pipewire,
+ gstreamer1.0-plugins-base,
+ gstreamer1.0-plugins-good,
+ wf-recorder,
+ dnsmasq-base,
+ xdg-desktop-portal,
+Suggests:
+ gstreamer1.0-tools,
  gstreamer1.0-plugins-bad,
  gstreamer1.0-plugins-ugly,
  gstreamer1.0-libav,
- wf-recorder,
  x11-xserver-utils,
- dnsmasq-base,
- xdg-desktop-portal,
 Description: Stream your Linux desktop to a Smart TV
  FluxCast mirrors a Linux desktop to a Smart TV over Miracast/Wi-Fi Display,
  DLNA, or Chromecast, with a system tray applet and a command line interface.
