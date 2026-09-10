@@ -16,7 +16,7 @@ from .modes import (
 from .net import _safe_source_port
 from .p2p.addressing import _wait_for_peer_ip
 from .rtsp.message import (
-    RTSPMessage, _parse_parameters, _parse_rtp_ports,
+    RTSPMessage, WFD_NEGOTIATION_METHODS, _parse_parameters, _parse_rtp_ports,
     _parse_transport_client_ports, _read_rtsp_message,
 )
 from .rtsp.rtsp_server import WFDRTSPServer
@@ -35,11 +35,22 @@ def _active_rtsp_probe(
 
     print("[FluxCast WFD RTSP] No passive connection; trying Source-initiated RTSP probe...")
 
-    tv_ip = _wait_for_peer_ip(peer.address, timeout=10.0)
+    tv_ip = _wait_for_peer_ip(
+        peer.address,
+        timeout=10.0,
+        interface=rtsp_server.interface,
+        allow_interface_fallback=False,
+    )
     if not tv_ip:
+        scope = (
+            rtsp_server.interface
+            if rtsp_server.interface
+            else "a P2P group interface"
+        )
         print(
-            f"[FluxCast WFD RTSP] Active probe: TV IP not found for MAC {peer.address} "
-            "— ARP table empty; is the P2P link still up?"
+            f"[FluxCast WFD RTSP] Active probe: selected TV IP not found for MAC "
+            f"{peer.address} on {scope}; refusing an "
+            "unverified fallback."
         )
         return
 
@@ -62,10 +73,21 @@ def _active_rtsp_probe(
         return
 
     print(f"[FluxCast WFD RTSP] Active probe: connected to TV RTSP at {tv_ip}:{tv_port}")
-    sock.settimeout(8.0)
-    rfile = sock.makefile("rb")
-    wfile = sock.makefile("wb")
-    local_ip: str = sock.getsockname()[0]
+    claim = rtsp_server.claim_client(tv_ip, replace_unconfirmed=True)
+    if claim is None:
+        print(f"[FluxCast WFD RTSP] Active probe: rejected unverified or duplicate client {tv_ip}")
+        sock.close()
+        return
+    try:
+        sock.settimeout(8.0)
+        rfile = sock.makefile("rb")
+        wfile = sock.makefile("wb")
+        local_ip: str = sock.getsockname()[0]
+    except (OSError, ValueError) as exc:
+        print(f"[FluxCast WFD RTSP] Active probe: socket setup failed: {exc}")
+        sock.close()
+        rtsp_server.release_client(tv_ip, claim)
+        return
     local_uri = f"rtsp://{local_ip}:{rtsp_server.port}/wfd1.0"
     session_id = str(random.randint(1_000_000, 9_999_999))
 
@@ -117,6 +139,9 @@ def _active_rtsp_probe(
                     if not msg.status.startswith("200"):
                         print(f"[FluxCast WFD RTSP] Active probe: {name} failed: {msg.status}")
                         break
+                    if name != "UNKNOWN" and not rtsp_server.confirm_client(tv_ip, claim):
+                        print("[FluxCast WFD RTSP] Active probe ownership was superseded.")
+                        return
                     print(f"[FluxCast WFD RTSP] Active probe <- OK for {name}")
 
                     if name == "M1_OPTIONS":
@@ -170,6 +195,12 @@ def _active_rtsp_probe(
 
                 else:
                     method = msg.method
+                    if (
+                        method in WFD_NEGOTIATION_METHODS
+                        and not rtsp_server.confirm_client(tv_ip, claim)
+                    ):
+                        print("[FluxCast WFD RTSP] Active probe ownership was superseded.")
+                        return
                     print(f"[FluxCast WFD RTSP] Active probe <- TV request: {method}")
 
                     if method in ("GET_PARAMETER", "SET_PARAMETER"):
@@ -222,7 +253,6 @@ def _active_rtsp_probe(
                             local_ip=local_ip,
                             sink_rtp_port=st["sink_rtp_port"],
                         )
-                        rtsp_server.has_connected_client = True
                         print(
                             f"[FluxCast WFD RTSP] Active probe: PLAY — "
                             f"starting media ({mode.name})"
@@ -255,4 +285,5 @@ def _active_rtsp_probe(
     finally:
         if media is not None:
             media.stop()
+        rtsp_server.release_client(tv_ip, claim)
     print("[FluxCast WFD RTSP] Active probe: session ended.")

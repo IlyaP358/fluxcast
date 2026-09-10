@@ -19,7 +19,7 @@ _connect_peer / _wait_for_nm_activation from nm.py.
 """
 
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from ..config import WFDNotReady
 from ..constants import WFD_RTSP_PORT
@@ -189,7 +189,10 @@ def _wait_for_group_interface(before: set[str], timeout: float = 40.0) -> str:
 def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
                                 go_intent: int = 0,
                                 rtsp_port: int = WFD_RTSP_PORT,
-                                p2p_channel: Optional[int] = None) -> str:
+                                p2p_channel: Optional[int] = None,
+                                on_group_interface: Optional[
+                                    Callable[[str], None]
+                                ] = None) -> str:
     """Full connect flow bypassing NetworkManager. Returns the data interface
     name once it has a real IP address, ready for the RTSP server to use.
     """
@@ -220,6 +223,8 @@ def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
         _wpas_connect(iface_path, peer_path, go_intent=go_intent)
 
         data_iface = _wait_for_group_interface(interfaces_before)
+        if on_group_interface is not None:
+            on_group_interface(data_iface)
         role = get_p2p_role(data_iface)
         print(f"[FluxCast WFD] P2P group formed on {data_iface}; our role: {role}")
         if p2p_channel is not None and role != "P2P-GO":

@@ -35,6 +35,7 @@ def _cleanup_step(label: str, action) -> None:
     except Exception as exc:
         print(f"[FluxCast WFD] Cleanup step '{label}' failed: {exc}")
 
+
 def start_experimental_backend(args) -> None:
     report = run_diagnostics(skip_firewall=getattr(args, "wfd_no_firewall", False))
     print_report(report)
@@ -72,7 +73,8 @@ def start_experimental_backend(args) -> None:
                 from capture import prompt_monitor
                 monitor = prompt_monitor()
 
-    backend_probe_path = _nm_p2p_device_path(args.wfd_interface)
+    requested_interface = getattr(args, "wfd_interface", None)
+    backend_probe_path = _nm_p2p_device_path(requested_interface)
     if not backend_probe_path:
         raise WFDNotReady(
             "NetworkManager did not expose a Wi-Fi P2P device before scanning."
@@ -87,17 +89,17 @@ def start_experimental_backend(args) -> None:
             "NetworkManager/IWD control."
         )
     else:
-        _set_p2p_device_name(args.wfd_interface)
+        _set_p2p_device_name(requested_interface)
 
     peer = _scan_and_select(
-        args.wfd_interface,
+        requested_interface,
         getattr(args, "wfd_peer", None),
         args.wfd_timeout,
     )
 
     # Refresh the device after scanning. The scan may retry for tens of
     # seconds, so the path used for the actual connection should be fresh.
-    device_path = _nm_p2p_device_path(args.wfd_interface)
+    device_path = _nm_p2p_device_path(requested_interface)
     if not device_path:
         raise WFDNotReady(
             "NetworkManager P2P device disappeared before connection."
@@ -147,6 +149,7 @@ def start_experimental_backend(args) -> None:
     rtsp_port = getattr(args, "wfd_rtsp_port", WFD_RTSP_PORT)
     rtsp = WFDRTSPServer(
         media_config=media_config,
+        peer_address=peer.address,
         port=rtsp_port,
     )
     firewall_opened = False
@@ -167,17 +170,18 @@ def start_experimental_backend(args) -> None:
             # see wpas.py's module docstring for why. connect_via_wpa_supplicant
             # handles GO-intent lowering internally, so it isn't done here.
             wpas_data_iface = connect_via_wpa_supplicant(
-                args.wfd_interface, peer.address,
+                requested_interface, peer.address,
                 go_intent=getattr(args, "wfd_go_intent", 0),
                 rtsp_port=rtsp_port,
                 p2p_channel=getattr(args, "wfd_p2p_channel", None),
+                on_group_interface=rtsp.set_group_interface,
             )
         else:
             # Lower our GO intent before negotiation so the TV becomes the group
             # owner; most Miracast sinks only start the RTSP session in that role.
             if not using_iwd:
                 previous_go_intent = _set_p2p_go_intent(
-                    args.wfd_interface, getattr(args, "wfd_go_intent", 0)
+                    requested_interface, getattr(args, "wfd_go_intent", 0)
                 )
 
             active_path = _connect_peer(
@@ -185,8 +189,10 @@ def start_experimental_backend(args) -> None:
                 peer,
                 rtsp_port=rtsp_port,
             )
-
-            _wait_for_nm_activation(active_path)
+            _wait_for_nm_activation(
+                active_path,
+                on_group_interface=rtsp.set_group_interface,
+            )
 
         if not getattr(args, "wfd_no_firewall", False):
             uibc_enabled = getattr(args, "wfd_uibc", False)
@@ -230,7 +236,7 @@ def start_experimental_backend(args) -> None:
             _cleanup_step(
                 "wpa_supplicant connection release",
                 lambda: release_wpa_supplicant_connection(
-                    args.wfd_interface, wpas_data_iface
+                    requested_interface, wpas_data_iface
                 ),
             )
         _cleanup_step("P2P device disconnect", lambda: _disconnect_device(device_path))
@@ -238,6 +244,6 @@ def start_experimental_backend(args) -> None:
             _cleanup_step(
                 "GO intent restore",
                 lambda: _set_p2p_go_intent(
-                    args.wfd_interface, previous_go_intent, restoring=True
+                    requested_interface, previous_go_intent, restoring=True
                 ),
             )

@@ -5,6 +5,11 @@ from typing import Optional
 from ..config import WFDMediaConfig
 from ..constants import WFD_RTSP_PORT
 from ..media.pipeline import WFDMediaPipeline
+from ..p2p.addressing import (
+    _is_expected_peer_ip,
+    _is_p2p_group_iface,
+    _valid_interface,
+)
 from .handler import _WFDRTSPHandler
 
 
@@ -12,22 +17,101 @@ class _ThreadingTCPServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+    def verify_request(self, request, client_address) -> bool:
+        """Reject other hosts before ThreadingMixIn creates a handler thread."""
+        parent = getattr(self, "parent_server", None)
+        client_ip = client_address[0]
+        if parent is not None and parent.authenticate_client(client_ip):
+            return True
+        print(f"[FluxCast WFD RTSP] Rejected unverified client from {client_ip}")
+        return False
+
+
 class WFDRTSPServer:
     def __init__(
         self,
         media_config: WFDMediaConfig,
+        peer_address: str,
+        interface: Optional[str] = None,
         host: str = "0.0.0.0",
         port: int = WFD_RTSP_PORT,
     ) -> None:
         self.host = host
         self.port = port
         self.media_config = media_config
+        self.peer_address = peer_address
+        self.interface: Optional[str] = None
         self._server: Optional[socketserver.ThreadingTCPServer] = None
         self._thread: Optional[threading.Thread] = None
+        # A socket reserves ownership first. The flag only becomes true after
+        # that owner produces meaningful WFD negotiation traffic.
         self.has_connected_client = False
+        self._auth_lock = threading.Lock()
+        self._group_interface_ready = threading.Event()
+        if interface is not None:
+            self.set_group_interface(interface)
+        self._client_lock = threading.Lock()
+        self._connected_client: Optional[str] = None
+        self._client_claim = 0
         self._media_lock = threading.Lock()
         self._active_media: list[WFDMediaPipeline] = []
         self._uibc_server = None  # opt-in UIBC input server; None unless enabled
+
+    def set_group_interface(self, interface: str) -> bool:
+        """Record the one exact P2P group created for the selected receiver."""
+        if not _valid_interface(interface) or not _is_p2p_group_iface(interface):
+            return False
+        with self._auth_lock:
+            if self.interface is not None and self.interface != interface:
+                return False
+            self.interface = interface
+            self._group_interface_ready.set()
+            return True
+
+    def authenticate_client(self, client_ip: str) -> bool:
+        """Authenticate one address without allowing concurrent lookup forks."""
+        # The listener starts before P2P activation so passive receivers do not
+        # race a closed port. If one connects as the group comes up, briefly
+        # wait for the backend to publish the exact group interface.
+        self._group_interface_ready.wait(timeout=2.0)
+        with self._auth_lock:
+            return _is_expected_peer_ip(
+                client_ip,
+                self.peer_address,
+                self.interface,
+            )
+
+    def claim_client(
+        self,
+        client_ip: str,
+        *,
+        replace_unconfirmed: bool = False,
+    ) -> Optional[int]:
+        """Reserve the selected receiver and return an ownership generation."""
+        if not self.authenticate_client(client_ip):
+            return None
+        with self._client_lock:
+            if self._connected_client is not None:
+                if not replace_unconfirmed or self.has_connected_client:
+                    return None
+            self._client_claim += 1
+            self._connected_client = client_ip
+            self.has_connected_client = False
+            return self._client_claim
+
+    def confirm_client(self, client_ip: str, claim: int) -> bool:
+        """Confirm that the current claim produced valid negotiation traffic."""
+        with self._client_lock:
+            if self._connected_client != client_ip or self._client_claim != claim:
+                return False
+            self.has_connected_client = True
+            return True
+
+    def release_client(self, client_ip: str, claim: int) -> None:
+        with self._client_lock:
+            if self._connected_client == client_ip and self._client_claim == claim:
+                self._connected_client = None
+                self.has_connected_client = False
 
     def _register_media(self, media: WFDMediaPipeline) -> None:
         with self._media_lock:

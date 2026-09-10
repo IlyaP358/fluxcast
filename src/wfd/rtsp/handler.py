@@ -17,13 +17,51 @@ from ..modes import (
 )
 from ..net import _netdev_tx_bytes, _safe_source_port
 from .message import (
-    RTSPMessage, _parse_parameters, _parse_rtp_ports,
+    RTSPMessage, WFD_NEGOTIATION_METHODS, _parse_parameters, _parse_rtp_ports,
     _parse_transport_client_ports, _read_rtsp_message, _sink_advertises_uibc,
 )
 
 
 class _WFDRTSPHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
+        client_ip = self.client_address[0]
+        parent = getattr(self.server, "parent_server", None)
+        claim = None if parent is None else parent.claim_client(client_ip)
+        if claim is None:
+            print(
+                f"[FluxCast WFD RTSP] Rejected unverified or duplicate client "
+                f"from {client_ip}"
+            )
+            return
+        self._parent_server = parent
+        self._client_ip = client_ip
+        self._client_claim = claim
+        try:
+            self._handle_verified_client()
+        finally:
+            parent.release_client(client_ip, claim)
+
+    def _is_negotiation_progress(self, msg: RTSPMessage) -> bool:
+        if msg.is_response:
+            return msg.cseq in self.pending and msg.status.startswith("200")
+        return msg.method in WFD_NEGOTIATION_METHODS
+
+    def _dispatch_message(self, msg: RTSPMessage) -> None:
+        if msg.is_response:
+            self._handle_response(msg)
+        else:
+            self._handle_request(msg)
+
+    def _process_claimed_message(self, msg: RTSPMessage, peer: str) -> bool:
+        if self._is_negotiation_progress(msg) and not self._parent_server.confirm_client(
+            self._client_ip, self._client_claim
+        ):
+            print(f"[FluxCast WFD RTSP] Superseded unconfirmed client from {peer}")
+            return False
+        self._dispatch_message(msg)
+        return True
+
+    def _handle_verified_client(self) -> None:
         peer = f"{self.client_address[0]}:{self.client_address[1]}"
         self.local_ip = self.request.getsockname()[0]
         self.next_cseq = 1
@@ -43,9 +81,6 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         self.setup_ms: Optional[float] = None
         self.first_tx_reported = False
 
-        if hasattr(self.server, "parent_server"):
-            self.server.parent_server.has_connected_client = True  # type: ignore[attr-defined]
-
         print(f"[FluxCast WFD RTSP] TV connected from {peer}; local={self.local_ip}")
         _append_latency_log(
             self.media_config.latency_log_path,
@@ -61,10 +96,8 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                     print(f"[FluxCast WFD RTSP] TV disconnected from {peer}")
                     return
                 self._log_message(msg)
-                if msg.is_response:
-                    self._handle_response(msg)
-                else:
-                    self._handle_request(msg)
+                if not self._process_claimed_message(msg, peer):
+                    return
         except WFDNotReady as exc:
             print(f"[FluxCast WFD RTSP] ERROR: {exc}")
         except OSError as exc:

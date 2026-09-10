@@ -1,5 +1,6 @@
+import re
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from ..config import WFDNotReady
 from ..constants import NM_DEST, NM_PATH, WFD_RTSP_PORT
@@ -35,7 +36,31 @@ def _nm_active_devices(active_path: str) -> list[str]:
     )
     return _object_paths(raw)
 
-def _wait_for_nm_activation(active_path: str, timeout: float = 35.0) -> None:
+
+def _nm_group_interface(device_paths: list[str]) -> Optional[str]:
+    """Return the exact P2P group interface attached to an active connection."""
+    for path in device_paths:
+        for prop in ("IpInterface", "Interface"):
+            interface = _nm_get_string(
+                path,
+                "org.freedesktop.NetworkManager.Device",
+                prop,
+            )
+            if (
+                re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", interface)
+                and interface.startswith("p2p-")
+                and not interface.startswith("p2p-dev-")
+            ):
+                return interface
+    return None
+
+
+def _wait_for_nm_activation(
+    active_path: str,
+    timeout: float = 35.0,
+    *,
+    on_group_interface: Optional[Callable[[str], None]] = None,
+) -> None:
     print("[FluxCast WFD] Waiting for NetworkManager P2P activation...")
     deadline = time.monotonic() + timeout
     last_status = ""
@@ -49,6 +74,9 @@ def _wait_for_nm_activation(active_path: str, timeout: float = 35.0) -> None:
         state = _variant_uint(state_raw)
         state_text = NM_ACTIVE_STATE_NAMES.get(state or -1, str(state))
         devices = _nm_active_devices(active_path)
+        group_interface = _nm_group_interface(devices)
+        if group_interface and on_group_interface is not None:
+            on_group_interface(group_interface)
         device_status = ", ".join(_nm_device_summary(path) for path in devices) or "no-device"
         status = f"{state_text}; {device_status}"
 
@@ -56,7 +84,9 @@ def _wait_for_nm_activation(active_path: str, timeout: float = 35.0) -> None:
             print(f"[FluxCast WFD] NM active connection: {status}")
             last_status = status
 
-        if state == 2:
+        if state == 2 and (
+            on_group_interface is None or group_interface is not None
+        ):
             print("[FluxCast WFD] P2P link is activated; waiting for RTSP session...")
             return
         if state == 4:
