@@ -132,34 +132,84 @@ def _access_denied():
     )
 
 
+IFACE_LIST = "(<[objectpath '/fi/w1/wpa_supplicant1/Interfaces/1']>,)"
+
+
 class WpaSupplicantPropertyPrivilegeTest(unittest.TestCase):
     """Regression test for a real, already-shipped incident: #104 restricted
     wpa_supplicant's Properties.Get/Set to wheel/sudo, which silently broke
-    every unprivileged call this backend was making to them - a netdev-only
-    caller with no wheel/sudo saw peer discovery quietly find nothing, and
-    _set_wfd_ies (which raises rather than warns) failed outright. Every
-    wpa_supplicant Properties.Get/Set call here must carry privileged=True
-    so it retries under sudo instead of failing silently or hard.
+    every unprivileged call the wpas backend was making to them - peer
+    discovery quietly found nothing, and _set_wfd_ies (which raises rather
+    than warns) failed outright.
+
+    The escalation is opt-in, though. device.py's helpers are shared with
+    the default NetworkManager path, where session.py calls them before it
+    ever picks a backend - escalating there would trade a cosmetic warning
+    for a sudo prompt on every session (#113). So: wpas.py passes
+    privileged=True, session.py takes the unprivileged default, and both
+    halves are pinned below.
     """
+
+    def setUp(self):
+        # _gdbus_call raises WFDNotReady before reaching _run if gdbus is
+        # missing, which would make these pass for the wrong reason.
+        patcher = mock.patch.object(dbus.shutil, "which", return_value="/usr/bin/gdbus")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _assert_escalated(self, run):
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[1][0][0][0], "sudo")
+
+    def _assert_no_escalation(self, run):
+        self.assertEqual(run.call_count, 1)
+        self.assertNotEqual(run.call_args_list[0][0][0][0], "sudo")
 
     def test_set_wfd_ies_retries_under_sudo(self):
         calls = [_access_denied(), _completed()]
         with mock.patch.object(dbus, "_run", side_effect=calls) as run:
             wpas._set_wfd_ies(7236)  # raises on failure - not raising is the assertion
-        self.assertEqual(run.call_count, 2)
-        self.assertEqual(run.call_args_list[1][0][0][0], "sudo")
+        self._assert_escalated(run)
 
     def test_p2p_device_iface_paths_retries_under_sudo(self):
+        calls = [_access_denied(), _completed(stdout=IFACE_LIST)]
+        with mock.patch.object(dbus, "_run", side_effect=calls) as run, \
+             mock.patch.object(device, "_wpas_get_string", return_value="wlan0"):
+            paths = device._p2p_device_iface_paths("wlan0", privileged=True)
+        self.assertEqual(paths, ["/fi/w1/wpa_supplicant1/Interfaces/1"])
+        self._assert_escalated(run)
+
+    def test_set_p2p_go_intent_retries_under_sudo(self):
         calls = [
-            _access_denied(),
-            _completed(stdout="(<[objectpath '/fi/w1/wpa_supplicant1/Interfaces/1']>,)"),
+            _access_denied(), _completed(stdout=IFACE_LIST),   # iface lookup
+            _completed(stdout="(<{'GOIntent': <uint32 7>}>,)"),  # read previous
+            _access_denied(), _completed(),                     # the Set itself
         ]
         with mock.patch.object(dbus, "_run", side_effect=calls) as run, \
-             mock.patch.object(device, "_nm_get_string", return_value="wlan0"):
-            paths = device._p2p_device_iface_paths("wlan0")
-        self.assertEqual(paths, ["/fi/w1/wpa_supplicant1/Interfaces/1"])
-        self.assertEqual(run.call_count, 2)
+             mock.patch.object(device, "_wpas_get_string", return_value="wlan0"):
+            previous = device._set_p2p_go_intent("wlan0", 0, privileged=True)
+        self.assertEqual(previous, 7)
+        self.assertEqual([c[0][0][0] for c in run.call_args_list].count("sudo"), 2)
+
+    def test_set_p2p_oper_channel_escalates_without_a_flag(self):
+        # wpas.py is its only caller, so it has no privileged parameter.
+        calls = [_access_denied(), _completed(stdout=IFACE_LIST), _completed()]
+        with mock.patch.object(dbus, "_run", side_effect=calls) as run, \
+             mock.patch.object(device, "_wpas_get_string", return_value="wlan0"):
+            self.assertTrue(device._set_p2p_oper_channel("wlan0", 6))
         self.assertEqual(run.call_args_list[1][0][0][0], "sudo")
+
+    def test_p2p_device_iface_paths_does_not_escalate_by_default(self):
+        with mock.patch.object(dbus, "_run", return_value=_access_denied()) as run:
+            paths = device._p2p_device_iface_paths("wlan0")
+        self.assertEqual(paths, [])
+        self._assert_no_escalation(run)
+
+    def test_set_p2p_device_name_does_not_escalate_by_default(self):
+        # session.py:73 calls this on both backends, before it branches.
+        with mock.patch.object(dbus, "_run", return_value=_access_denied()) as run:
+            device._set_p2p_device_name("wlan0")
+        self._assert_no_escalation(run)
 
 
 if __name__ == "__main__":

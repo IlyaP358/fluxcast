@@ -204,8 +204,8 @@ def parse_args() -> argparse.Namespace:
                           "debugging P2P/WPS negotiation issues, since it "
                           "logs each step of the raw exchange. Needs the "
                           "D-Bus policy in "
-                          "meta/zz-dev.fluxcast.wpa-supplicant.conf (root "
-                          "or netdev group).")
+                          "meta/zz-dev.fluxcast.wpa-supplicant.conf, and "
+                          "falls back to sudo where the bus denies a call.")
     wfd.add_argument("--wfd-uibc", action="store_true", dest="wfd_uibc",
                      help="Experimental: accept touch/mouse input back from the "
                           "sink (TV/tablet) and inject it locally via uinput. "
