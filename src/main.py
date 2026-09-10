@@ -66,6 +66,7 @@ import termios
 
 from capture import prompt_monitor, start_capture, stop_capture
 from server import HLS_DIR, CorsHLSRequestHandler, HLSRequestHandler, StreamServer
+from version import get_fluxcast_version
 
 
 def get_local_ip() -> str:
@@ -78,12 +79,18 @@ def get_local_ip() -> str:
 
 
 def parse_args() -> argparse.Namespace:
+    version = get_fluxcast_version()
     parser = argparse.ArgumentParser(
-        description="FluxCast — stream your Linux desktop to a Smart TV"
+        description=f"FluxCast — stream your Linux desktop to a Smart TV (version: {version})"
     )
 
     # General Options
     general = parser.add_argument_group("General Options")
+
+    general.add_argument("--version", action="version",
+                         version=f"FluxCast {version}",
+                         help="Show program's version number and exit")
+
     general.add_argument("--protocol", default="wfd",
                          choices=["dlna", "cast", "wfd"],
                          help="Connection protocol: wfd (Miracast, default), "
@@ -268,6 +275,8 @@ def _wait_for_hls_segments(required_segments: int = 2, timeout: float = 15.0) ->
 
 def main() -> None:
     args = parse_args()
+
+    print(f"[FluxCast] Version: {get_fluxcast_version()}")
 
     if args.transport is None:
         args.transport = "hls" if args.protocol == "cast" else "progressive-ts"

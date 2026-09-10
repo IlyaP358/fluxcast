@@ -20,6 +20,7 @@ jobs:
           sed -i -E "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
           # only the indented app_info version, NOT the recipe's `version: 1`
           sed -i -E "s/^([[:space:]]+)version:[[:space:]]*.*/\1version: $VERSION/" appimage/AppImageBuilder.yml
+          sed -i -E "s/^__installed_version__ = \".*\"/__installed_version__ = \"$VERSION\"/" src/version.py
 
       - name: Build AppImage
         run: bash appimage/build_appimage.sh
@@ -43,6 +44,7 @@ jobs:
         run: |
           VERSION="${TAG#v}"
           sed -i -E "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+          sed -i -E "s/^__installed_version__ = \".*\"/__installed_version__ = \"$VERSION\"/" src/version.py
 
       - uses: actions/setup-python@v5
         with:
