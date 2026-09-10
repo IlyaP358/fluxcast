@@ -31,6 +31,56 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: gh release upload "$TAG" appimage/FluxCast-*-x86_64.AppImage --clobber
 
+  deb:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # One .deb per release. The package ships a virtualenv whose wheels are
+        # ABI-tagged for the build host's Python minor version, so a single
+        # artifact cannot cover them all - debian/rules pins each build to its
+        # own python3 so apt refuses a mismatched install rather than
+        # installing something that fails on first import.
+        image:
+          - debian:oldstable   # bookworm, python 3.11
+          - debian:stable      # trixie,   python 3.13
+          - ubuntu:24.04       # noble,    python 3.12
+          - ubuntu:26.04       # resolute, python 3.14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version from tag
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${TAG#v}"
+          sed -i -E "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+          sed -i -E "s/^__installed_version__ = \".*\"/__installed_version__ = \"$VERSION\"/" src/version.py
+          sed -i -E "1s/^fluxcast \([^)]*\)/fluxcast ($VERSION)/" debian/changelog
+
+      - name: Build .deb on ${{ matrix.image }}
+        run: |
+          docker run --rm -v "$PWD":/work -w /work ${{ matrix.image }} bash -c '
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends \
+              debhelper devscripts build-essential \
+              python3 python3-venv python3-pip ca-certificates
+            CODENAME=$(. /etc/os-release; echo $VERSION_CODENAME)
+            sed -i -E "1s/^fluxcast \(([^)]*)\)/fluxcast (\1~$CODENAME)/" debian/changelog
+            dpkg-buildpackage -b -us -uc
+            cp /fluxcast_*.deb /work/
+          '
+
+      - name: Attach .deb to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" fluxcast_*_amd64.deb --clobber
+
   pypi:
     runs-on: ubuntu-latest
     permissions:

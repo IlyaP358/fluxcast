@@ -151,6 +151,31 @@ Depending on your desktop environment, you may need to install:
 - Hyprland / Sway: `wf-recorder`, `ffmpeg`
 - KDE / GNOME: `gst-plugins-ugly` (package name varies by distro)
 
+### Debian / Ubuntu - .deb
+
+Download the `.deb` matching your release from the [Releases](https://github.com/IlyaP358/fluxcast/releases) page and install it:
+
+```bash
+sudo apt install ./fluxcast_<version>~<codename>_amd64.deb
+```
+
+| Build | Release |
+|-------|---------|
+| `~bookworm` | Debian 12 |
+| `~trixie`   | Debian 13 |
+| `~noble`    | Ubuntu 24.04 |
+| `~resolute` | Ubuntu 26.04 |
+
+There is no separate privileged step: the package installs the D-Bus policy for
+Wi-Fi Direct and reloads dbus for you.
+
+The builds are not interchangeable. FluxCast bundles the Python dependencies
+apt does not carry at a usable version (`upnpclient` is absent from the archive,
+`python3-pychromecast` is 9.4.0 against a 14.0.5 requirement) in a virtualenv
+under `/opt/fluxcast`, and those wheels are tied to the Python version they were
+built against. Each package requires the `python3` of its own release, so
+installing the wrong one is refused by apt rather than half-working.
+
 ### PyPI
 
 ```bash
