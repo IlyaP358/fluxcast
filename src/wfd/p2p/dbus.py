@@ -8,6 +8,8 @@ from ..constants import NM_DEST, _DEVICE_NAME
 from ..ie import _wfd_ie_device_info, _wfd_ie_device_name
 from ..proc import _run
 
+WPA_DEST = "fi.w1.wpa_supplicant1"
+
 
 def _object_paths(text: str) -> list[str]:
     return re.findall(r"'(/[^']+)'", text)
@@ -89,11 +91,11 @@ NM_DEVICE_REASON_NAMES = {
 
 def _gdbus_call(args: list[str], timeout: float = 5.0,
                  privileged: bool = False) -> subprocess.CompletedProcess[str]:
-    """privileged=True marks a call that needs elevated D-Bus access:
-    P2PDevice.Find/Connect/StopFind/GroupRemove, which our D-Bus policy
-    (meta/zz-dev.fluxcast.wpa-supplicant.conf) grants to root, plus the
-    netdev group on Debian/Ubuntu (see that file's comment - Arch has no
-    such group, so there this always falls back to sudo below).
+    """privileged=True marks a call that needs elevated D-Bus access: the
+    P2PDevice actions (Find/Connect/StopFind/GroupRemove) and the
+    Properties.Get/Set calls the wpas backend makes. Our D-Bus policy
+    (meta/zz-dev.fluxcast.wpa-supplicant.conf) grants Properties.Get/Set to
+    wheel/sudo; everything else falls back to sudo below.
 
     wpa_supplicant has no polkit integration, so unlike NetworkManager it
     can't prompt for authorization at call time - the policy grant is
@@ -139,6 +141,32 @@ def _nm_get_property(path: str, interface: str, prop: str) -> str:
 
 def _nm_get_string(path: str, interface: str, prop: str) -> str:
     return _variant_string(_nm_get_property(path, interface, prop))
+
+def _wpas_get_property(path: str, interface: str, prop: str,
+                       privileged: bool = False) -> str:
+    """Properties.Get scoped to wpa_supplicant's own service.
+
+    _nm_get_property is hardcoded to NetworkManager's destination, so it
+    can't read a /fi/w1/wpa_supplicant1/... path - the call lands on the
+    wrong service and comes back as an unknown object.
+
+    privileged defaults off so the NetworkManager path never escalates;
+    only the wpas backend passes True.
+    """
+    result = _gdbus_call([
+        "--dest", WPA_DEST,
+        "--object-path", path,
+        "--method", "org.freedesktop.DBus.Properties.Get",
+        interface,
+        prop,
+    ], privileged=privileged)
+    if result.returncode != 0:
+        return ""
+    return result.stdout
+
+def _wpas_get_string(path: str, interface: str, prop: str,
+                     privileged: bool = False) -> str:
+    return _variant_string(_wpas_get_property(path, interface, prop, privileged=privileged))
 
 def _variant_byte_array(data: bytes) -> str:
     return "@ay [" + ", ".join(f"byte 0x{byte:02x}" for byte in data) + "]"

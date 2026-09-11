@@ -23,35 +23,16 @@ from typing import Optional
 
 from ..config import WFDNotReady
 from ..constants import WFD_RTSP_PORT
-from .dbus import _gdbus_call, _object_paths, _variant_byte_array, _variant_string, _wfd_source_ie
+from .dbus import (
+    WPA_DEST, _gdbus_call, _object_paths, _variant_byte_array, _wfd_source_ie,
+    _wpas_get_property, _wpas_get_string,
+)
 from .device import _p2p_device_iface_paths, _set_p2p_go_intent, _set_p2p_oper_channel
 from .peers import _default_wifi_interface
 from .wpas_ip import configure_ip, get_p2p_role, release_ip_config
 
-WPA_DEST = "fi.w1.wpa_supplicant1"
 WPA_IFACE = "fi.w1.wpa_supplicant1.Interface"
 WPA_P2P_IFACE = "fi.w1.wpa_supplicant1.Interface.P2PDevice"
-
-
-def _wpas_get_property(path: str, interface: str, prop: str) -> str:
-    """Properties.Get scoped to wpa_supplicant's own D-Bus service.
-
-    dbus.py's _nm_get_property is hardcoded to NetworkManager's D-Bus
-    destination, which makes sense for nm.py but not here: every object
-    path this module works with lives under wpa_supplicant's own service
-    (fi.w1.wpa_supplicant1), a completely different one. This small wrapper
-    just makes sure Peers/Ifname lookups actually ask the right service.
-    """
-    result = _gdbus_call([
-        "--dest", WPA_DEST,
-        "--object-path", path,
-        "--method", "org.freedesktop.DBus.Properties.Get",
-        interface,
-        prop,
-    ])
-    if result.returncode != 0:
-        return ""
-    return result.stdout
 
 
 def _wpas_find_peer_path(iface_path: str, mac: str) -> Optional[str]:
@@ -62,7 +43,7 @@ def _wpas_find_peer_path(iface_path: str, mac: str) -> Optional[str]:
     stripped), so we can match on the object path itself rather than doing
     an extra Properties.Get round-trip per peer to read DeviceAddress.
     """
-    peers_raw = _wpas_get_property(iface_path, WPA_P2P_IFACE, "Peers")
+    peers_raw = _wpas_get_property(iface_path, WPA_P2P_IFACE, "Peers", privileged=True)
     target = mac.lower().replace(":", "")
     for peer_path in _object_paths(peers_raw):
         suffix = peer_path.rsplit("/", 1)[-1].lower()
@@ -86,6 +67,10 @@ def _set_wfd_ies(rtsp_port: int) -> None:
     declared us a Sink rather than a Source. Setting it ourselves here,
     before Find/Connect, means this backend always advertises correctly and
     never depends on any prior manual setup.
+
+    Unlike the read-only lookups elsewhere here, this one raises on
+    failure, so without the sudo fallback a denied Set aborts every
+    connection attempt outright.
     """
     result = _gdbus_call([
         "--dest", WPA_DEST,
@@ -93,7 +78,7 @@ def _set_wfd_ies(rtsp_port: int) -> None:
         "--method", "org.freedesktop.DBus.Properties.Set",
         WPA_DEST, "WFDIEs",
         f"<{_variant_byte_array(_wfd_source_ie(rtsp_port))}>",
-    ], timeout=5.0)
+    ], timeout=5.0, privileged=True)
     if result.returncode != 0:
         raise WFDNotReady(
             f"Failed to set WFD Device Info IE: {(result.stderr or result.stdout).strip()}"
@@ -168,7 +153,7 @@ def _list_wpas_interfaces() -> set[str]:
         "--object-path", "/fi/w1/wpa_supplicant1",
         "--method", "org.freedesktop.DBus.Properties.Get",
         WPA_DEST, "Interfaces",
-    ])
+    ], privileged=True)  # wpas-only, so always escalates - see _gdbus_call
     if result.returncode != 0:
         return set()
     return set(_object_paths(result.stdout))
@@ -191,8 +176,7 @@ def _wait_for_group_interface(before: set[str], timeout: float = 40.0) -> str:
     while time.monotonic() < deadline:
         new_paths = _list_wpas_interfaces() - before
         for path in new_paths:
-            ifname_raw = _wpas_get_property(path, WPA_IFACE, "Ifname")
-            ifname = _variant_string(ifname_raw)
+            ifname = _wpas_get_string(path, WPA_IFACE, "Ifname", privileged=True)
             if ifname:
                 return ifname
         time.sleep(0.5)
@@ -209,7 +193,7 @@ def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
     """Full connect flow bypassing NetworkManager. Returns the data interface
     name once it has a real IP address, ready for the RTSP server to use.
     """
-    paths = _p2p_device_iface_paths(interface)
+    paths = _p2p_device_iface_paths(interface, privileged=True)
     if not paths:
         raise WFDNotReady("wpa_supplicant P2P interface not found.")
     iface_path = paths[0]
@@ -229,7 +213,7 @@ def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
     try:
         peer_path = _wait_for_peer(iface_path, peer_mac)
 
-        previous_intent = _set_p2p_go_intent(interface, go_intent)
+        previous_intent = _set_p2p_go_intent(interface, go_intent, privileged=True)
         interfaces_before = _list_wpas_interfaces()
         print(f"[FluxCast WFD] Connecting to {peer_mac} directly via wpa_supplicant "
               "(NetworkManager not involved in this step)...")
@@ -265,7 +249,8 @@ def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
         return data_iface
     finally:
         if previous_intent is not None:
-            _set_p2p_go_intent(interface, previous_intent, restoring=True)
+            _set_p2p_go_intent(interface, previous_intent, restoring=True,
+                               privileged=True)
 
 
 def release_wpa_supplicant_connection(interface: Optional[str], data_iface: str) -> None:
@@ -278,7 +263,7 @@ def release_wpa_supplicant_connection(interface: Optional[str], data_iface: str)
     """
     release_ip_config(data_iface)
 
-    paths = _p2p_device_iface_paths(interface)
+    paths = _p2p_device_iface_paths(interface, privileged=True)
     if paths:
         try:
             _gdbus_call([

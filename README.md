@@ -105,8 +105,9 @@ python3 src/main.py --protocol wfd --wfd-p2p-backend wpas --wfd-p2p-channel 6
 
 Needs the D-Bus policy in `meta/zz-dev.fluxcast.wpa-supplicant.conf`
 installed to `/usr/share/dbus-1/system.d/`. On Debian/Ubuntu, a user in the
-`netdev` group can then run it without sudo; elsewhere (including Arch)
-it falls back to sudo - see the file for details.
+`netdev` group can run it without sudo, courtesy of the `netdev` grant in
+the distro's own `wpa_supplicant.conf`; elsewhere (including Arch) it falls
+back to sudo - see the file for details.
 
 ## What Works Best
 
