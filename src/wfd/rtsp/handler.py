@@ -1,3 +1,4 @@
+import os
 import random
 import socketserver
 import threading
@@ -628,6 +629,27 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         self._unhealthy_probe_streak += 1
         if self._unhealthy_probe_streak <= self._UNHEALTHY_PROBE_GRACE:
             self._schedule_probe(2.0)
+            return
+
+        # After grace: self-heal unless Omarchy intentionally paused capture
+        # (screen lock / Extend position move). Without this, probes stop and
+        # the TV stays frozen while RTSP keepalives continue.
+        pause_file = os.environ.get("FLUXCAST_CAPTURE_PAUSE_FILE", "").strip()
+        if pause_file and os.path.exists(pause_file):
+            print(
+                "[FluxCast WFD Media] Capture paused externally; "
+                "deferring auto-rebind"
+            )
+            self._schedule_probe(3.0)
+            return
+
+        print("[FluxCast WFD Media] Sender dead; rebinding desktop capture")
+        try:
+            media.restart_video()
+            self._unhealthy_probe_streak = 0
+        except Exception as exc:  # noqa: BLE001 — keep probe chain alive
+            print(f"[FluxCast WFD Media] Capture rebind after sender death failed: {exc}")
+        self._schedule_probe(2.0)
 
     def _stop_media(self) -> None:
         if self.media is not None:
