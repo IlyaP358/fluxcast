@@ -319,6 +319,29 @@ python3 src/main.py --wfd-latency-log
 python3 src/main.py --wfd-latency-log /tmp/my-latency.jsonl
 ```
 
+### WFD environment variables
+
+Optional knobs for the wlroots/`wf-recorder` capture path. Defaults preserve the
+historical software encode pipeline.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `FLUXCAST_WFD_ENCODER` | `libx264` | Encode backend: `libx264` (historical default), `vaapi`, `qsv`, or `auto` (VAAPI then QSV then libx264). |
+| `FLUXCAST_WFD_ENCODE_BIAS` | unset | Force `full` or `efficient` bitrate/preset bias. When unset, automatic battery / power-saver bias only applies if GPU encode was opted in (`vaapi` / `qsv` / `auto`). |
+| `FLUXCAST_WFD_VAAPI_DEVICE` | first `/dev/dri/renderD12x` | VAAPI render node override. |
+| `FLUXCAST_WFD_WF_RECORDER_DAMAGE` | unset | Set to `1` / `true` / `yes` / `on` to omit `wf-recorder -D` (damage-aware capture). Default keeps `-D` for historical continuous capture. |
+| `FLUXCAST_WFD_MODE_STATE` | unset | If set to a file path, write sink-advertised CEA/VESA modes (and the chosen mode) as JSON after RTSP negotiation — for external UIs. |
+
+Examples:
+
+```bash
+# Opt into GPU encode when ffmpeg has h264_vaapi / h264_qsv
+FLUXCAST_WFD_ENCODER=auto python3 src/main.py
+
+# Quieter Hyprland capture (omit wf-recorder -D)
+FLUXCAST_WFD_WF_RECORDER_DAMAGE=1 python3 src/main.py
+```
+
 ## Latency Log Events
 
 - `rtsp_connected`
