@@ -45,10 +45,18 @@ class WlrootsMixin:
             from ..hw_encode import hypr_monitor_scale
 
             scale = hypr_monitor_scale(str(getattr(monitor, "name", "") or ""))
-            if abs(scale - 1.0) > 0.01 and capture_encode_mode() in ("auto", "vaapi"):
+            if (
+                abs(scale - 1.0) > 0.01
+                and capture_encode_mode() in ("auto", "vaapi")
+                and (os.environ.get("FLUXCAST_WFD_DMABUF_ALLOW_SCALED", "") or "")
+                .strip()
+                .lower()
+                in ("0", "false", "no", "off", "never")
+            ):
                 print(
                     "[FluxCast WFD Media] Skipping wf-recorder DMA-BUF on scaled "
-                    f"output (scale={scale:g}); using pipe hwupload"
+                    f"output (scale={scale:g}, DMABUF_ALLOW_SCALED denied); "
+                    "using pipe hwupload"
                 )
 
         self._start_wf_recorder_raw_pipe(wf_recorder, monitor)
@@ -197,7 +205,8 @@ class WlrootsMixin:
 
         Prefer ``-x nv12`` so we skip CPU ``format=nv12`` before hwupload.
         Falls back to yuv420p + format=nv12 if needed via encode plan.
-        DMA-BUF encode stays opt-in (still glitches on this Hyprland/Intel stack).
+        Prefer DMA-BUF when opted in; this pipe path is the fallback (and the
+        escape hatch when ``FLUXCAST_WFD_DMABUF_ALLOW_SCALED=0``).
         """
         meta = self._desktop_bitrate_plan(monitor)
         audio_monitor = self.config.audio_device or _detect_audio_monitor()
