@@ -522,5 +522,49 @@ class StartBackendDiagnosticsTest(unittest.TestCase):
         run.assert_called_once_with(skip_firewall=True)
 
 
+class RtspKeepaliveSessionTest(unittest.TestCase):
+    """M16 keepalives must use a bare Session id (no ;timeout=...)."""
+
+    def test_keepalive_sends_bare_session_header(self):
+        from wfd.rtsp.handler import _WFDRTSPHandler
+
+        handler = mock.Mock()
+        handler._keepalive_active = True
+        handler.media = None
+        handler.session_id = "8630199"
+        handler._rtsp_presentation_uri = mock.Mock(
+            return_value="rtsp://10.42.0.1:7236/wfd1.0/streamid=0"
+        )
+        handler._send_request = mock.Mock()
+        handler._schedule_rtsp_keepalive = mock.Mock()
+
+        _WFDRTSPHandler._send_rtsp_keepalive(handler)
+
+        handler._send_request.assert_called_once()
+        kwargs = handler._send_request.call_args.kwargs
+        self.assertEqual(kwargs["headers"], {"Session": "8630199"})
+        self.assertNotIn("timeout", kwargs["headers"]["Session"])
+        handler._schedule_rtsp_keepalive.assert_called_once_with(20.0)
+
+    def test_keepalive_continues_while_media_restarting(self):
+        from wfd.rtsp.handler import _WFDRTSPHandler
+
+        dead = mock.Mock()
+        dead.poll.return_value = 1  # exited
+        media = SimpleNamespace(restarting=True, processes=[dead])
+
+        handler = mock.Mock()
+        handler._keepalive_active = True
+        handler.media = media
+        handler.session_id = "42"
+        handler._rtsp_presentation_uri = mock.Mock(return_value="rtsp://x/wfd1.0/streamid=0")
+        handler._send_request = mock.Mock()
+        handler._schedule_rtsp_keepalive = mock.Mock()
+
+        _WFDRTSPHandler._send_rtsp_keepalive(handler)
+
+        handler._send_request.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
