@@ -479,11 +479,16 @@ class CaptureEncodeModeTest(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("FLUXCAST_WFD_ENCODER", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE", None)
+        os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE_PREF", None)
+        os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE_FILE", None)
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
         os.environ.pop("FLUXCAST_WFD_DMABUF_ALLOW_SCALED", None)
 
     def test_default_capture_encode_is_pipe(self):
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE", None)
+        os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE_PREF", None)
+        os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE_FILE", None)
+        os.environ.pop("FLUXCAST_WFD_ENCODER", None)
         self.assertEqual(hw_encode.capture_encode_mode(), "pipe")
         self.assertFalse(hw_encode.prefer_wf_recorder_vaapi_dmabuf())
 
@@ -549,6 +554,47 @@ class CaptureEncodeModeTest(unittest.TestCase):
             with mock.patch.object(hw_encode, "_requested_gpu_encode", return_value=True):
                 with mock.patch.object(hw_encode, "monitor_scale", return_value=1.6):
                     self.assertTrue(hw_encode.prefer_wf_recorder_vaapi_dmabuf(mon))
+
+    def test_render_engine_preference_file_and_attempts(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "capture-encode"
+            path.write_text("vaapi\n", encoding="utf-8")
+            os.environ["FLUXCAST_WFD_CAPTURE_ENCODE_FILE"] = str(path)
+            os.environ["FLUXCAST_WFD_ENCODER"] = "auto"
+            self.assertEqual(hw_encode.capture_encode_preference(), "vaapi")
+            self.assertEqual(hw_encode.capture_encode_attempts(), ["vaapi", "cpu"])
+            with mock.patch.object(hw_encode, "_vaapi_usable", return_value=True):
+                self.assertFalse(hw_encode.prefer_wf_recorder_vaapi_dmabuf())
+
+            path.write_text("dmabuf\n", encoding="utf-8")
+            self.assertEqual(hw_encode.capture_encode_preference(), "dmabuf")
+            self.assertEqual(
+                hw_encode.capture_encode_attempts(), ["dmabuf", "vaapi", "cpu"]
+            )
+            with mock.patch.object(hw_encode, "_vaapi_usable", return_value=True):
+                self.assertTrue(hw_encode.prefer_wf_recorder_vaapi_dmabuf())
+
+            path.write_text("cpu\n", encoding="utf-8")
+            self.assertEqual(hw_encode.capture_encode_preference(), "cpu")
+            self.assertEqual(hw_encode.capture_encode_attempts(), ["cpu"])
+
+    def test_encoder_override_forces_libx264_plan(self):
+        os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
+        with mock.patch.object(hw_encode, "_vaapi_usable", return_value=True):
+            plan = hw_encode.build_encode_plan(
+                h264_profile="constrained_baseline",
+                level="3.1",
+                fps=30,
+                gop=60,
+                bitrate="8M",
+                bufsize="16M",
+                vf_scale=None,
+                encoder_override="libx264",
+            )
+        self.assertEqual(plan.name, "libx264")
 
 if __name__ == "__main__":
     unittest.main()
