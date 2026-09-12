@@ -175,10 +175,10 @@ class BitrateBiasTest(unittest.TestCase):
         self.assertEqual(hw_encode.apply_bitrate_bias("4M", "full"), "4M")
 
     def test_efficient_trims_megabit(self):
-        self.assertEqual(hw_encode.apply_bitrate_bias("4M", "efficient"), "3M")
+        self.assertEqual(hw_encode.apply_bitrate_bias("4M", "efficient"), "3.6M")
 
     def test_efficient_trims_kilobit_with_floor(self):
-        self.assertEqual(hw_encode.apply_bitrate_bias("600k", "efficient"), "500k")
+        self.assertEqual(hw_encode.apply_bitrate_bias("600k", "efficient"), "540k")
 
 
 class ProbeEncoderTest(unittest.TestCase):
@@ -331,6 +331,7 @@ class VaapiQsvPlanShapeTest(unittest.TestCase):
         os.environ.pop("FLUXCAST_WFD_ENCODER", None)
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
         os.environ.pop("FLUXCAST_WFD_VAAPI_DEVICE", None)
+        os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE", None)
 
     def test_vaapi_plan_uses_device_and_h264_vaapi(self):
         os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
@@ -354,6 +355,24 @@ class VaapiQsvPlanShapeTest(unittest.TestCase):
         self.assertIn("-quality", plan.video_args)
         self.assertEqual(plan.video_args[plan.video_args.index("-quality") + 1], "4")
 
+    def test_vaapi_nv12_skips_format_convert(self):
+        os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
+        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "efficient"
+        with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
+            with mock.patch("os.path.exists", return_value=True):
+                plan = hw_encode.build_encode_plan(
+                    h264_profile="baseline",
+                    level="3.1",
+                    fps=30,
+                    gop=30,
+                    bitrate="3M",
+                    bufsize="6M",
+                    vf_scale=None,
+                    input_pix_fmt="nv12",
+                )
+        self.assertEqual(plan.vf, ["-vf", "hwupload"])
+        self.assertNotIn("format=nv12", plan.vf[1])
+
     def test_vaapi_efficient_uses_faster_quality_cbr_no_low_power(self):
         os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
         os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "efficient"
@@ -368,7 +387,7 @@ class VaapiQsvPlanShapeTest(unittest.TestCase):
                     bufsize="6M",
                     vf_scale=None,
                 )
-        self.assertEqual(plan.video_args[plan.video_args.index("-quality") + 1], "7")
+        self.assertEqual(plan.video_args[plan.video_args.index("-quality") + 1], "5")
         self.assertEqual(plan.video_args[plan.video_args.index("-async_depth") + 1], "2")
         self.assertEqual(plan.video_args[plan.video_args.index("-b:v") + 1], "3M")
         self.assertNotIn("-low_power", plan.video_args)
@@ -454,6 +473,58 @@ class VaapiQsvPlanShapeTest(unittest.TestCase):
         self.assertTrue(plan.vf[1].startswith(letterbox))
         self.assertIn(",format=nv12,hwupload", plan.vf[1])
 
+
+
+class CaptureEncodeModeTest(unittest.TestCase):
+    def tearDown(self):
+        os.environ.pop("FLUXCAST_WFD_ENCODER", None)
+        os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE", None)
+        os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
+
+    def test_default_capture_encode_is_pipe(self):
+        os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE", None)
+        self.assertEqual(hw_encode.capture_encode_mode(), "pipe")
+        self.assertFalse(hw_encode.prefer_wf_recorder_vaapi_dmabuf())
+
+    def test_auto_prefers_dmabuf_when_vaapi_usable_and_gpu_requested(self):
+        os.environ["FLUXCAST_WFD_CAPTURE_ENCODE"] = "auto"
+        os.environ["FLUXCAST_WFD_ENCODER"] = "auto"
+        mon = mock.Mock(spec=["name"])
+        mon.name = "HEADLESS-1"
+        with mock.patch.object(hw_encode, "_vaapi_usable", return_value=True):
+            with mock.patch.object(hw_encode, "_requested_gpu_encode", return_value=True):
+                with mock.patch.object(hw_encode, "hypr_monitor_scale", return_value=1.0):
+                    self.assertTrue(hw_encode.prefer_wf_recorder_vaapi_dmabuf(mon))
+
+    def test_auto_stays_pipe_without_gpu_request(self):
+        os.environ["FLUXCAST_WFD_CAPTURE_ENCODE"] = "auto"
+        os.environ["FLUXCAST_WFD_ENCODER"] = "libx264"
+        with mock.patch.object(hw_encode, "_vaapi_usable", return_value=True):
+            self.assertFalse(hw_encode.prefer_wf_recorder_vaapi_dmabuf())
+
+    def test_vaapi_mode_requires_usable_device(self):
+        os.environ["FLUXCAST_WFD_CAPTURE_ENCODE"] = "vaapi"
+        with mock.patch.object(hw_encode, "_vaapi_usable", return_value=False):
+            self.assertFalse(hw_encode.prefer_wf_recorder_vaapi_dmabuf())
+        with mock.patch.object(hw_encode, "_vaapi_usable", return_value=True):
+            self.assertTrue(hw_encode.prefer_wf_recorder_vaapi_dmabuf())
+
+    def test_vaapi_quality_bias(self):
+        self.assertEqual(hw_encode.vaapi_quality_for_bias("efficient"), "5")
+        self.assertEqual(hw_encode.vaapi_quality_for_bias("full"), "4")
+
+    def test_scaled_monitor_skips_dmabuf(self):
+        os.environ["FLUXCAST_WFD_CAPTURE_ENCODE"] = "auto"
+        os.environ["FLUXCAST_WFD_ENCODER"] = "auto"
+        # Monitor NamedTuple has no scale — lookup via hypr_monitor_scale.
+        mon = mock.Mock(spec=["name"])
+        mon.name = "hotyeah-TV"
+        with mock.patch.object(hw_encode, "_vaapi_usable", return_value=True):
+            with mock.patch.object(hw_encode, "_requested_gpu_encode", return_value=True):
+                with mock.patch.object(hw_encode, "hypr_monitor_scale", return_value=2.0):
+                    self.assertFalse(hw_encode.prefer_wf_recorder_vaapi_dmabuf(mon))
+                with mock.patch.object(hw_encode, "hypr_monitor_scale", return_value=1.0):
+                    self.assertTrue(hw_encode.prefer_wf_recorder_vaapi_dmabuf(mon))
 
 if __name__ == "__main__":
     unittest.main()

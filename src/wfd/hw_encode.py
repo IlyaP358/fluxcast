@@ -64,6 +64,85 @@ def _vaapi_usable() -> bool:
     return os.path.exists(_vaapi_device())
 
 
+def capture_encode_mode() -> str:
+    """How desktop capture should produce H.264.
+
+    ``pipe`` / ``raw`` / empty — historical wf-recorder rawvideo → ffmpeg encode.
+    ``vaapi`` / ``dmabuf`` — wf-recorder h264_vaapi with DMA-BUF (required).
+    ``auto`` — prefer DMA-BUF when VAAPI is usable and GPU encode was requested.
+    """
+    raw = os.environ.get("FLUXCAST_WFD_CAPTURE_ENCODE", "").strip().lower()
+    if raw in ("pipe", "raw", "cpu", "hwupload"):
+        return "pipe"
+    if raw in ("vaapi", "dmabuf", "gpu"):
+        return "vaapi"
+    if raw == "auto":
+        return "auto"
+    return "pipe"
+
+
+def hypr_monitor_scale(monitor_name: str) -> float:
+    """Hyprland output scale for *monitor_name*, or 1.0 if unknown."""
+    if not monitor_name:
+        return 1.0
+    try:
+        raw = subprocess.check_output(
+            ["timeout", "2", "hyprctl", "-j", "monitors"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        import json
+
+        for mon in json.loads(raw):
+            if str(mon.get("name") or "") == monitor_name:
+                return float(mon.get("scale") or 1) or 1.0
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        pass
+    return 1.0
+
+
+def prefer_wf_recorder_vaapi_dmabuf(monitor=None) -> bool:
+    """True when capture should try wf-recorder -c h264_vaapi (DMA-BUF).
+
+    Scaled Hyprland outputs (scale != 1) currently glitch with wf-recorder's
+    DMA-BUF + scale_vaapi path (logical vs physical size). Keep the raw pipe
+    + ffmpeg hwupload path for those until the filter chain is proven.
+    """
+    mode = capture_encode_mode()
+    if mode == "pipe":
+        return False
+    if not _vaapi_usable():
+        return False
+    # Monitor NamedTuple has no scale — look up Hyprland when needed.
+    scale = 1.0
+    if monitor is not None:
+        try:
+            scale = float(getattr(monitor, "scale", None) or 0) or 0.0
+        except (TypeError, ValueError):
+            scale = 0.0
+        if scale <= 0:
+            name = str(getattr(monitor, "name", "") or "")
+            scale = hypr_monitor_scale(name)
+        if abs(scale - 1.0) > 0.01:
+            return False
+    if mode == "vaapi":
+        return True
+    # auto: prefer DMA-BUF when GPU encode is requested and scale allows.
+    if mode == "auto":
+        return _requested_gpu_encode()
+    return False
+
+
+def vaapi_quality_for_bias(bias: Optional[str] = None) -> str:
+    """ffmpeg/wf-recorder h264_vaapi -quality (higher = faster/worse).
+
+    Efficient used to force ``7`` (very blocky on Miracast TVs). GPU encode is
+    cheap enough that ``5`` still saves work without looking like a slideshow.
+    """
+    b = bias or power_bias()
+    return "5" if b == "efficient" else "4"
+
+
 def _sysfs_text(path: str) -> Optional[str]:
     try:
         with open(path, encoding="utf-8") as fh:
@@ -204,15 +283,15 @@ def _requested_gpu_encode() -> bool:
 
 
 def apply_bitrate_bias(bitrate_text: str, bias: str) -> str:
-    """On efficient bias, trim bitrate ~25% to save radio/GPU energy."""
+    """On efficient bias, mildly trim bitrate (GPU encode is cheap; heavy trim looks blocky on TVs)."""
     if bias != "efficient":
         return bitrate_text
     text = bitrate_text.strip().lower()
     try:
         if text.endswith("m"):
-            return f"{max(1.0, float(text[:-1]) * 0.75):g}M"
+            return f"{max(1.0, float(text[:-1]) * 0.90):g}M"
         if text.endswith("k"):
-            return f"{max(500, int(float(text[:-1]) * 0.75))}k"
+            return f"{max(500, int(float(text[:-1]) * 0.90))}k"
     except ValueError:
         return bitrate_text
     return bitrate_text
@@ -247,11 +326,15 @@ def build_encode_plan(
     bufsize: str,
     vf_scale: Optional[str],
     output_height: Optional[int] = None,
+    input_pix_fmt: str = "yuv420p",
 ) -> EncodePlan:
     """Build ffmpeg argv fragments for the chosen encoder.
 
     vf_scale is either None (source matches output; format only) or a full
     software letterbox/scale filter string from encoding._letterbox_vf.
+
+    input_pix_fmt: pipe pixel format. ``nv12`` skips CPU ``format=nv12`` before
+    hwupload (paired with wf-recorder ``-x nv12``).
 
     output_height selects the historical libx264 preset when bias is full:
     ultrafast above 1080p, veryfast otherwise (matches pre-hw-encode FluxCast).
@@ -260,12 +343,16 @@ def build_encode_plan(
     choice = probe_encoder(_requested_encoder())
     level_idc = _level_to_idc(level)
     wanted_gpu = _requested_gpu_encode()
+    pix = (input_pix_fmt or "yuv420p").strip().lower()
 
     if choice == "vaapi":
         device = _vaapi_device()
         # Upload after any CPU scale/pad so the encoder sees NV12 on the GPU.
+        # Already-NV12 pipes skip the expensive CPU format conversion.
         if vf_scale:
             vf = f"{vf_scale},format=nv12,hwupload"
+        elif pix == "nv12":
+            vf = "hwupload"
         else:
             vf = "format=nv12,hwupload"
         # higher -quality = faster/worse (ffmpeg h264_vaapi). Keep async_depth
@@ -274,7 +361,7 @@ def build_encode_plan(
         # Do NOT use -low_power here: Intel's LP entrypoint only supports CQP,
         # and CQP+low_power measured ~2.5× ffmpeg CPU vs normal CBR VAAPI on
         # this hardware. Efficient bias = faster quality + trimmed bitrate.
-        quality = "7" if bias == "efficient" else "4"
+        quality = vaapi_quality_for_bias(bias)
         return EncodePlan(
             name="vaapi",
             pre_input=["-vaapi_device", device],
@@ -287,6 +374,9 @@ def build_encode_plan(
                 "-g", str(gop),
                 "-keyint_min", str(gop),
                 "-r", str(fps),
+                # Explicit CBR: bare -b:v can land on AVBR and undershoot badly
+                # on static desktops (few hundred kb/s vs multi-Mbps target).
+                "-rc_mode", "CBR",
                 "-b:v", bitrate,
                 "-maxrate", bitrate,
                 "-bufsize", bufsize,
