@@ -55,6 +55,7 @@ class WlrootsMixin:
             bitrate=effective_bitrate,
             bufsize=_vbv_bufsize(effective_bitrate, self.config),
             vf_scale=vf_scale,
+            output_height=parsed_out[1],
         )
 
         # Keep historical wf-recorder -D (continuous / no-damage) by default so

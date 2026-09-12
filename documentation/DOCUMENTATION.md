@@ -330,7 +330,7 @@ historical software encode pipeline.
 | `FLUXCAST_WFD_ENCODE_BIAS` | unset | Force `full` or `efficient` bitrate/preset bias. When unset, automatic battery / power-saver bias only applies if GPU encode was opted in (`vaapi` / `qsv` / `auto`). |
 | `FLUXCAST_WFD_VAAPI_DEVICE` | first `/dev/dri/renderD12x` | VAAPI render node override. |
 | `FLUXCAST_WFD_WF_RECORDER_DAMAGE` | unset | Set to `1` / `true` / `yes` / `on` to omit `wf-recorder -D` (damage-aware capture). Default keeps `-D` for historical continuous capture. |
-| `FLUXCAST_WFD_MODE_STATE` | unset | If set to a file path, write sink-advertised CEA/VESA modes (and the chosen mode) as JSON after RTSP negotiation — for external UIs. |
+| `FLUXCAST_WFD_MODE_STATE` | unset | If set to a file path, write sink-advertised CEA/VESA modes (chosen mode, supported list, peer MAC / name) as JSON after RTSP negotiation — for external UIs. |
 
 Examples:
 

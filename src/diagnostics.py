@@ -210,15 +210,23 @@ def _ffmpeg_encoders() -> Check:
     )
 
 
+def _ffmpeg_encoder_listed(blob: str, name: str) -> bool:
+    """True when `ffmpeg -encoders` lists `name` as its own table row."""
+    return f" {name} " in f" {blob} " or f"\n{name} " in blob or f" {name}\n" in blob
+
+
 def _wfd_hw_encode_hint() -> Check:
-    """Surface optional GPU encode when the default libx264 path is selected."""
+    """Surface optional GPU encode when the default libx264 path is selected.
+
+    Hardware encode is wired into the wlroots/wf-recorder capture path only.
+    """
     prefer = os.environ.get("FLUXCAST_WFD_ENCODER", "libx264").strip().lower() or "libx264"
     if prefer not in ("libx264", "x264", "software", "sw"):
         return Check(
             "wfd hw encode",
             STATUS_OK,
             "GPU encode opted in via FLUXCAST_WFD_ENCODER",
-            f"FLUXCAST_WFD_ENCODER={prefer}",
+            f"FLUXCAST_WFD_ENCODER={prefer} (wlroots/wf-recorder path)",
         )
 
     ffmpeg = _first_matching_command(["ffmpeg", "/usr/sbin/ffmpeg"])
@@ -231,7 +239,9 @@ def _wfd_hw_encode_hint() -> Check:
         return Check("wfd hw encode", STATUS_SKIP, "could not query ffmpeg encoders", str(exc))
 
     blob = result.stdout + result.stderr
-    available = [name for name in ("h264_vaapi", "h264_qsv") if name in blob]
+    available = [
+        name for name in ("h264_vaapi", "h264_qsv") if _ffmpeg_encoder_listed(blob, name)
+    ]
     if not available:
         return Check(
             "wfd hw encode",
@@ -243,8 +253,8 @@ def _wfd_hw_encode_hint() -> Check:
         "wfd hw encode",
         STATUS_WARN,
         "hardware H.264 is available; default encode stays libx264",
-        "set FLUXCAST_WFD_ENCODER=auto (or vaapi/qsv) to try GPU encode; "
-        f"detected={', '.join(available)}",
+        "set FLUXCAST_WFD_ENCODER=auto (or vaapi/qsv) to try GPU encode on the "
+        f"wlroots/wf-recorder path; detected={', '.join(available)}",
     )
 
 

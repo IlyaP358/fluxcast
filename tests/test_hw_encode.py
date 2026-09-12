@@ -216,6 +216,12 @@ class ProbeEncoderTest(unittest.TestCase):
                 with mock.patch("os.path.exists", return_value=True):
                     self.assertEqual(hw_encode.probe_encoder("auto"), "vaapi")
 
+    def test_explicit_vaapi_falls_back_without_render_node(self):
+        with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
+            with mock.patch.object(hw_encode, "_vaapi_device", return_value="/dev/dri/missing"):
+                with mock.patch("os.path.exists", return_value=False):
+                    self.assertEqual(hw_encode.probe_encoder("vaapi"), "libx264")
+
 
 class BuildEncodePlanTest(unittest.TestCase):
     def tearDown(self):
@@ -235,13 +241,31 @@ class BuildEncodePlanTest(unittest.TestCase):
                     bitrate="4M",
                     bufsize="8M",
                     vf_scale=None,
+                    output_height=1080,
                 )
         self.assertEqual(plan.name, "libx264")
         self.assertEqual(plan.pre_input, [])
         self.assertIn("libx264", plan.video_args)
         self.assertIn("zerolatency", plan.video_args)
         self.assertIn("repeat-headers=1:aud=1", plan.video_args)
+        self.assertIn("veryfast", plan.video_args)
         self.assertEqual(plan.vf, ["-vf", "format=yuv420p"])
+        self.assertNotIn("no usable GPU encoder", plan.note)
+
+    def test_full_bias_uses_ultrafast_above_1080p(self):
+        os.environ.pop("FLUXCAST_WFD_ENCODER", None)
+        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "full"
+        plan = hw_encode.build_encode_plan(
+            h264_profile="baseline",
+            level="5.1",
+            fps=30,
+            gop=30,
+            bitrate="8M",
+            bufsize="16M",
+            vf_scale=None,
+            output_height=1440,
+        )
+        self.assertIn("ultrafast", plan.video_args)
 
     def test_efficient_software_uses_ultrafast(self):
         os.environ["FLUXCAST_WFD_ENCODER"] = "libx264"
@@ -254,8 +278,50 @@ class BuildEncodePlanTest(unittest.TestCase):
             bitrate="3M",
             bufsize="6M",
             vf_scale=None,
+            output_height=720,
         )
         self.assertIn("ultrafast", plan.video_args)
+
+    def test_gpu_fallback_note_mentions_missing_encoder(self):
+        os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
+        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "full"
+        with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=False):
+            plan = hw_encode.build_encode_plan(
+                h264_profile="baseline",
+                level="3.1",
+                fps=30,
+                gop=30,
+                bitrate="4M",
+                bufsize="8M",
+                vf_scale=None,
+                output_height=1080,
+            )
+        self.assertEqual(plan.name, "libx264")
+        self.assertIn("no usable GPU encoder", plan.note)
+
+
+class LevelToIdcTest(unittest.TestCase):
+    def test_empty_defaults_to_level_31(self):
+        self.assertEqual(hw_encode._level_to_idc(""), "31")
+        self.assertEqual(hw_encode._level_to_idc("   "), "31")
+        self.assertEqual(hw_encode._level_to_idc(None), "31")  # type: ignore[arg-type]
+
+    def test_dotted_levels_convert(self):
+        self.assertEqual(hw_encode._level_to_idc("3.1"), "31")
+        self.assertEqual(hw_encode._level_to_idc("4.0"), "40")
+        self.assertEqual(hw_encode._level_to_idc("5.1"), "51")
+
+    def test_digits_pass_through(self):
+        self.assertEqual(hw_encode._level_to_idc("31"), "31")
+        self.assertEqual(hw_encode._level_to_idc("42"), "42")
+
+    def test_malformed_raises(self):
+        with self.assertRaises(ValueError):
+            hw_encode._level_to_idc("nope")
+        with self.assertRaises(ValueError):
+            hw_encode._level_to_idc("3.")
+        with self.assertRaises(ValueError):
+            hw_encode._level_to_idc("3.10")
 
 
 class VaapiQsvPlanShapeTest(unittest.TestCase):
@@ -322,6 +388,29 @@ class VaapiQsvPlanShapeTest(unittest.TestCase):
         self.assertIn("-init_hw_device", plan.pre_input)
         self.assertIn("h264_qsv", plan.video_args)
         self.assertIn("balanced", plan.video_args)
+        self.assertIn("-level", plan.video_args)
+        self.assertEqual(plan.video_args[plan.video_args.index("-level") + 1], "31")
+        self.assertEqual(
+            plan.video_args[plan.video_args.index("-profile:v") + 1], "baseline"
+        )
+
+    def test_qsv_maps_constrained_baseline_profile(self):
+        os.environ["FLUXCAST_WFD_ENCODER"] = "qsv"
+        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "full"
+        with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
+            plan = hw_encode.build_encode_plan(
+                h264_profile="constrained_baseline",
+                level="4.0",
+                fps=30,
+                gop=30,
+                bitrate="4M",
+                bufsize="8M",
+                vf_scale=None,
+            )
+        self.assertEqual(
+            plan.video_args[plan.video_args.index("-profile:v") + 1], "baseline"
+        )
+        self.assertEqual(plan.video_args[plan.video_args.index("-level") + 1], "40")
 
     def test_vaapi_falls_back_to_libx264_when_encoder_missing(self):
         os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
