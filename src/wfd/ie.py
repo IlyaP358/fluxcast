@@ -1,5 +1,6 @@
 import re
 from dataclasses import dataclass
+from typing import Optional
 
 
 def _wfd_ie_device_info(rtsp_port: int) -> bytes:
@@ -33,6 +34,12 @@ class WFDPeer:
     path: str = ""
     source: str = ""
     rtsp_port: int = 7236
+    # Whether the peer advertised Wi-Fi Display data: True, False, or None
+    # when the scan could not tell. Set by each scanner from the data it
+    # parsed, rather than re-derived by searching `details` later - that
+    # string is formatted for humans, and matching on it is what made every
+    # P2P peer look like a sink (#124).
+    wfd_capable: Optional[bool] = None
 
 def _parse_gdbus_byte_array(raw: str) -> list[int]:
     """Parse a gdbus @ay variant string into a list of integer byte values.
