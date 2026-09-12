@@ -525,18 +525,10 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         """Send RTSP GET_PARAMETER (M16) on the existing TCP connection."""
         if not self._keepalive_active:
             return
-        media = self.media
-        # Only stop the chain if processes have already EXITED.
-        # If media is None (portal dialog still open), keep sending keepalives.
-        # media.restarting may be set by an external capture rebind (e.g. SIGUSR1);
-        # stock FluxCast never sets it. Keep the keepalive chain alive across that window.
-        if (
-            media is not None
-            and not getattr(media, "restarting", False)
-            and media.processes
-            and not all(p.poll() is None for p in media.processes)
-        ):
-            return
+        # Always keep the M16 chain alive for the RTSP session. Capture may
+        # briefly die during eDP scale / ensure-capture / SIGUSR1 rebind; if we
+        # stop rescheduling on dead sender PIDs the sink TEARDOWNs on session
+        # timeout even after capture recovers. M16 does not require RTP.
         try:
             # Some sinks return 454 if Session includes ";timeout=30" on M16 —
             # they expect a bare session id. Without successful keepalives they
