@@ -99,6 +99,8 @@ class SessionSigusr1WiringTest(unittest.TestCase):
         self.assertIn("self.restarting", pipeline_src)
         self.assertIn("capture_geometry_drifted", handler_src)
         self.assertIn("Capture output geometry changed", handler_src)
+        self.assertIn("FLUXCAST_CAPTURE_PAUSE_FILE", handler_src)
+        self.assertIn("Sender dead; rebinding desktop capture", handler_src)
 
 
 class CaptureGeometryFingerprintTest(unittest.TestCase):
