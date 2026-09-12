@@ -633,6 +633,28 @@ class RtspKeepaliveSessionTest(unittest.TestCase):
         _WFDRTSPHandler._send_rtsp_keepalive(handler)
 
         handler._send_request.assert_called_once()
+        handler._schedule_rtsp_keepalive.assert_called_once_with(20.0)
+
+    def test_keepalive_continues_when_senders_exited_before_rebind(self):
+        """Capture can die before SIGUSR1 sets restarting; M16 must not stop."""
+        from wfd.rtsp.handler import _WFDRTSPHandler
+
+        dead = mock.Mock()
+        dead.poll.return_value = 1  # exited
+        media = SimpleNamespace(restarting=False, processes=[dead])
+
+        handler = mock.Mock()
+        handler._keepalive_active = True
+        handler.media = media
+        handler.session_id = "99"
+        handler._rtsp_presentation_uri = mock.Mock(return_value="rtsp://x/wfd1.0/streamid=0")
+        handler._send_request = mock.Mock()
+        handler._schedule_rtsp_keepalive = mock.Mock()
+
+        _WFDRTSPHandler._send_rtsp_keepalive(handler)
+
+        handler._send_request.assert_called_once()
+        handler._schedule_rtsp_keepalive.assert_called_once_with(20.0)
 
 
 class RtspUnhealthyProbeGraceTest(unittest.TestCase):
