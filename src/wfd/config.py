@@ -20,6 +20,7 @@ class WFDMediaConfig:
     latency_log_path: Optional[str] = None
     capture_backend: str = "auto"
     peer_name: str = ""
+    peer_address: str = ""  # Wi-Fi Direct MAC; optional consumers (mode-state JSON)
     uibc: bool = False  # opt-in: accept touch/mouse input back from the sink (issue #37)
     # H.264 profile the encoders emit; must match the profile sent in M4 (#84).
     h264_profile: str = "baseline"

@@ -26,6 +26,11 @@ from .message import (
 
 
 class _WFDRTSPHandler(socketserver.StreamRequestHandler):
+    # After this many consecutive unhealthy probes (~10s at 2s interval), stop
+    # so a permanently dead stock pipeline does not spam forever. Mid-rebind
+    # races should recover inside the grace window.
+    _UNHEALTHY_PROBE_GRACE = 5
+
     def handle(self) -> None:
         peer = f"{self.client_address[0]}:{self.client_address[1]}"
         self.local_ip = self.request.getsockname()[0]
@@ -45,6 +50,9 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         self.play_accepted_at: Optional[float] = None
         self.setup_ms: Optional[float] = None
         self.first_tx_reported = False
+        # Consecutive unhealthy sender probes; capped so a dead stock pipeline
+        # does not warn forever (see _UNHEALTHY_PROBE_GRACE).
+        self._unhealthy_probe_streak = 0
 
         if hasattr(self.server, "parent_server"):
             self.server.parent_server.has_connected_client = True  # type: ignore[attr-defined]
@@ -292,6 +300,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             write_mode_state(
                 sink_format=self.sink_video_format,
                 current=mode,
+                peer=self.media_config.peer_address,
                 peer_name=self.media_config.peer_name,
             )
             self._send_m4_set_parameters()
@@ -519,7 +528,8 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         media = self.media
         # Only stop the chain if processes have already EXITED.
         # If media is None (portal dialog still open), keep sending keepalives.
-        # While capture is being rebound (SIGUSR1), keep the keepalive chain alive.
+        # media.restarting may be set by an external capture rebind (e.g. SIGUSR1);
+        # stock FluxCast never sets it. Keep the keepalive chain alive across that window.
         if (
             media is not None
             and not getattr(media, "restarting", False)
@@ -549,6 +559,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             return
 
         # Capture rebind briefly kills sender PIDs — keep probing through it.
+        # media.restarting is optional; stock pipelines leave it unset.
         if getattr(media, "restarting", False):
             self._schedule_probe(1.0)
             return
@@ -559,6 +570,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             states.append(f"pid={proc.pid}:{status}")
 
         if states and all(proc.poll() is None for proc in media.processes):
+            self._unhealthy_probe_streak = 0
             current = _netdev_tx_bytes(media.tx_interface)
             delta = None
             if media.tx_baseline is not None and current is not None:
@@ -607,8 +619,10 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             f"[FluxCast WFD Media] WARNING: RTP sender is not healthy "
             f"({detail}; {media.tx_summary()})"
         )
-        # Keep probing briefly so a mid-restart race does not permanently stop health checks.
-        self._schedule_probe(2.0)
+        # Brief grace so a mid-restart race does not permanently stop health checks.
+        self._unhealthy_probe_streak += 1
+        if self._unhealthy_probe_streak <= self._UNHEALTHY_PROBE_GRACE:
+            self._schedule_probe(2.0)
 
     def _stop_media(self) -> None:
         if self.media is not None:

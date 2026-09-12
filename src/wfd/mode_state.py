@@ -1,4 +1,8 @@
-"""Persist sink-advertised Miracast modes for the Omarchy Display panel."""
+"""Persist sink-advertised Miracast modes for optional external UIs.
+
+When FLUXCAST_WFD_MODE_STATE points at a file path, write JSON after RTSP
+mode negotiation (current mode, supported CEA/VESA list, peer identity).
+"""
 
 from __future__ import annotations
 
