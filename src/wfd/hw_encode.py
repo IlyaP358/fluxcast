@@ -88,9 +88,13 @@ def capture_encode_mode() -> str:
 def prefer_wf_recorder_vaapi_dmabuf(monitor=None) -> bool:
     """True when capture should try wf-recorder -c h264_vaapi (DMA-BUF).
 
-    Scaled outputs (scale != 1) currently glitch with wf-recorder's
-    DMA-BUF + scale_vaapi path (logical vs physical size). Keep the raw pipe
-    + ffmpeg hwupload path for those until the filter chain is proven.
+    Scaled outputs are allowed: whole-output screencopy still yields physical
+    mode-sized DMA buffers (logical region in the log is expected). Proven at
+    integer scale 2 with ``out_range=tv`` / no ``-r`` / CQP.
+
+    Escape hatches:
+    - ``FLUXCAST_WFD_CAPTURE_ENCODE=pipe`` — never DMA-BUF
+    - ``FLUXCAST_WFD_DMABUF_ALLOW_SCALED=0`` — pipe only when scale != 1
     """
     mode = capture_encode_mode()
     if mode == "pipe":
@@ -98,7 +102,6 @@ def prefer_wf_recorder_vaapi_dmabuf(monitor=None) -> bool:
     if not _vaapi_usable():
         return False
     # Monitor NamedTuple has no scale — probe the compositor when needed.
-    scale = 1.0
     if monitor is not None:
         try:
             scale = float(getattr(monitor, "scale", None) or 0) or 0.0
@@ -108,10 +111,13 @@ def prefer_wf_recorder_vaapi_dmabuf(monitor=None) -> bool:
             name = str(getattr(monitor, "name", "") or "")
             scale = monitor_scale(name)
         if abs(scale - 1.0) > 0.01:
-            return False
+            allow = (os.environ.get("FLUXCAST_WFD_DMABUF_ALLOW_SCALED", "") or "").strip().lower()
+            # Default allow; only an explicit deny forces the pipe fallback.
+            if allow in ("0", "false", "no", "off", "never"):
+                return False
     if mode == "vaapi":
         return True
-    # auto: prefer DMA-BUF when GPU encode is requested and scale allows.
+    # auto: prefer DMA-BUF when GPU encode is requested.
     if mode == "auto":
         return _requested_gpu_encode()
     return False
