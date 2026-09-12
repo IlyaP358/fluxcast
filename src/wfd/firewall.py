@@ -1,6 +1,6 @@
 import subprocess
 
-from diagnostics import _firewalld_active
+from diagnostics import _firewalld_active, _ufw_enabled
 
 from .proc import _run
 
@@ -22,6 +22,26 @@ def _print_firewall_manual_hint(port: int, reason: str) -> None:
         "  or pass --wfd-no-firewall if you manage the firewall yourself."
     )
 
+def _warn_if_ufw_may_block(port: int) -> None:
+    """Say something before the session hangs on a ufw host.
+
+    FluxCast cannot open the port itself here: ufw has no Polkit integration
+    to prompt through the way firewalld does, so this would mean shelling out
+    to sudo mid-session to edit the user's firewall. Printing the command is
+    the honest limit (#98).
+
+    Deliberately file-only - no subprocess. The firewall probe runs on the
+    connect path, and a blocking call here was already a problem once (#114).
+    """
+    if _ufw_enabled() is not True:
+        return
+    print(
+        f"[FluxCast WFD] ufw is enabled. If the sink never opens its RTSP "
+        f"connection, allow port {port}/tcp:\n"
+        f"    sudo ufw allow {port}/tcp\n"
+        "  or pass --wfd-no-firewall to silence this."
+    )
+
 def _open_wfd_firewall_port(port: int) -> bool:
     """
     Runtime-only (no ``--permanent``): cleared on reload/reboot, and removed on
@@ -30,6 +50,7 @@ def _open_wfd_firewall_port(port: int) -> bool:
     """
     # None ("couldn't ask systemd") is treated like inactive: nothing to open.
     if not _firewalld_active():
+        _warn_if_ufw_may_block(port)
         return False
 
     # Polkit can gate the read-only query as well, so it gets the same budget
