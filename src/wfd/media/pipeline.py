@@ -32,6 +32,9 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
         self._portal_gst_cmd: Optional[list[str]] = None
         self._portal_pw_fd: Optional[int] = None
         self._lpcm_muxer = None   # WFDLPCMMuxer instance for Microsoft adapter
+        # True while restart_video() is swapping capture/encode processes.
+        # RTSP keepalive/health probes skip hard-fail while this is set.
+        self.restarting: bool = False
 
     def start(self) -> None:
         if self.processes:
@@ -95,24 +98,57 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
         self.portal_session = None
 
     def restart_video(self) -> None:
-        if self._portal_gst_cmd is None or self._portal_pw_fd is None:
-            return
-        for proc in self.processes:
-            if proc.poll() is None:
-                proc.terminate()
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=1)
-        self.processes.clear()
-        new_proc = subprocess.Popen(
-            self._portal_gst_cmd,
-            stderr=None,
-            pass_fds=(self._portal_pw_fd,),
-        )
-        self.processes = [new_proc]
-        print("[FluxCast WFD Media] Pipeline restarted for IDR request.")
+        """Restart capture/encode while leaving the RTSP session intact.
+
+        Portal GStreamer path can respawn from the retained PipeWire fd.
+        Desktop backends (wf-recorder/x11/…) tear down and re-launch the
+        sender so Hyprland geometry changes (eDP scale, extend reseat) do not
+        leave a hollow RTSP session with dead capture PIDs.
+        """
+        import time as _time
+
+        self.restarting = True
+        try:
+            if self._portal_gst_cmd is not None and self._portal_pw_fd is not None:
+                for proc in self.processes:
+                    if proc.poll() is None:
+                        proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=1)
+                self.processes.clear()
+                new_proc = subprocess.Popen(
+                    self._portal_gst_cmd,
+                    stderr=None,
+                    pass_fds=(self._portal_pw_fd,),
+                )
+                self.processes = [new_proc]
+                print("[FluxCast WFD Media] Pipeline restarted for IDR request.")
+                return
+
+            # Desktop / hollow recovery: rebuild even when senders already exited
+            # (pause-capture kills wf-recorder/ffmpeg from outside).
+            for proc in self.processes:
+                if proc.poll() is None:
+                    proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=1)
+            self.processes.clear()
+            close_portal_capture(self.portal_session)
+            self.portal_session = None
+            self._portal_gst_cmd = None
+            self._portal_pw_fd = None
+            # Brief pause so RTP source ports can be rebound by the new ffmpeg.
+            _time.sleep(0.35)
+            self._start_desktop()
+            print("[FluxCast WFD Media] Desktop capture pipeline restarted.")
+        finally:
+            self.restarting = False
 
     def _rtp_output(self) -> str:
         return _rtp_url(self.tv_ip, self.sink_rtp_port, self.config.source_port, self.local_ip)
