@@ -563,6 +563,19 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
 
         if states and all(proc.poll() is None for proc in media.processes):
             self._unhealthy_probe_streak = 0
+            # Hyprland reload can leave senders alive while the capture output
+            # has been reshuffled — TV goes black though PIDs still look fine.
+            if getattr(media, "capture_geometry_drifted", lambda: False)():
+                print(
+                    "[FluxCast WFD Media] Capture output geometry changed; "
+                    "rebinding desktop capture"
+                )
+                try:
+                    media.restart_video()
+                except Exception as exc:  # noqa: BLE001 — keep probe chain alive
+                    print(f"[FluxCast WFD Media] Capture rebind after geometry drift failed: {exc}")
+                self._schedule_probe(2.0)
+                return
             current = _netdev_tx_bytes(media.tx_interface)
             delta = None
             if media.tx_baseline is not None and current is not None:

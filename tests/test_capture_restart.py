@@ -11,7 +11,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wfd.config import WFDMediaConfig  # noqa: E402
-from wfd.media.pipeline import WFDMediaPipeline  # noqa: E402
+from wfd.media.pipeline import WFDMediaPipeline, hypr_monitor_fingerprint  # noqa: E402
 from wfd.rtsp.rtsp_server import WFDRTSPServer  # noqa: E402
 
 
@@ -89,11 +89,52 @@ class SessionSigusr1WiringTest(unittest.TestCase):
             session_src = fh.read()
         with open(os.path.join(root, "media", "pipeline.py"), encoding="utf-8") as fh:
             pipeline_src = fh.read()
+        with open(os.path.join(root, "rtsp", "handler.py"), encoding="utf-8") as fh:
+            handler_src = fh.read()
         self.assertIn("signal.SIGUSR1", session_src)
         self.assertIn("restart_active_media", session_src)
         self.assertIn("Capture restart finished", session_src)
         self.assertIn("Desktop capture pipeline restarted", pipeline_src)
         self.assertIn("self.restarting", pipeline_src)
+        self.assertIn("capture_geometry_drifted", handler_src)
+        self.assertIn("Capture output geometry changed", handler_src)
+
+
+class CaptureGeometryFingerprintTest(unittest.TestCase):
+    def test_hypr_monitor_fingerprint_formats_fields(self):
+        payload = (
+            '[{"name":"hotyeah","width":1920,"height":1080,"refreshRate":30,'
+            '"scale":2,"x":-960,"y":0}]'
+        )
+        with mock.patch("wfd.media.pipeline.subprocess.check_output", return_value=payload):
+            fp = hypr_monitor_fingerprint("hotyeah")
+        self.assertEqual(fp, "hotyeah|1920|1080|30|2|-960|0")
+
+    def test_capture_geometry_drifted_when_position_changes(self):
+        cfg = WFDMediaConfig(
+            monitor=SimpleNamespace(name="hotyeah", width=1920, height=1080)
+        )
+        pipe = WFDMediaPipeline(cfg, "10.0.0.2", "10.0.0.1", 5000)
+        pipe.capture_geometry_fp = "hotyeah|1920|1080|30|2|-960|0"
+        moved = (
+            '[{"name":"hotyeah","width":1920,"height":1080,"refreshRate":30,'
+            '"scale":2,"x":960,"y":0}]'
+        )
+        with mock.patch("wfd.media.pipeline.subprocess.check_output", return_value=moved):
+            self.assertTrue(pipe.capture_geometry_drifted())
+
+    def test_capture_geometry_stable_when_unchanged(self):
+        cfg = WFDMediaConfig(
+            monitor=SimpleNamespace(name="hotyeah", width=1920, height=1080)
+        )
+        pipe = WFDMediaPipeline(cfg, "10.0.0.2", "10.0.0.1", 5000)
+        pipe.capture_geometry_fp = "hotyeah|1920|1080|30|2|-960|0"
+        same = (
+            '[{"name":"hotyeah","width":1920,"height":1080,"refreshRate":30,'
+            '"scale":2,"x":-960,"y":0}]'
+        )
+        with mock.patch("wfd.media.pipeline.subprocess.check_output", return_value=same):
+            self.assertFalse(pipe.capture_geometry_drifted())
 
 
 if __name__ == "__main__":

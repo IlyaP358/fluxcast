@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 from typing import Optional
@@ -11,6 +12,36 @@ from .portal import PortalMixin
 from .testpattern import TestPatternMixin
 from .wlroots import WlrootsMixin
 from .x11 import X11Mixin
+
+
+def hypr_monitor_fingerprint(monitor_name: str) -> Optional[str]:
+    """Return name|w|h|refresh|scale|x|y for a Hyprland output, or None."""
+    if not monitor_name:
+        return None
+    try:
+        raw = subprocess.check_output(
+            ["hyprctl", "-j", "monitors"],
+            text=True,
+            timeout=2,
+            stderr=subprocess.DEVNULL,
+        )
+        for mon in json.loads(raw):
+            if str(mon.get("name") or "") != monitor_name:
+                continue
+            return "|".join(
+                [
+                    monitor_name,
+                    str(int(mon.get("width") or 0)),
+                    str(int(mon.get("height") or 0)),
+                    str(mon.get("refreshRate") or 0),
+                    str(mon.get("scale") or 0),
+                    str(int(mon.get("x") or 0)),
+                    str(int(mon.get("y") or 0)),
+                ]
+            )
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    return None
 
 
 class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
@@ -35,6 +66,10 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
         # True while restart_video() is swapping capture/encode processes.
         # RTSP keepalive/health probes skip hard-fail while this is set.
         self.restarting: bool = False
+        # Hyprland output geometry when desktop capture last (re)bound. A
+        # hyprctl reload can leave senders alive while feeding black frames;
+        # health probes compare live geometry to this fingerprint.
+        self.capture_geometry_fp: Optional[str] = None
 
     def start(self) -> None:
         if self.processes:
@@ -73,6 +108,36 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
             self._start_test_pattern()
         else:
             self._start_desktop()
+        self.remember_capture_geometry()
+
+    def capture_monitor_name(self) -> Optional[str]:
+        mon = self.config.monitor
+        if mon is None:
+            return None
+        name = getattr(mon, "name", None)
+        return str(name) if name else None
+
+    def remember_capture_geometry(self) -> None:
+        """Snapshot Hyprland geometry for the captured output after bind."""
+        if not _is_hyprland_session():
+            return
+        name = self.capture_monitor_name()
+        if not name:
+            return
+        self.capture_geometry_fp = hypr_monitor_fingerprint(name)
+
+    def capture_geometry_drifted(self) -> bool:
+        """True when the captured Hyprland output moved/resized since bind."""
+        if not self.capture_geometry_fp:
+            return False
+        name = self.capture_monitor_name()
+        if not name:
+            return False
+        current = hypr_monitor_fingerprint(name)
+        if current is None:
+            # hyprctl failed or output missing — force rebind to recover.
+            return True
+        return current != self.capture_geometry_fp
 
     def tx_summary(self) -> str:
         current = _netdev_tx_bytes(self.tx_interface)
@@ -146,6 +211,7 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
             # Brief pause so RTP source ports can be rebound by the new ffmpeg.
             _time.sleep(0.35)
             self._start_desktop()
+            self.remember_capture_geometry()
             print("[FluxCast WFD Media] Desktop capture pipeline restarted.")
         finally:
             self.restarting = False
