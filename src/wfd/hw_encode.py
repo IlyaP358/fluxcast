@@ -268,8 +268,13 @@ def build_encode_plan(
             vf = f"{vf_scale},format=nv12,hwupload"
         else:
             vf = "format=nv12,hwupload"
-        quality = "7" if bias == "efficient" else "4"  # higher = faster/less GPU on Intel
-        async_depth = "1" if bias == "efficient" else "2"
+        # higher -quality = faster/worse (ffmpeg h264_vaapi). Keep async_depth
+        # at 2 — dropping to 1 reduces parallelism and can raise system power.
+        #
+        # Do NOT use -low_power here: Intel's LP entrypoint only supports CQP,
+        # and CQP+low_power measured ~2.5× ffmpeg CPU vs normal CBR VAAPI on
+        # this hardware. Efficient bias = faster quality + trimmed bitrate.
+        quality = "7" if bias == "efficient" else "4"
         return EncodePlan(
             name="vaapi",
             pre_input=["-vaapi_device", device],
@@ -286,7 +291,7 @@ def build_encode_plan(
                 "-maxrate", bitrate,
                 "-bufsize", bufsize,
                 "-quality", quality,
-                "-async_depth", async_depth,
+                "-async_depth", "2",
             ],
             note=f"h264_vaapi on {device} ({bias} power bias)",
         )
