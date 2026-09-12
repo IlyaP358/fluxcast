@@ -630,6 +630,22 @@ def _supplicant_wfd_check() -> Check:
     )
 
 
+def _ufw_enabled() -> Optional[bool]:
+    """Whether ufw is switched on, without needing root. None if unreadable.
+
+    `ufw status` refuses to run as a normal user, so read the ENABLED line
+    from ufw.conf, which ships world-readable. Not `systemctl is-active ufw`:
+    the unit can be active while ufw itself is disabled.
+    """
+    try:
+        with open("/etc/ufw/ufw.conf") as conf:
+            match = re.search(r"^\s*ENABLED\s*=\s*(\w+)", conf.read(),
+                              re.MULTILINE | re.IGNORECASE)
+    except OSError:
+        return None
+    return match.group(1).lower() == "yes" if match else None
+
+
 def _ufw_check() -> Optional[Check]:
     if not shutil.which("ufw"):
         return None
@@ -640,10 +656,27 @@ def _ufw_check() -> Optional[Check]:
         return Check("firewall (ufw)", STATUS_WARN, "could not query ufw status", str(exc))
 
     output = (result.stdout + result.stderr).strip()
+    # ufw prints the root error and still exits 0, so match the text rather
+    # than trusting the return code.
+    if re.search(r"need to be root|permission denied", output, re.IGNORECASE):
+        # Returning None here is what let #98 happen: --doctor is normally run
+        # unprivileged, so the one line that would have named port 7236 left
+        # the report entirely and the session just hung with no explanation.
+        enabled = _ufw_enabled()
+        if enabled is False:
+            return Check("firewall (ufw)", STATUS_OK,
+                         "ufw is installed but disabled; port not blocked",
+                         "read from /etc/ufw/ufw.conf; ufw status needs root")
+        detail = (f"open it with: sudo ufw allow {WFD_RTSP_PORT}/tcp\n"
+                  "  or check the current rules with: sudo ufw status")
+        if enabled is None:
+            return Check("firewall (ufw)", STATUS_WARN,
+                         f"could not verify whether ufw allows port {WFD_RTSP_PORT}",
+                         detail)
+        return Check("firewall (ufw)", STATUS_WARN,
+                     f"ufw is enabled; port {WFD_RTSP_PORT} needs root to verify",
+                     detail)
     if result.returncode != 0:
-        # ufw status needs root; skip rather than warn when privileges are missing.
-        if re.search(r"need to be root|permission denied", output, re.IGNORECASE):
-            return None
         return Check("firewall (ufw)", STATUS_WARN, "ufw status query failed", output)
 
     if re.search(r"Status:\s*inactive", output, re.IGNORECASE):

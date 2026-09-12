@@ -172,12 +172,46 @@ class FirewallCheckTest(unittest.TestCase):
             check = diagnostics._firewall_check()
         self.assertEqual(check.status, diagnostics.STATUS_WARN)
 
-    def test_ufw_without_root_is_skipped(self):
-        err = "ERROR: You need to be root to run this script"
+    # `ufw status` refuses to run unprivileged, and --doctor is normally run
+    # unprivileged, so this branch decides whether the user hears about port
+    # 7236 at all. It used to drop the check entirely, which is how #98
+    # happened: nothing in the report, then a session that hangs.
+    ROOT_ERR = "ERROR: You need to be root to run this script"
+
+    def _unprivileged_check(self, enabled):
         with mock.patch("diagnostics.shutil.which", side_effect=lambda b: "/usr/sbin/ufw" if b == "ufw" else None), \
-                mock.patch("diagnostics._run", return_value=_completed("", returncode=1, stderr=err)):
-            check = diagnostics._ufw_check()
-        self.assertIsNone(check)
+                mock.patch("diagnostics._run", return_value=_completed(self.ROOT_ERR)), \
+                mock.patch("diagnostics._ufw_enabled", return_value=enabled):
+            return diagnostics._ufw_check()
+
+    def test_ufw_without_root_warns_when_enabled(self):
+        check = self._unprivileged_check(True)
+        self.assertIsNotNone(check)
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn(str(diagnostics.WFD_RTSP_PORT), check.message)
+        self.assertIn(f"ufw allow {diagnostics.WFD_RTSP_PORT}/tcp", check.detail)
+
+    def test_ufw_without_root_is_ok_when_disabled(self):
+        check = self._unprivileged_check(False)
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+
+    def test_ufw_without_root_warns_when_state_unknown(self):
+        check = self._unprivileged_check(None)
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("could not verify", check.message)
+
+    def test_ufw_enabled_reads_the_conf_file(self):
+        for text, expected in [
+            ("ENABLED=yes\n", True),
+            ("ENABLED=no\n", False),
+            ("# comment only\n", None),
+        ]:
+            with mock.patch("builtins.open", mock.mock_open(read_data=text)):
+                self.assertIs(diagnostics._ufw_enabled(), expected, text)
+
+    def test_ufw_enabled_is_unknown_when_conf_is_unreadable(self):
+        with mock.patch("builtins.open", side_effect=OSError("nope")):
+            self.assertIsNone(diagnostics._ufw_enabled())
 
     def test_returns_worst_case_across_front_ends(self):
         def fake_run(args, timeout=3.0):
