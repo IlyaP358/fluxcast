@@ -322,21 +322,48 @@ python3 src/main.py --wfd-latency-log /tmp/my-latency.jsonl
 ### WFD environment variables
 
 Optional knobs for the wlroots/`wf-recorder` capture path. Defaults preserve the
-historical software encode pipeline.
+historical software encode pipeline (`libx264` over a raw pipe).
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `FLUXCAST_WFD_ENCODER` | `libx264` | Encode backend: `libx264` (historical default), `vaapi`, `qsv`, or `auto` (VAAPI then QSV then libx264). |
 | `FLUXCAST_WFD_ENCODE_BIAS` | unset | Force `full` or `efficient` bitrate/preset bias. When unset, automatic battery / power-saver bias only applies if GPU encode was opted in (`vaapi` / `qsv` / `auto`). |
 | `FLUXCAST_WFD_VAAPI_DEVICE` | first `/dev/dri/renderD12x` | VAAPI render node override. |
+| `FLUXCAST_WFD_CAPTURE_ENCODE` | unset → pipe | Capture path when no preference file/pref is set: `pipe` / `raw` / `hwupload` = raw `wf-recorder` → ffmpeg encode; `vaapi` / `dmabuf` / `gpu` = prefer `wf-recorder -c h264_vaapi` (DMA-BUF); `auto` = DMA-BUF when GPU encode was requested. |
+| `FLUXCAST_WFD_CAPTURE_ENCODE_PREF` | unset | Explicit capture preference: `dmabuf` (DMA-BUF + VAAPI CQP), `vaapi` (raw pipe → `hwupload` → `h264_vaapi`), or `cpu` (raw pipe → `libx264`). Overrides deriving preference from `FLUXCAST_WFD_CAPTURE_ENCODE` / `FLUXCAST_WFD_ENCODER`. |
+| `FLUXCAST_WFD_CAPTURE_ENCODE_FILE` | unset | Path to a one-line preference file (`dmabuf`, `vaapi`, or `cpu`). Read on every desktop capture start/rebind so an external controller can change path without restarting the process. Wins over `FLUXCAST_WFD_CAPTURE_ENCODE_PREF`. |
+| `FLUXCAST_WFD_DMABUF_ALLOW_SCALED` | allow | When the Hyprland output scale is not `1`, DMA-BUF is still allowed by default. Set to `0` / `false` / `no` / `off` / `never` to force the pipe path on scaled outputs. |
+| `FLUXCAST_WFD_VAAPI_QP` | `18` | Constant QP for the DMA-BUF `h264_vaapi` path (`rc_mode=CQP`). Lower is sharper / larger; only applies when DMA-BUF encode is used. |
 | `FLUXCAST_WFD_WF_RECORDER_DAMAGE` | unset | Set to `1` / `true` / `yes` / `on` to omit `wf-recorder -D` (damage-aware capture). Default keeps `-D` for historical continuous capture. |
 | `FLUXCAST_WFD_MODE_STATE` | unset | If set to a file path, write sink-advertised CEA/VESA modes (chosen mode, supported list, peer MAC / name) as JSON after RTSP negotiation — for external UIs. |
+
+#### Capture preference and fallback
+
+With no preference file and default `FLUXCAST_WFD_ENCODER=libx264`, capture stays on the historical raw-pipe + software encode path.
+
+When preference is `dmabuf` (or derived from `CAPTURE_ENCODE=auto`/`vaapi` with a GPU encoder request), FluxCast tries in order:
+
+1. `wf-recorder -c h264_vaapi` DMA-BUF (CQP, `out_range=tv`, no `-r`, `bf=0`)
+2. raw pipe → `hwupload` → `h264_vaapi`
+3. raw pipe → `libx264`
+
+Preference `vaapi` skips DMA-BUF and tries steps 2 then 3. Preference `cpu` uses step 3 only.
 
 Examples:
 
 ```bash
 # Opt into GPU encode when ffmpeg has h264_vaapi / h264_qsv
 FLUXCAST_WFD_ENCODER=auto python3 src/main.py
+
+# Prefer DMA-BUF capture+encode (falls back to pipe VAAPI, then libx264)
+FLUXCAST_WFD_ENCODER=auto FLUXCAST_WFD_CAPTURE_ENCODE_PREF=dmabuf python3 src/main.py
+
+# Force software encode over the raw pipe
+FLUXCAST_WFD_CAPTURE_ENCODE_PREF=cpu python3 src/main.py
+
+# Live-updatable preference (write "vaapi\n" or "cpu\n" into the file, then SIGUSR1)
+FLUXCAST_WFD_CAPTURE_ENCODE_FILE=/tmp/fluxcast-capture-encode \
+  FLUXCAST_WFD_ENCODER=auto python3 src/main.py
 
 # Quieter Hyprland capture (omit wf-recorder -D)
 FLUXCAST_WFD_WF_RECORDER_DAMAGE=1 python3 src/main.py
@@ -356,6 +383,9 @@ FLUXCAST_WFD_WF_RECORDER_DAMAGE=1 python3 src/main.py
   - This is an accurate sender-path latency metric inside FluxCast (excludes TV decode/render delay).
 - `sender_health`
   - Periodic telemetry of process health and transmitted-byte counter.
+- `capture_encode`
+  - Emitted when a desktop capture/encode path starts (including after SIGUSR1 rebind).
+  - Fields: `capture_path` (`dmabuf` or `pipe`), `encoder` (e.g. `h264_vaapi`, `libx264`), `preference` (`dmabuf` / `vaapi` / `cpu`), `fallback` (true if not the first attempt).
 
 ## Practical Command Combinations
 
