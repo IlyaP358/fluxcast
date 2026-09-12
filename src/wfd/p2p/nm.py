@@ -83,12 +83,37 @@ def _nm_p2p_device_path(interface: Optional[str] = None) -> Optional[str]:
     requested = interface or ""
     for path in _object_paths(result.stdout):
         iface = _nm_get_string(path, "org.freedesktop.NetworkManager.Device", "Interface")
-        if not iface or "p2p" not in iface.lower():
+        device_type = _variant_uint(
+            _nm_get_property(
+                path,
+                "org.freedesktop.NetworkManager.Device",
+                "DeviceType",
+            )
+        )
+
+        # NM_DEVICE_TYPE_WIFI_P2P = 30.
+        # IWD commonly exposes the interface as /net/connman/iwd/0,
+        # so the interface name itself must not be used to detect P2P.
+        if device_type != 30:
             continue
-        if requested and requested not in iface:
-            continue
+
+        if requested and requested not in (iface or ""):
+            # With the IWD backend the virtual P2P device does not
+            # necessarily contain wlan0 in its Interface property.
+            if not (iface or "").startswith("/net/connman/iwd/"):
+                continue
+
         return path
     return None
+
+def _nm_p2p_uses_iwd(path: str) -> bool:
+    iface = _nm_get_string(
+        path,
+        "org.freedesktop.NetworkManager.Device",
+        "Interface",
+    )
+    return bool(iface and iface.startswith("/net/connman/iwd/"))
+
 
 def _nm_start_find(path: str, timeout: int) -> None:
     result = _gdbus_call([
