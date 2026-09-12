@@ -354,7 +354,7 @@ class VaapiQsvPlanShapeTest(unittest.TestCase):
         self.assertIn("-quality", plan.video_args)
         self.assertEqual(plan.video_args[plan.video_args.index("-quality") + 1], "4")
 
-    def test_vaapi_efficient_raises_quality_and_lowers_async_depth(self):
+    def test_vaapi_efficient_uses_faster_quality_cbr_no_low_power(self):
         os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
         os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "efficient"
         with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
@@ -369,7 +369,12 @@ class VaapiQsvPlanShapeTest(unittest.TestCase):
                     vf_scale=None,
                 )
         self.assertEqual(plan.video_args[plan.video_args.index("-quality") + 1], "7")
-        self.assertEqual(plan.video_args[plan.video_args.index("-async_depth") + 1], "1")
+        self.assertEqual(plan.video_args[plan.video_args.index("-async_depth") + 1], "2")
+        self.assertEqual(plan.video_args[plan.video_args.index("-b:v") + 1], "3M")
+        self.assertNotIn("-low_power", plan.video_args)
+        self.assertNotIn("CQP", plan.video_args)
+        self.assertIn("efficient power bias", plan.note)
+        self.assertNotIn("low_power", plan.note)
 
     def test_qsv_plan_uses_init_hw_device(self):
         os.environ["FLUXCAST_WFD_ENCODER"] = "qsv"
