@@ -480,6 +480,7 @@ class CaptureEncodeModeTest(unittest.TestCase):
         os.environ.pop("FLUXCAST_WFD_ENCODER", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE", None)
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
+        os.environ.pop("FLUXCAST_WFD_DMABUF_ALLOW_SCALED", None)
 
     def test_default_capture_encode_is_pipe(self):
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE", None)
@@ -513,17 +514,40 @@ class CaptureEncodeModeTest(unittest.TestCase):
         self.assertEqual(hw_encode.vaapi_quality_for_bias("efficient"), "5")
         self.assertEqual(hw_encode.vaapi_quality_for_bias("full"), "4")
 
-    def test_scaled_monitor_skips_dmabuf(self):
+    def test_scaled_monitor_allows_dmabuf_by_default(self):
         os.environ["FLUXCAST_WFD_CAPTURE_ENCODE"] = "auto"
         os.environ["FLUXCAST_WFD_ENCODER"] = "auto"
+        os.environ.pop("FLUXCAST_WFD_DMABUF_ALLOW_SCALED", None)
         # Monitor NamedTuple has no scale — lookup via monitor_scale.
         mon = mock.Mock(spec=["name"])
         mon.name = "hotyeah-TV"
         with mock.patch.object(hw_encode, "_vaapi_usable", return_value=True):
             with mock.patch.object(hw_encode, "_requested_gpu_encode", return_value=True):
                 with mock.patch.object(hw_encode, "monitor_scale", return_value=2.0):
-                    self.assertFalse(hw_encode.prefer_wf_recorder_vaapi_dmabuf(mon))
+                    self.assertTrue(hw_encode.prefer_wf_recorder_vaapi_dmabuf(mon))
                 with mock.patch.object(hw_encode, "monitor_scale", return_value=1.0):
+                    self.assertTrue(hw_encode.prefer_wf_recorder_vaapi_dmabuf(mon))
+
+    def test_scaled_monitor_can_deny_dmabuf(self):
+        os.environ["FLUXCAST_WFD_CAPTURE_ENCODE"] = "auto"
+        os.environ["FLUXCAST_WFD_ENCODER"] = "auto"
+        os.environ["FLUXCAST_WFD_DMABUF_ALLOW_SCALED"] = "0"
+        mon = mock.Mock(spec=["name"])
+        mon.name = "hotyeah-TV"
+        with mock.patch.object(hw_encode, "_vaapi_usable", return_value=True):
+            with mock.patch.object(hw_encode, "_requested_gpu_encode", return_value=True):
+                with mock.patch.object(hw_encode, "monitor_scale", return_value=2.0):
+                    self.assertFalse(hw_encode.prefer_wf_recorder_vaapi_dmabuf(mon))
+
+    def test_fractional_scale_allows_dmabuf_by_default(self):
+        os.environ["FLUXCAST_WFD_CAPTURE_ENCODE"] = "auto"
+        os.environ["FLUXCAST_WFD_ENCODER"] = "auto"
+        os.environ.pop("FLUXCAST_WFD_DMABUF_ALLOW_SCALED", None)
+        mon = mock.Mock(spec=["name"])
+        mon.name = "hotyeah-TV"
+        with mock.patch.object(hw_encode, "_vaapi_usable", return_value=True):
+            with mock.patch.object(hw_encode, "_requested_gpu_encode", return_value=True):
+                with mock.patch.object(hw_encode, "monitor_scale", return_value=1.6):
                     self.assertTrue(hw_encode.prefer_wf_recorder_vaapi_dmabuf(mon))
 
 if __name__ == "__main__":
