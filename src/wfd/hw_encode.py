@@ -4,8 +4,10 @@ Default encode path stays historical libx264 so existing FluxCast users see no
 pipeline change. Set FLUXCAST_WFD_ENCODER to vaapi, qsv, or auto (VAAPI then
 QSV then libx264) to opt into GPU encode.
 
-When a session is on battery or the power-profiles-daemon power-saver profile,
-bitrate / encoder presets bias toward efficient — including for libx264.
+Automatic battery / power-saver encode bias only engages when GPU encode was
+opted in (vaapi / qsv / auto) or FLUXCAST_WFD_ENCODE_BIAS is set explicitly.
+Default libx264 sessions keep historical bitrate and presets. When a GPU
+request falls back to libx264, bias still applies because the request was GPU.
 """
 
 from __future__ import annotations
@@ -53,6 +55,13 @@ def _vaapi_device() -> str:
         if os.path.exists(path):
             return path
     return "/dev/dri/renderD128"
+
+
+def _vaapi_usable() -> bool:
+    """True when ffmpeg has h264_vaapi and the chosen render node exists."""
+    if not _ffmpeg_has_encoder("h264_vaapi"):
+        return False
+    return os.path.exists(_vaapi_device())
 
 
 def _sysfs_text(path: str) -> Optional[str]:
@@ -139,18 +148,33 @@ def power_bias() -> str:
 
 
 def _level_to_idc(level: str) -> str:
-    """Convert FluxCast levels like '3.1' / '4.0' to VAAPI level_idc '31' / '40'."""
-    text = (level or "3.1").strip()
+    """Convert FluxCast levels like '3.1' / '4.0' to VAAPI level_idc '31' / '40'.
+
+    Empty / whitespace-only input defaults to H.264 Level 3.1 (``31``), the
+    common WFD HD floor. Digits-only values are returned as-is (already idc).
+    Any other unparseable non-empty string raises ``ValueError``.
+    """
+    text = (level or "").strip()
+    if not text:
+        return "31"
     if text.isdigit():
         return text
     try:
-        major, minor = text.split(".", 1)
-        return f"{int(major)}{int(minor)}"
-    except Exception:
-        return "31"
+        major_s, minor_s = text.split(".", 1)
+        major, minor = int(major_s), int(minor_s)
+    except ValueError as exc:
+        raise ValueError(
+            f"unsupported H.264 level {level!r}; expected 'M.m' (e.g. '3.1') or idc digits"
+        ) from exc
+    if major < 0 or minor < 0 or minor > 9:
+        raise ValueError(
+            f"unsupported H.264 level {level!r}; minor digit must be 0-9"
+        )
+    return f"{major}{minor}"
 
 
-def _map_vaapi_profile(h264_profile: str) -> str:
+def _map_h264_profile(h264_profile: str) -> str:
+    """Normalize to constrained_baseline | main | high for hardware encoders."""
     value = (h264_profile or "baseline").strip().lower()
     if value in ("baseline", "constrained_baseline", "cbp"):
         return "constrained_baseline"
@@ -161,10 +185,22 @@ def _map_vaapi_profile(h264_profile: str) -> str:
     return "constrained_baseline"
 
 
+def _qsv_profile(h264_profile: str) -> str:
+    """QSV accepts baseline/main/high; map constrained_baseline → baseline."""
+    mapped = _map_h264_profile(h264_profile)
+    if mapped == "constrained_baseline":
+        return "baseline"
+    return mapped
+
+
 def _requested_encoder() -> str:
     # Default libx264 preserves the historical WFD pipeline for existing users.
     # Opt into GPU with FLUXCAST_WFD_ENCODER=vaapi|qsv|auto.
     return os.environ.get("FLUXCAST_WFD_ENCODER", "libx264").strip().lower() or "libx264"
+
+
+def _requested_gpu_encode() -> bool:
+    return _requested_encoder() not in ("libx264", "x264", "software", "sw")
 
 
 def apply_bitrate_bias(bitrate_text: str, bias: str) -> str:
@@ -187,13 +223,14 @@ def probe_encoder(prefer: str = "libx264") -> str:
     if prefer in ("libx264", "x264", "software", "sw"):
         return "libx264"
     if prefer == "vaapi":
-        return "vaapi" if _ffmpeg_has_encoder("h264_vaapi") else "libx264"
+        # Same device check as auto — missing render node must not select VAAPI.
+        return "vaapi" if _vaapi_usable() else "libx264"
     if prefer == "qsv":
         return "qsv" if _ffmpeg_has_encoder("h264_qsv") else "libx264"
     if prefer != "auto":
         return "libx264"
     # Explicit auto only: VAAPI, then QSV, then software.
-    if _ffmpeg_has_encoder("h264_vaapi") and os.path.exists(_vaapi_device()):
+    if _vaapi_usable():
         return "vaapi"
     if _ffmpeg_has_encoder("h264_qsv"):
         return "qsv"
@@ -209,15 +246,20 @@ def build_encode_plan(
     bitrate: str,
     bufsize: str,
     vf_scale: Optional[str],
+    output_height: Optional[int] = None,
 ) -> EncodePlan:
     """Build ffmpeg argv fragments for the chosen encoder.
 
     vf_scale is either None (source matches output; format only) or a full
     software letterbox/scale filter string from encoding._letterbox_vf.
+
+    output_height selects the historical libx264 preset when bias is full:
+    ultrafast above 1080p, veryfast otherwise (matches pre-hw-encode FluxCast).
     """
     bias = power_bias()
     choice = probe_encoder(_requested_encoder())
     level_idc = _level_to_idc(level)
+    wanted_gpu = _requested_gpu_encode()
 
     if choice == "vaapi":
         device = _vaapi_device()
@@ -234,7 +276,7 @@ def build_encode_plan(
             vf=["-vf", vf],
             video_args=[
                 "-c:v", "h264_vaapi",
-                "-profile:v", _map_vaapi_profile(h264_profile),
+                "-profile:v", _map_h264_profile(h264_profile),
                 "-level", level_idc,
                 "-bf", "0",
                 "-g", str(gop),
@@ -261,9 +303,11 @@ def build_encode_plan(
             vf=["-vf", vf],
             video_args=[
                 "-c:v", "h264_qsv",
-                "-profile:v", "baseline" if "baseline" in (h264_profile or "").lower() else h264_profile,
+                "-profile:v", _qsv_profile(h264_profile),
+                "-level", level_idc,
                 "-bf", "0",
                 "-g", str(gop),
+                "-keyint_min", str(gop),
                 "-r", str(fps),
                 "-b:v", bitrate,
                 "-maxrate", bitrate,
@@ -273,8 +317,19 @@ def build_encode_plan(
             note=f"h264_qsv ({bias} power bias)",
         )
 
-    # Software fallback — same shape as the historical FluxCast path.
-    preset = "ultrafast" if bias == "efficient" else "veryfast"
+    # Software path — same shape as the historical FluxCast argv.
+    # full bias: ultrafast above 1080p (CPU headroom), veryfast otherwise.
+    # efficient bias: always ultrafast.
+    if bias == "efficient":
+        preset = "ultrafast"
+    elif output_height is not None and output_height > 1080:
+        preset = "ultrafast"
+    else:
+        preset = "veryfast"
+    if wanted_gpu:
+        note = f"libx264 {preset} ({bias} power bias; no usable GPU encoder)"
+    else:
+        note = f"libx264 {preset} ({bias} power bias)"
     return EncodePlan(
         name="libx264",
         pre_input=[],
@@ -296,5 +351,5 @@ def build_encode_plan(
             "-bufsize", bufsize,
             "-x264-params", "repeat-headers=1:aud=1",
         ],
-        note=f"libx264 {preset} ({bias} power bias; no usable GPU encoder)",
+        note=note,
     )

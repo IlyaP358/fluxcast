@@ -108,6 +108,7 @@ def start_experimental_backend(args) -> None:
         latency_log_path=getattr(args, "wfd_latency_log", None),
         capture_backend=getattr(args, "wfd_capture_backend", "auto"),
         peer_name=peer.name,
+        peer_address=peer.address,
         uibc=getattr(args, "wfd_uibc", False),
         aosp_pmt_pid=getattr(args, "wfd_aosp_pmt_pid", False),
         dump_ts_path=getattr(args, "wfd_dump_ts", None),
