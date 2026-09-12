@@ -87,6 +87,46 @@ class FfmpegProgressArgsTest(unittest.TestCase):
         self.assertIn("-stats", args)
 
 
+class UfwSessionHintTest(unittest.TestCase):
+    """On a ufw host the firewalld path opens nothing and used to print
+    nothing, so the user got a session that waits for an RTSP connection the
+    firewall is dropping, with no clue why (#98).
+    """
+
+    def _hint_output(self, ufw_enabled):
+        buf = io.StringIO()
+        with (
+            patch_all("_firewalld_active", return_value=False),
+            patch_all("_ufw_enabled", return_value=ufw_enabled),
+            contextlib.redirect_stdout(buf),
+        ):
+            opened = wfd._open_wfd_firewall_port(wfd.WFD_RTSP_PORT)
+        self.assertFalse(opened)  # never claims to have opened anything
+        return buf.getvalue()
+
+    def test_enabled_ufw_prints_the_port_and_command(self):
+        out = self._hint_output(True)
+        self.assertIn(str(wfd.WFD_RTSP_PORT), out)
+        self.assertIn(f"ufw allow {wfd.WFD_RTSP_PORT}/tcp", out)
+
+    def test_disabled_ufw_stays_quiet(self):
+        self.assertEqual(self._hint_output(False), "")
+
+    def test_unknown_ufw_state_stays_quiet(self):
+        # Guessing out loud on a host we could not read is just noise.
+        self.assertEqual(self._hint_output(None), "")
+
+    def test_hint_runs_no_subprocess(self):
+        # The connect path must not block on a firewall probe (#114).
+        with (
+            patch_all("_firewalld_active", return_value=False),
+            patch_all("_ufw_enabled", return_value=True),
+            patch_all("_run", side_effect=AssertionError("no subprocess here")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            wfd._open_wfd_firewall_port(wfd.WFD_RTSP_PORT)
+
+
 class FirewallPortTest(unittest.TestCase):
     def test_existing_port_skips_privileged_add(self):
         calls = []
