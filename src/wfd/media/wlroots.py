@@ -13,16 +13,38 @@ from ..env import _detect_audio_monitor
 from ..hw_encode import (
     apply_bitrate_bias,
     build_encode_plan,
+    capture_encode_attempts,
     capture_encode_mode,
+    capture_encode_preference,
     power_bias,
     prefer_wf_recorder_vaapi_dmabuf,
     vaapi_quality_for_bias,
 )
+from ..latency import _append_latency_log
 from ..modes import _h264_level_for_mode
 from ..net import _ffmpeg_sender_args
 
 
 class WlrootsMixin:
+    def _emit_capture_encode(
+        self,
+        *,
+        capture_path: str,
+        encoder: str,
+        preference: str,
+        fallback: bool,
+    ) -> None:
+        # Field name capture_path — latency helper already uses positional path=
+        # for the log file location.
+        _append_latency_log(
+            getattr(self.config, "latency_log_path", None),
+            "capture_encode",
+            capture_path=capture_path,
+            encoder=encoder,
+            preference=preference,
+            fallback=bool(fallback),
+        )
+
     def _start_desktop_wf_recorder(self) -> None:
         wf_recorder = find_wf_recorder()
         if not wf_recorder:
@@ -32,34 +54,69 @@ class WlrootsMixin:
         if monitor is None:
             raise WFDNotReady("wf-recorder backend requires a selected monitor.")
 
-        if prefer_wf_recorder_vaapi_dmabuf(monitor):
+        preference = capture_encode_preference()
+        attempts = capture_encode_attempts(preference)
+        last_exc: Exception | None = None
+
+        for index, attempt in enumerate(attempts):
+            fallback = index > 0
             try:
-                self._start_wf_recorder_vaapi_dmabuf(wf_recorder, monitor)
+                if attempt == "dmabuf":
+                    if not prefer_wf_recorder_vaapi_dmabuf(monitor):
+                        raise WFDNotReady(
+                            "DMA-BUF not available (VAAPI missing, scaled deny, "
+                            "or RENDER ENGINE is not dmabuf)"
+                        )
+                    self._start_wf_recorder_vaapi_dmabuf(wf_recorder, monitor)
+                    self._emit_capture_encode(
+                        capture_path="dmabuf",
+                        encoder="h264_vaapi",
+                        preference=preference,
+                        fallback=fallback,
+                    )
+                    if fallback:
+                        print(
+                            "[FluxCast WFD Media] RENDER ENGINE fell back to "
+                            "GPU · DMA-BUF"
+                        )
+                    return
+
+                encoder = "vaapi" if attempt == "vaapi" else "libx264"
+                if attempt == "vaapi" and fallback:
+                    print(
+                        "[FluxCast WFD Media] DMA-BUF failed; trying GPU · VAAPI "
+                        "(pipe hwupload)"
+                    )
+                elif attempt == "cpu" and fallback:
+                    print(
+                        "[FluxCast WFD Media] RENDER ENGINE fell back to CPU "
+                        "(libx264)"
+                    )
+                plan_name = self._start_wf_recorder_raw_pipe(
+                    wf_recorder, monitor, encoder_override=encoder
+                )
+                resolved = plan_name or encoder
+                if resolved == "vaapi":
+                    resolved = "h264_vaapi"
+                elif resolved == "qsv":
+                    resolved = "h264_qsv"
+                self._emit_capture_encode(
+                    capture_path="pipe",
+                    encoder=resolved,
+                    preference=preference,
+                    fallback=fallback,
+                )
                 return
             except WFDNotReady as exc:
+                last_exc = exc
                 print(
-                    "[FluxCast WFD Media] wf-recorder VAAPI/DMA-BUF path failed "
-                    f"({exc}); falling back to raw pipe + ffmpeg encode"
+                    f"[FluxCast WFD Media] RENDER ENGINE {attempt} failed ({exc})"
                 )
-        else:
-            from ..hw_encode import hypr_monitor_scale
+                continue
 
-            scale = hypr_monitor_scale(str(getattr(monitor, "name", "") or ""))
-            if (
-                abs(scale - 1.0) > 0.01
-                and capture_encode_mode() in ("auto", "vaapi")
-                and (os.environ.get("FLUXCAST_WFD_DMABUF_ALLOW_SCALED", "") or "")
-                .strip()
-                .lower()
-                in ("0", "false", "no", "off", "never")
-            ):
-                print(
-                    "[FluxCast WFD Media] Skipping wf-recorder DMA-BUF on scaled "
-                    f"output (scale={scale:g}, DMABUF_ALLOW_SCALED denied); "
-                    "using pipe hwupload"
-                )
-
-        self._start_wf_recorder_raw_pipe(wf_recorder, monitor)
+        if last_exc is not None:
+            raise last_exc
+        raise WFDNotReady("No RENDER ENGINE capture path succeeded.")
 
     def _desktop_bitrate_plan(self, monitor):
         src_res = f"{monitor.width}x{monitor.height}"
@@ -200,13 +257,19 @@ class WlrootsMixin:
 
         self._spawn_wf_ffmpeg(wf_cmd, ffmpeg_cmd)
 
-    def _start_wf_recorder_raw_pipe(self, wf_recorder: str, monitor) -> None:
-        """Raw NV12 pipe → ffmpeg hwupload → VAAPI encode (glitch-free).
+    def _start_wf_recorder_raw_pipe(
+        self,
+        wf_recorder: str,
+        monitor,
+        encoder_override: str | None = None,
+    ) -> str:
+        """Raw NV12 pipe → ffmpeg encode (VAAPI hwupload or libx264).
 
         Prefer ``-x nv12`` so we skip CPU ``format=nv12`` before hwupload.
         Falls back to yuv420p + format=nv12 if needed via encode plan.
-        Prefer DMA-BUF when opted in; this pipe path is the fallback (and the
-        escape hatch when ``FLUXCAST_WFD_DMABUF_ALLOW_SCALED=0``).
+        Used for RENDER ENGINE ``vaapi`` / ``cpu`` and as DMA-BUF fallback.
+
+        Returns the resolved encode plan name (``vaapi`` / ``qsv`` / ``libx264``).
         """
         meta = self._desktop_bitrate_plan(monitor)
         audio_monitor = self.config.audio_device or _detect_audio_monitor()
@@ -222,6 +285,7 @@ class WlrootsMixin:
             vf_scale=meta["vf_scale"],
             output_height=meta["parsed_out"][1],
             input_pix_fmt=input_pix,
+            encoder_override=encoder_override,
         )
 
         wf_cmd = [
@@ -277,9 +341,13 @@ class WlrootsMixin:
             print(f"[FluxCast WFD Media] Capturing audio  : {audio_monitor}")
         if meta["out_res"] != meta["src_res"]:
             print(f"[FluxCast WFD Media] Scaling output  : {meta['out_res']}")
+        pipe_note = (
+            f"pipe {input_pix}+hwupload"
+            if plan.name in ("vaapi", "qsv")
+            else f"pipe {input_pix}+software"
+        )
         print(
-            f"[FluxCast WFD Media] Video encoder   : {plan.note} "
-            f"[pipe {input_pix}+hwupload]"
+            f"[FluxCast WFD Media] Video encoder   : {plan.note} [{pipe_note}]"
         )
         print(
             f"[FluxCast WFD Media] RTP target      : "
@@ -287,6 +355,7 @@ class WlrootsMixin:
         )
 
         self._spawn_wf_ffmpeg(wf_cmd, ffmpeg_cmd)
+        return plan.name
 
     def _spawn_wf_ffmpeg(self, wf_cmd: list[str], ffmpeg_cmd: list[str]) -> None:
         wf_proc = subprocess.Popen(wf_cmd, stdout=subprocess.PIPE, stderr=None)

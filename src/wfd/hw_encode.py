@@ -70,7 +70,18 @@ def capture_encode_mode() -> str:
     ``pipe`` / ``raw`` / empty — historical wf-recorder rawvideo → ffmpeg encode.
     ``vaapi`` / ``dmabuf`` — wf-recorder h264_vaapi with DMA-BUF (required).
     ``auto`` — prefer DMA-BUF when VAAPI is usable and GPU encode was requested.
+
+    Prefer :func:`capture_encode_preference` for Omarchy RENDER METHOD
+    (``dmabuf`` / ``vaapi`` / ``cpu``); this legacy helper still drives env-only
+    callers.
     """
+    pref = _capture_encode_preference_raw()
+    if pref == "cpu":
+        return "pipe"
+    if pref == "vaapi":
+        return "pipe"
+    if pref == "dmabuf":
+        return "vaapi"
     raw = os.environ.get("FLUXCAST_WFD_CAPTURE_ENCODE", "").strip().lower()
     if raw in ("pipe", "raw", "cpu", "hwupload"):
         return "pipe"
@@ -79,6 +90,57 @@ def capture_encode_mode() -> str:
     if raw == "auto":
         return "auto"
     return "pipe"
+
+
+def _capture_encode_preference_raw() -> str:
+    """Return ``dmabuf``|``vaapi``|``cpu``|``\"\"`` from file/env (no legacy map)."""
+    path = (os.environ.get("FLUXCAST_WFD_CAPTURE_ENCODE_FILE") or "").strip()
+    if path:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                raw = fh.read().strip().lower()
+            if raw in ("dmabuf", "vaapi", "cpu"):
+                return raw
+        except OSError:
+            pass
+    raw = (os.environ.get("FLUXCAST_WFD_CAPTURE_ENCODE_PREF") or "").strip().lower()
+    if raw in ("dmabuf", "vaapi", "cpu"):
+        return raw
+    return ""
+
+
+def capture_encode_preference() -> str:
+    """RENDER METHOD preference: ``dmabuf`` | ``vaapi`` | ``cpu``.
+
+    Reads ``FLUXCAST_WFD_CAPTURE_ENCODE_FILE`` (live-updatable), then
+    ``FLUXCAST_WFD_CAPTURE_ENCODE_PREF``, then derives from legacy
+    ``FLUXCAST_WFD_CAPTURE_ENCODE`` / ``FLUXCAST_WFD_ENCODER``.
+    """
+    raw = _capture_encode_preference_raw()
+    if raw:
+        return raw
+    enc = (os.environ.get("FLUXCAST_WFD_ENCODER") or "").strip().lower()
+    if enc in ("libx264", "x264", "software", "sw"):
+        return "cpu"
+    mode = (os.environ.get("FLUXCAST_WFD_CAPTURE_ENCODE") or "").strip().lower()
+    if mode in ("pipe", "raw", "hwupload"):
+        return "vaapi" if enc not in ("libx264", "x264", "software", "sw", "") else "cpu"
+    if mode in ("vaapi", "dmabuf", "gpu", "auto"):
+        return "dmabuf"
+    # Omarchy default when GPU encode was requested via encoder=auto.
+    if enc in ("auto", "vaapi", "qsv"):
+        return "dmabuf"
+    return "cpu"
+
+
+def capture_encode_attempts(preference: Optional[str] = None) -> list[str]:
+    """Ordered RENDER METHOD attempts ending at CPU for GPU prefs."""
+    pref = preference or capture_encode_preference()
+    if pref == "dmabuf":
+        return ["dmabuf", "vaapi", "cpu"]
+    if pref == "vaapi":
+        return ["vaapi", "cpu"]
+    return ["cpu"]
 
 
 def hypr_monitor_scale(monitor_name: str) -> float:
@@ -109,12 +171,21 @@ def prefer_wf_recorder_vaapi_dmabuf(monitor=None) -> bool:
     Proven at integer scale 2 with ``out_range=tv`` / no ``-r`` / CQP.
 
     Escape hatches:
-    - ``FLUXCAST_WFD_CAPTURE_ENCODE=pipe`` — never DMA-BUF
+    - RENDER METHOD ``vaapi`` / ``cpu`` (or ``FLUXCAST_WFD_CAPTURE_ENCODE=pipe``)
     - ``FLUXCAST_WFD_DMABUF_ALLOW_SCALED=0`` — pipe only when scale != 1
     """
-    mode = capture_encode_mode()
-    if mode == "pipe":
+    pref = capture_encode_preference()
+    if pref in ("vaapi", "cpu"):
         return False
+    if pref != "dmabuf":
+        # Legacy path without RENDER METHOD preference.
+        mode = capture_encode_mode()
+        if mode == "pipe":
+            return False
+        if mode == "auto" and not _requested_gpu_encode():
+            return False
+        if mode not in ("vaapi", "auto"):
+            return False
     if not _vaapi_usable():
         return False
     # Monitor NamedTuple has no scale — look up Hyprland when needed.
@@ -131,12 +202,7 @@ def prefer_wf_recorder_vaapi_dmabuf(monitor=None) -> bool:
             # Default allow; only an explicit deny forces the pipe fallback.
             if allow in ("0", "false", "no", "off", "never"):
                 return False
-    if mode == "vaapi":
-        return True
-    # auto: prefer DMA-BUF when GPU encode is requested.
-    if mode == "auto":
-        return _requested_gpu_encode()
-    return False
+    return True
 
 
 def vaapi_quality_for_bias(bias: Optional[str] = None) -> str:
@@ -333,6 +399,7 @@ def build_encode_plan(
     vf_scale: Optional[str],
     output_height: Optional[int] = None,
     input_pix_fmt: str = "yuv420p",
+    encoder_override: Optional[str] = None,
 ) -> EncodePlan:
     """Build ffmpeg argv fragments for the chosen encoder.
 
@@ -342,13 +409,17 @@ def build_encode_plan(
     input_pix_fmt: pipe pixel format. ``nv12`` skips CPU ``format=nv12`` before
     hwupload (paired with wf-recorder ``-x nv12``).
 
+    encoder_override: force ``vaapi`` / ``qsv`` / ``libx264`` for RENDER METHOD
+    fallbacks (ignores ``FLUXCAST_WFD_ENCODER`` for this plan only).
+
     output_height selects the historical libx264 preset when bias is full:
     ultrafast above 1080p, veryfast otherwise (matches pre-hw-encode FluxCast).
     """
     bias = power_bias()
-    choice = probe_encoder(_requested_encoder())
+    requested = (encoder_override or _requested_encoder()).strip().lower()
+    choice = probe_encoder(requested)
     level_idc = _level_to_idc(level)
-    wanted_gpu = _requested_gpu_encode()
+    wanted_gpu = requested not in ("libx264", "x264", "software", "sw")
     pix = (input_pix_fmt or "yuv420p").strip().lower()
 
     if choice == "vaapi":

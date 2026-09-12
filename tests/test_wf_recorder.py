@@ -42,6 +42,8 @@ class WlrootsDamageFlagTest(unittest.TestCase):
         os.environ.pop("FLUXCAST_WFD_ENCODER", None)
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE", None)
+        os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE_FILE", None)
+        os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE_PREF", None)
 
     def _capture_cmds(self, *, encoder="libx264", capture_encode=None, bias="full"):
         from types import SimpleNamespace
@@ -147,6 +149,43 @@ class WlrootsDamageFlagTest(unittest.TestCase):
         self.assertNotIn("rawvideo", cmds["wf"])
         self.assertEqual(cmds["ffmpeg"][cmds["ffmpeg"].index("-c:v") + 1], "copy")
         self.assertNotIn("hwupload", " ".join(cmds["ffmpeg"]))
+
+    def test_dmabuf_failure_falls_back_to_vaapi_pipe(self):
+        """RENDER ENGINE dmabuf → on DMA failure try GPU · VAAPI pipe."""
+        import tempfile
+        from pathlib import Path
+        from wfd.config import WFDNotReady
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = Path(tmp) / "capture-encode"
+            pref.write_text("dmabuf\n", encoding="utf-8")
+            os.environ["FLUXCAST_WFD_CAPTURE_ENCODE_FILE"] = str(pref)
+            os.environ["FLUXCAST_WFD_ENCODER"] = "auto"
+            with mock.patch("wfd.hw_encode._vaapi_usable", return_value=True):
+                with mock.patch("wfd.hw_encode.hypr_monitor_scale", return_value=1.0):
+                    with mock.patch(
+                        "wfd.media.wlroots.WlrootsMixin._start_wf_recorder_vaapi_dmabuf",
+                        side_effect=WFDNotReady("dma boom"),
+                    ):
+                        cmds = self._capture_cmds(encoder="auto", capture_encode=None)
+        self.assertIn("rawvideo", cmds["wf"])
+        self.assertIn("h264_vaapi", " ".join(cmds["ffmpeg"]))
+        self.assertIn("hwupload", " ".join(cmds["ffmpeg"]))
+
+    def test_cpu_preference_uses_libx264_pipe(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = Path(tmp) / "capture-encode"
+            pref.write_text("cpu\n", encoding="utf-8")
+            os.environ["FLUXCAST_WFD_CAPTURE_ENCODE_FILE"] = str(pref)
+            os.environ["FLUXCAST_WFD_ENCODER"] = "auto"
+            with mock.patch("wfd.hw_encode._vaapi_usable", return_value=True):
+                cmds = self._capture_cmds(encoder="auto", capture_encode=None)
+        self.assertIn("rawvideo", cmds["wf"])
+        self.assertIn("libx264", " ".join(cmds["ffmpeg"]))
+        self.assertNotIn("h264_vaapi", " ".join(cmds["ffmpeg"]))
 
 
 if __name__ == "__main__":
