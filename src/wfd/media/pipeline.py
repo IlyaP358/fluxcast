@@ -7,10 +7,13 @@ from ..config import WFDMediaConfig, WFDNotReady
 from ..env import _is_hyprland_session, _is_wayland_session, _wfd_capture_backend_order
 from ..gst import _gst_wfd_sender_available
 from ..net import _interface_for_ip, _netdev_tx_bytes, _rtp_url
+from ..outputs import monitor_fingerprint
 from .portal import PortalMixin
 from .testpattern import TestPatternMixin
 from .wlroots import WlrootsMixin
 from .x11 import X11Mixin
+
+
 
 
 class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
@@ -35,6 +38,10 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
         # True while restart_video() is swapping capture/encode processes.
         # RTSP keepalive/health probes skip hard-fail while this is set.
         self.restarting: bool = False
+        # Output geometry when desktop capture last (re)bound. A compositor
+        # reload/reseat can leave senders alive while feeding black frames;
+        # health probes compare live geometry to this fingerprint.
+        self.capture_geometry_fp: Optional[str] = None
 
     def start(self) -> None:
         if self.processes:
@@ -73,6 +80,34 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
             self._start_test_pattern()
         else:
             self._start_desktop()
+        self.remember_capture_geometry()
+
+    def capture_monitor_name(self) -> Optional[str]:
+        mon = self.config.monitor
+        if mon is None:
+            return None
+        name = getattr(mon, "name", None)
+        return str(name) if name else None
+
+    def remember_capture_geometry(self) -> None:
+        """Snapshot output geometry for the captured monitor after bind."""
+        name = self.capture_monitor_name()
+        if not name:
+            return
+        self.capture_geometry_fp = monitor_fingerprint(name)
+
+    def capture_geometry_drifted(self) -> bool:
+        """True when the captured output moved/resized since bind."""
+        if not self.capture_geometry_fp:
+            return False
+        name = self.capture_monitor_name()
+        if not name:
+            return False
+        current = monitor_fingerprint(name)
+        if current is None:
+            # Probe failed or output missing — force rebind to recover.
+            return True
+        return current != self.capture_geometry_fp
 
     def tx_summary(self) -> str:
         current = _netdev_tx_bytes(self.tx_interface)
@@ -102,7 +137,7 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
 
         Portal GStreamer path can respawn from the retained PipeWire fd.
         Desktop backends (wf-recorder/x11/…) tear down and re-launch the
-        sender so Hyprland geometry changes (eDP scale, extend reseat) do not
+        sender so output geometry changes (scale, extend reseat) do not
         leave a hollow RTSP session with dead capture PIDs.
         """
         import time as _time
@@ -146,6 +181,7 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
             # Brief pause so RTP source ports can be rebound by the new ffmpeg.
             _time.sleep(0.35)
             self._start_desktop()
+            self.remember_capture_geometry()
             print("[FluxCast WFD Media] Desktop capture pipeline restarted.")
         finally:
             self.restarting = False
