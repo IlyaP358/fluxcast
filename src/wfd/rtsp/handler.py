@@ -11,8 +11,11 @@ from ..dump import schedule_ts_dump_report
 from ..encoding import _parse_resolution
 from ..latency import _append_latency_log
 from ..media.pipeline import WFDMediaPipeline
+from ..mode_state import write_mode_state
 from ..modes import (
-    _choose_cea_mode, _encoder_h264_profile, _parse_sink_video_format,
+    _choose_cea_mode,
+    _encoder_h264_profile,
+    _parse_sink_video_format,
     _selected_video_format,
 )
 from ..net import _netdev_tx_bytes, _safe_source_port
@@ -230,8 +233,8 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         name = self.pending.pop(msg.cseq, "UNKNOWN")
         if not msg.status.startswith("200"):
             if name == "M16_KEEPALIVE":
-                # LG (or any TV) rejected our keepalive, STOP RESCHEDULING
-                # but keep the stream alive
+                # Keep streaming, but stop rescheduling if the sink still
+                # rejects bare-Session keepalives.
                 print(
                     f"[FluxCast WFD RTSP] M16 keepalive rejected: {msg.status} "
                     "— disabling keepalive, stream continues."
@@ -286,6 +289,11 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             )
             print(f"[FluxCast WFD RTSP] Negotiated media mode: {mode.name}")
             print(f"[FluxCast WFD RTSP] Selected video format: {self._video_format()}")
+            write_mode_state(
+                sink_format=self.sink_video_format,
+                current=mode,
+                peer_name=self.media_config.peer_name,
+            )
             self._send_m4_set_parameters()
         elif name == "M4_SET_PARAMETER":
             self._send_m5_trigger_setup()
@@ -511,23 +519,38 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         media = self.media
         # Only stop the chain if processes have already EXITED.
         # If media is None (portal dialog still open), keep sending keepalives.
-        if media is not None and not all(p.poll() is None for p in media.processes):
+        # While capture is being rebound (SIGUSR1), keep the keepalive chain alive.
+        if (
+            media is not None
+            and not getattr(media, "restarting", False)
+            and media.processes
+            and not all(p.poll() is None for p in media.processes)
+        ):
             return
         try:
+            # Some sinks return 454 if Session includes ";timeout=30" on M16 —
+            # they expect a bare session id. Without successful keepalives they
+            # TEARDOWN when the session timer fires.
             self._send_request(
                 "M16_KEEPALIVE",
                 "GET_PARAMETER",
                 self._rtsp_presentation_uri(),
-                headers={"Session": f"{self.session_id};timeout=30"},
+                headers={"Session": self.session_id},
             )
             print("[FluxCast WFD RTSP] M16 keepalive sent")
-            self._schedule_rtsp_keepalive(25.0)
+            # Stay under the common 30s session timeout advertised at SETUP.
+            self._schedule_rtsp_keepalive(20.0)
         except OSError:
             pass  # Socket dead -> DONT RESCHEDULE
 
     def _probe_tx(self) -> None:
         media = self.media
         if media is None:
+            return
+
+        # Capture rebind briefly kills sender PIDs — keep probing through it.
+        if getattr(media, "restarting", False):
+            self._schedule_probe(1.0)
             return
 
         states = []
@@ -584,6 +607,8 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             f"[FluxCast WFD Media] WARNING: RTP sender is not healthy "
             f"({detail}; {media.tx_summary()})"
         )
+        # Keep probing briefly so a mid-restart race does not permanently stop health checks.
+        self._schedule_probe(2.0)
 
     def _stop_media(self) -> None:
         if self.media is not None:

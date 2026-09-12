@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import time
@@ -9,6 +10,7 @@ from ..encoding import (
     _parse_resolution, _quality_floor_kbits, _vbv_bufsize,
 )
 from ..env import _detect_audio_monitor
+from ..hw_encode import apply_bitrate_bias, build_encode_plan, power_bias
 from ..modes import _h264_level_for_mode
 from ..net import _ffmpeg_sender_args
 
@@ -29,18 +31,46 @@ class WlrootsMixin:
         parsed_out = _parse_resolution(out_res) or (monitor.width, monitor.height)
         requested_kbits = _bitrate_to_kbits(self.config.bitrate)
         floor_kbits = _quality_floor_kbits(parsed_out[0], parsed_out[1], self.config.fps)
-        effective_kbits = max(requested_kbits, floor_kbits)
+        bias = power_bias()
+        # On battery / power-saver, do not force the clarity floor upward.
+        if bias == "efficient":
+            effective_kbits = requested_kbits
+        else:
+            effective_kbits = max(requested_kbits, floor_kbits)
         effective_bitrate = _kbits_to_bitrate_text(effective_kbits)
-        if effective_kbits > requested_kbits:
+        effective_bitrate = apply_bitrate_bias(effective_bitrate, bias)
+        if effective_kbits > requested_kbits and bias == "full":
             print(
                 "[FluxCast WFD Media] Raising bitrate for desktop clarity: "
                 f"{self.config.bitrate} -> {effective_bitrate}"
             )
 
+        level = _h264_level_for_mode(self.config)
+        vf_scale = None if out_res == src_res else _letterbox_vf(out_res)
+        plan = build_encode_plan(
+            h264_profile=self.config.h264_profile,
+            level=level,
+            fps=self.config.fps,
+            gop=gop,
+            bitrate=effective_bitrate,
+            bufsize=_vbv_bufsize(effective_bitrate, self.config),
+            vf_scale=vf_scale,
+        )
+
+        # Keep historical wf-recorder -D (continuous / no-damage) by default so
+        # existing FluxCast sessions do not change cadence. Opt into damage-
+        # aware capture with FLUXCAST_WFD_WF_RECORDER_DAMAGE=1 (omit -D; ffmpeg
+        # still enforces CFR with -r below).
+        damage_aware = os.environ.get("FLUXCAST_WFD_WF_RECORDER_DAMAGE", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
         wf_cmd = [
             wf_recorder,
             "-y",
-            "-D",
+        ]
+        if not damage_aware:
+            wf_cmd.append("-D")
+        wf_cmd += [
             "-r", str(self.config.fps),
             "-o", monitor.name,
             "-c", "rawvideo",
@@ -51,6 +81,7 @@ class WlrootsMixin:
 
         ffmpeg_cmd = [
             *_ffmpeg_sender_args(self.config.ffmpeg_stats),
+            *plan.pre_input,
             "-fflags", "+genpts",
             "-thread_queue_size", "1024",
             "-f", "nut",
@@ -68,28 +99,8 @@ class WlrootsMixin:
         else:
             ffmpeg_cmd += ["-map", "0:v:0"]
 
-        if out_res == src_res:
-            ffmpeg_cmd += ["-vf", "format=yuv420p"]
-        else:
-            ffmpeg_cmd += ["-vf", _letterbox_vf(out_res)]
-
-        ffmpeg_cmd += [
-            "-c:v", "libx264",
-            "-preset", "ultrafast" if parsed_out[1] > 1080 else "veryfast",
-            "-tune", "zerolatency",
-            "-profile:v", self.config.h264_profile,
-            "-level:v", _h264_level_for_mode(self.config),
-            "-pix_fmt", "yuv420p",
-            "-r", str(self.config.fps),
-            "-g", str(gop),
-            "-keyint_min", str(gop),
-            "-sc_threshold", "0",
-            "-bf", "0",
-            "-b:v", effective_bitrate,
-            "-maxrate", effective_bitrate,
-            "-bufsize", _vbv_bufsize(effective_bitrate, self.config),
-            "-x264-params", "repeat-headers=1:aud=1",
-        ]
+        ffmpeg_cmd += plan.vf
+        ffmpeg_cmd += plan.video_args
 
         if not self.config.no_audio:
             ffmpeg_cmd += [
@@ -109,6 +120,7 @@ class WlrootsMixin:
             print(f"[FluxCast WFD Media] Capturing audio  : {audio_monitor}")
         if out_res != src_res:
             print(f"[FluxCast WFD Media] Scaling output  : {out_res}")
+        print(f"[FluxCast WFD Media] Video encoder   : {plan.note}")
         print(
             f"[FluxCast WFD Media] RTP target      : "
             f"{self.tv_ip}:{self.sink_rtp_port} from local port {self.config.source_port}"
