@@ -597,6 +597,8 @@ class RtspUnhealthyProbeGraceTest(unittest.TestCase):
             tx_interface="p2p-wlan0",
             tx_baseline=0,
             tx_summary=mock.Mock(return_value="tx+0 KiB"),
+            restart_video=mock.Mock(),
+            capture_geometry_drifted=mock.Mock(return_value=False),
         )
         handler = mock.Mock()
         handler.media = media
@@ -606,6 +608,9 @@ class RtspUnhealthyProbeGraceTest(unittest.TestCase):
         handler.media_config = SimpleNamespace(latency_log_path=None)
         handler._unhealthy_probe_streak = streak
         handler._UNHEALTHY_PROBE_GRACE = _WFDRTSPHandler._UNHEALTHY_PROBE_GRACE
+        handler._last_interval_tx = None
+        handler._stagnant_tx_streak = 0
+        handler._last_lpcm_activity = None
         handler._schedule_probe = mock.Mock()
         return handler, _WFDRTSPHandler
 
@@ -618,8 +623,10 @@ class RtspUnhealthyProbeGraceTest(unittest.TestCase):
             cls._probe_tx(handler)
         self.assertEqual(handler._unhealthy_probe_streak, 1)
         handler._schedule_probe.assert_called_once_with(2.0)
+        handler.media.restart_video.assert_not_called()
 
-    def test_unhealthy_stops_after_grace(self):
+    def test_unhealthy_rebinds_after_grace(self):
+        """After grace, self-heal via restart_video instead of stopping probes."""
         from wfd.rtsp.handler import _WFDRTSPHandler
 
         dead = mock.Mock()
@@ -629,15 +636,16 @@ class RtspUnhealthyProbeGraceTest(unittest.TestCase):
         handler, cls = self._handler(processes=[dead], streak=grace)
         with patch_all("_netdev_tx_bytes", return_value=0):
             cls._probe_tx(handler)
-        self.assertEqual(handler._unhealthy_probe_streak, grace + 1)
-        handler._schedule_probe.assert_not_called()
+        handler.media.restart_video.assert_called_once()
+        self.assertEqual(handler._unhealthy_probe_streak, 0)
+        handler._schedule_probe.assert_called_once_with(5.0)
 
     def test_healthy_resets_unhealthy_streak(self):
         alive = mock.Mock()
         alive.poll.return_value = None
         alive.pid = 3
         handler, cls = self._handler(processes=[alive], streak=3)
-        with patch_all("_netdev_tx_bytes", return_value=0):
+        with patch_all("_netdev_tx_bytes", return_value=10000):
             cls._probe_tx(handler)
         self.assertEqual(handler._unhealthy_probe_streak, 0)
         handler._schedule_probe.assert_called_once_with(5.0)
