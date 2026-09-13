@@ -34,13 +34,17 @@ class _FakeMuxer:
 
 class _FakeProc:
     def __init__(self, cmd, *args, **kwargs):
+        import io
+
         self.cmd = list(cmd)
         self.args = args
         self.kwargs = kwargs
         self.pid = 1
         self.returncode = 0
-        self.stdout = ""
-        self.stderr = ""
+        self.stdout = kwargs.get("stdout") or ""
+        # Empty byte stream so stderr watcher thread exits immediately.
+        err = kwargs.get("stderr")
+        self.stderr = io.BytesIO(b"") if err is not None else None
 
     def poll(self):
         return None
@@ -144,6 +148,8 @@ class LpcmAudioCaptureCmdTest(unittest.TestCase):
         self.assertIn("-a", aud_cmd)
         self.assertEqual(aud_cmd[aud_cmd.index("--target") + 1], "miracast.monitor")
         self.assertIn("application.name=fluxcast-wfd-capture", aud_cmd)
+        self.assertIn("media.role=Abstract", aud_cmd)
+        self.assertNotIn("media.role=Video", aud_cmd)
         self.assertNotIn("ffmpeg", aud_cmd)
         self.assertNotEqual(aud_cmd[0], "ffmpeg")
         self.assertEqual(harness.processes[1].cmd, aud_cmd)
