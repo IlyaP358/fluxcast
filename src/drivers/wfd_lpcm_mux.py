@@ -10,12 +10,12 @@ be patched at runtime --- hence this pure-Python muxer.
 from __future__ import annotations
 
 import gc
+import logging
+import queue
 import socket
 import struct
 import threading
 import time
-import queue
-import logging
 from typing import Optional
 
 log = logging.getLogger("FluxCast.WFDLPCMMux")
@@ -27,8 +27,11 @@ TS_SYNC = 0x47
 
 PID_PAT  = 0x0000
 PID_PMT  = 0x0100
-PID_PCR  = 0x1000   # same PID as video
-PID_VID  = 0x1000   # H.264
+# WFD PMT lists PCR_PID apart from elementary streams: PCR is the program
+# clock reference (adaptation-only packets), video/audio are PES streams.
+# Assigned PIDs: PCR 0x1000, H.264 0x1011, LPCM 0x1100.
+PID_PCR  = 0x1000   # PCR
+PID_VID  = 0x1011   # H.264
 PID_AUD  = 0x1100   # LPCM
 
 STREAM_TYPE_H264 = 0x1B
@@ -36,11 +39,41 @@ STREAM_TYPE_LPCM = 0x83   # WFD / WIDI LPCM (NOT 0x8b which is Blu-ray)
 
 PMT_PROG_NUM = 0x0001
 
-# WIDI LPCM sub-stream header (4 bytes) + DVD-PCM audio frame header (3 bytes).
-# first_access_unit_pointer == 7: 4 bytes sub-stream header + 3 bytes frame header.
-# Audio frame header: 16-bit quantization, 48 kHz, stereo (2ch), DRC off.
-WIDI_LPCM_HEADER  = bytes([0xA0, 0x06, 0x00, 0x07])
-LPCM_FRAME_HEADER = bytes([0x00, 0x01, 0x80])
+# Audio parameters (fixed for WFD LPCM)
+AUDIO_RATE     = 48_000
+AUDIO_CHANNELS = 2
+AUDIO_BITS     = 16
+LPCM_FRAMES_PER_AU = 80
+LPCM_AUS_PER_PES = 6
+LPCM_FRAME_BYTES = AUDIO_CHANNELS * (AUDIO_BITS // 8)  # 4
+LPCM_PCM_BYTES_PER_PES = LPCM_AUS_PER_PES * LPCM_FRAMES_PER_AU * LPCM_FRAME_BYTES
+LPCM_PES_STUFFING = 2
+
+# WFD LPCM sub-stream header (4 bytes) + fixed PCM body.
+# 6 AUs × 80 stereo frames × 4 bytes/frame = 1920 bytes PCM.
+# Header: 16-bit quantization, 48 kHz, stereo (2ch).
+WFD_LPCM_HEADER = bytes([
+    0xA0,
+    LPCM_AUS_PER_PES,
+    0x00,
+    (0 << 6) | (2 << 3) | 1,
+])
+
+# PMT ES descriptors
+AVC_VIDEO_DESCRIPTOR = bytes([
+    40, 4,       # tag, length
+    0x42,        # profile_idc = Baseline
+    0x40,        # constraint_set1 (constrained baseline)
+    0x1F,        # level_idc = 3.1
+    0x3F,        # AVC_still/24h flags + reserved
+])
+AVC_TIMING_HRD_DESCRIPTOR = bytes([42, 2, 0x7E, 0x1F])
+LPCM_ES_DESCRIPTOR = bytes([
+    0x83,
+    0x02,
+    (2 << 5) | (3 << 1) | 0,  # 48 kHz, reserved, emphasis off
+    (1 << 5) | 0x0F,          # stereo + reserved
+])
 
 # RTP
 RTP_PT_MP2T  = 33 # RFC 2250 — MPEG-TS over RTP
@@ -50,12 +83,6 @@ RTP_MAX_PAYLOAD = 1316 # 7 × 188 bytes
 # PES stream IDs
 PES_SID_VIDEO = 0xE0
 PES_SID_AUDIO = 0xBD
-
-# Audio parameters (fixed for WFD LPCM)
-AUDIO_RATE     = 48_000
-AUDIO_CHANNELS = 2
-AUDIO_BITS     = 16
-AUDIO_FRAME_SAMPLES = 1024 # arbitrary chunk size for PES framing
 
 
 
@@ -81,18 +108,49 @@ def _ts_packet(pid: int, payload: bytes, *,
     If payload+adaptation < 184 bytes it is stuffed with 0xFF.
     """
     flags = 0x40 if pusi else 0x00   # payload_unit_start_indicator
+    payload = bytes(payload)
 
-    if adaptation is not None:
-        adaptation_control = 0x03    # adaptation + payload
-        adapt_field = bytes([len(adaptation)]) + adaptation
-        # pad adaptation to fill if needed
-        fill_len = 184 - 1 - len(adaptation) - len(payload)
-        if fill_len > 0:
-            # extend adaptation with stuffing
-            adapt_field = bytes([len(adaptation) + fill_len]) + adaptation + bytes(fill_len)
+    if adaptation is not None and not payload:
+        # STUFFING
+        if len(adaptation) > 183:
+            raise ValueError("adaptation too large for adaptation-only packet")
+        adapt_field = bytes([183]) + adaptation + bytes(183 - len(adaptation))
+        adaptation_control = 0x02
     else:
-        adaptation_control = 0x01   # payload only
-        adapt_field = b""
+        # Bytes available after the 4-byte TS header.
+        free = 184
+        adapt_body = bytes(adaptation) if adaptation is not None else b""
+        # Space consumed by adaptation = 1 length byte + body (if any).
+        if adapt_body or len(payload) < free:
+            # How many bytes must the adaptation section occupy?
+            # free = adapt_section_len + len(payload); adapt_section_len >= 1
+            # when we need any stuffing or have an explicit adaptation body.
+            need = free - len(payload)
+            if need <= 0 and not adapt_body:
+                adapt_field = b""
+                adaptation_control = 0x01
+            else:
+                if need < 1:
+                    # Payload alone would overflow; caller must chunk first.
+                    raise ValueError("TS payload exceeds 184 bytes")
+                # adapt_field_length byte + content (flags/PCR/stuff) = need
+                content_len = need - 1
+                if len(adapt_body) > content_len:
+                    raise ValueError("adaptation body exceeds stuffing budget")
+                if adapt_body:
+                    content = adapt_body + bytes(
+                        [0xFF] * (content_len - len(adapt_body))
+                    )
+                elif content_len == 0:
+                    content = b""
+                else:
+                    # flags=0 then 0xFF stuffing (ISO 13818-1)
+                    content = bytes([0x00]) + bytes([0xFF] * (content_len - 1))
+                adapt_field = bytes([content_len]) + content
+                adaptation_control = 0x03 if payload else 0x02
+        else:
+            adapt_field = b""
+            adaptation_control = 0x01
 
     header = bytes([
         TS_SYNC,
@@ -100,12 +158,12 @@ def _ts_packet(pid: int, payload: bytes, *,
         pid & 0xFF,
         (adaptation_control << 4) | (continuity & 0x0F),
     ])
-
     pkt = header + adapt_field + payload
-    # STUFFING
-    if len(pkt) < TS_PACKET_SIZE:
-        pkt += bytes(TS_PACKET_SIZE - len(pkt))
-    assert len(pkt) == TS_PACKET_SIZE, f"TS packet size mismatch: {len(pkt)}"
+    if len(pkt) != TS_PACKET_SIZE:
+        raise AssertionError(
+            f"TS packet size mismatch: {len(pkt)} "
+            f"(adapt={len(adapt_field)} payload={len(payload)})"
+        )
     return pkt
 
 
@@ -115,7 +173,7 @@ def _build_pat(continuity: int = 0) -> bytes:
         0x00,                     # table_id = PAT
         0xB0, 0x0D,                # section_syntax=1, section_length=13
         0x00, 0x01,                # transport_stream_id = 1
-        0xC1,                      # version=0, current_next=1
+        0xC3,                      # version=1, current_next=1
         0x00,                      # section_number
         0x00,                      # last_section_number
         (PMT_PROG_NUM >> 8) & 0xFF,
@@ -134,20 +192,26 @@ def _build_pmt(continuity: int = 0) -> bytes:
     streams = bytearray()
 
     # Video: H.264
+    vid_info = AVC_VIDEO_DESCRIPTOR + AVC_TIMING_HRD_DESCRIPTOR
     streams += bytes([
         STREAM_TYPE_H264,
         0xE0 | ((PID_VID >> 8) & 0x1F),
         PID_VID & 0xFF,
-        0xF0, 0x00, # no ES info descriptors
+        0xF0 | ((len(vid_info) >> 8) & 0x0F),
+        len(vid_info) & 0xFF,
     ])
+    streams += vid_info
 
     # Audio: WFD LPCM (stream_type=0x83)
+    aud_info = LPCM_ES_DESCRIPTOR
     streams += bytes([
         STREAM_TYPE_LPCM,
         0xE0 | ((PID_AUD >> 8) & 0x1F),
         PID_AUD & 0xFF,
-        0xF0, 0x00,
+        0xF0 | ((len(aud_info) >> 8) & 0x0F),
+        len(aud_info) & 0xFF,
     ])
+    streams += aud_info
 
     # PMT header
     section_length = 9 + len(streams) + 4  # 9=fixed header, 4=CRC
@@ -158,7 +222,7 @@ def _build_pmt(continuity: int = 0) -> bytes:
         section_length & 0xFF,
         (PMT_PROG_NUM >> 8) & 0xFF,
         PMT_PROG_NUM & 0xFF,
-        0xC1,                      # version=0, current_next=1
+        0xC3,                      # version=1, current_next=1
         0x00, 0x00,                # section/last_section
         0xE0 | ((PID_PCR >> 8) & 0x1F),
         PID_PCR & 0xFF,
@@ -172,30 +236,37 @@ def _build_pmt(continuity: int = 0) -> bytes:
     return _ts_packet(PID_PMT, payload, pusi=True, continuity=continuity)
 
 
-#PCR adaptation field
-
 def _pcr_adaptation(pcr_90k: int) -> bytes:
-    """6-byte PCR adaptation field extension (flags + 6 PCR bytes)."""
-    # PCR = base (33 bits) * 300 + ext (9 bits)
-    base = pcr_90k
-    ext  = 0
+    """Flags + 6 PCR bytes (no length byte — caller adds adaptation_field_length)."""
+    base = pcr_90k & 0x1FFFFFFFF
+    ext = 0
     pcr_b = (base << 15) | (0x3F << 9) | ext
     return bytes([
-        0x10, # PCR_flag=1, all others 0
+        0x10,  # PCR_flag=1
         (pcr_b >> 40) & 0xFF,
         (pcr_b >> 32) & 0xFF,
         (pcr_b >> 24) & 0xFF,
         (pcr_b >> 16) & 0xFF,
-        (pcr_b >>  8) & 0xFF,
+        (pcr_b >> 8) & 0xFF,
         pcr_b & 0xFF,
     ])
 
 
-# PES builder 
+def _pcr_packet(pcr_90k: int) -> bytes:
+    """Dedicated PCR TS packet on PID 0x1000. Continuity stays 0."""
+    return _ts_packet(
+        PID_PCR,
+        b"",
+        pusi=True,
+        continuity=0,
+        adaptation=_pcr_adaptation(pcr_90k),
+    )
+
 
 def _pes_header(stream_id: int, pts_90k: int,
-                payload_len: int, *, dts_90k: Optional[int] = None) -> bytes:
-    """Build a PES header with PTS (and optional DTS)."""
+                payload_len: int, *, dts_90k: Optional[int] = None,
+                stuffing: int = 0) -> bytes:
+    """Build a PES header with PTS (and optional DTS / stuffing)."""
     has_dts = dts_90k is not None
 
     def _encode_ts(ts: int) -> bytes:
@@ -217,6 +288,8 @@ def _pes_header(stream_id: int, pts_90k: int,
         dts_bytes = _encode_ts(dts_90k)
         dts_bytes = bytes([0x10 | dts_bytes[0]]) + dts_bytes[1:]
         optional += dts_bytes
+    if stuffing:
+        optional += bytes([0xFF] * stuffing)
 
     header_data_len = len(optional)
     pes_packet_len  = 3 + header_data_len + payload_len
@@ -224,41 +297,30 @@ def _pes_header(stream_id: int, pts_90k: int,
     if stream_id == PES_SID_VIDEO:
         pes_packet_len = 0
 
-    hdr = struct.pack(">I", 0x00000100 | stream_id)     # start code + stream_id
-    hdr += struct.pack(">H", pes_packet_len)
-    hdr += bytes([0x80])                                 # flags byte 1: marker bits
-    hdr += bytes([0x80 if has_dts else 0x80])            # flags byte 2: PTS_DTS_flags
-    # re-encode properly
     flags2 = 0xC0 if has_dts else 0x80
-    hdr = hdr[:-1] + bytes([flags2])
-    hdr += bytes([header_data_len])
+    # flags1: marker '10' + data_alignment_indicator=1
+    flags1 = 0x84
+    hdr = struct.pack(">I", 0x00000100 | stream_id)
+    hdr += struct.pack(">H", pes_packet_len)
+    hdr += bytes([flags1, flags2, header_data_len])
     hdr += optional
     return hdr
 
 
 def _packetize_pes(pid: int, stream_id: int, pts_90k: int,
-                   data: bytes, cc: list,
-                   pcr_90k: Optional[int] = None) -> list[bytes]:
+                   data: bytes, cc: list, *,
+                   stuffing: int = 0) -> list[bytes]:
     """Split PES into TS packets. cc is a mutable list [counter]."""
-    pes_hdr = _pes_header(stream_id, pts_90k, len(data))
+    pes_hdr = _pes_header(stream_id, pts_90k, len(data), stuffing=stuffing)
     payload  = pes_hdr + data
     packets  = []
     first    = True
 
     while payload:
-        adapt = None
-        if first and pcr_90k is not None:
-            adapt = _pcr_adaptation(pcr_90k)
-
-        # Maximum payload bytes in this TS packet
         max_payload = TS_PACKET_SIZE - 4  # 184 after header
-        if adapt is not None:
-            max_payload -= (1 + len(adapt))  # 1 byte for adapt_field_length
-
         chunk    = payload[:max_payload]
         payload  = payload[max_payload:]
-        pkt      = _ts_packet(pid, chunk, pusi=first,
-                              continuity=cc[0], adaptation=adapt)
+        pkt      = _ts_packet(pid, chunk, pusi=first, continuity=cc[0])
         cc[0]    = (cc[0] + 1) & 0x0F
         packets.append(pkt)
         first = False
@@ -302,6 +364,45 @@ class _RTPFramer:
         return packets
 
 
+class LPCMAudioPacker:
+    """Accumulate S16BE PCM into fixed WFD LPCM PES payloads.
+
+    Emits (payload_bytes, start_frame_index) when a full 6×80-frame body is
+    ready. PTS is derived from the sample index (not wall-clock arrival) so
+    the sink does not hear stretch/chop from capture jitter.
+    """
+
+    __slots__ = ("_buf", "_frame_index")
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+        self._frame_index = 0  # stereo frames consumed at start of _buf
+
+    def reset(self) -> None:
+        self._buf.clear()
+        self._frame_index = 0
+
+    def feed(self, pcm: bytes) -> list[tuple[bytes, int]]:
+        out: list[tuple[bytes, int]] = []
+        if not pcm:
+            return out
+        # Keep stereo s16 frame alignment (4 bytes).
+        odd = len(pcm) % LPCM_FRAME_BYTES
+        if odd:
+            pcm = pcm[: len(pcm) - odd]
+        if not pcm:
+            return out
+        self._buf.extend(pcm)
+        frames_per_pes = LPCM_PCM_BYTES_PER_PES // LPCM_FRAME_BYTES
+        while len(self._buf) >= LPCM_PCM_BYTES_PER_PES:
+            body = bytes(self._buf[:LPCM_PCM_BYTES_PER_PES])
+            del self._buf[:LPCM_PCM_BYTES_PER_PES]
+            payload = WFD_LPCM_HEADER + body
+            out.append((payload, self._frame_index))
+            self._frame_index += frames_per_pes
+        return out
+
+
 # ─────────────────────────── Main muxer class ────────────────────────────────
 class WFDLPCMMuxer:
     """
@@ -321,17 +422,20 @@ class WFDLPCMMuxer:
     ):
         self._dest   = (dest_ip, dest_port)
         self._sock   = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         # WFD RTSP advertises a fixed client_rtp_ports source port; sinks often
         # drop RTP that does not come from that port.
         if local_port:
-            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 self._sock.bind((local_ip or "0.0.0.0", int(local_port)))
-            except OSError:
-                # Fall back to ephemeral if the RTSP port is still held.
-                pass
+            except OSError as exc:
+                self._sock.close()
+                raise OSError(
+                    f"LPCM muxer could not bind RTP source port {local_port}: {exc}"
+                ) from exc
         self._rtp    = _RTPFramer()
         self._running = False
+        self._audio_packer = LPCMAudioPacker()
 
         # Continuity counters (mutable lists so helpers can mutate in-place)
         self._cc_pat = [0]
@@ -339,8 +443,10 @@ class WFDLPCMMuxer:
         self._cc_vid = [0]
         self._cc_aud = [0]
 
-        self._video_q: queue.Queue = queue.Queue(maxsize=120)
-        self._audio_q: queue.Queue = queue.Queue(maxsize=240)
+        # Video: maxsize=2; Full → drop-oldest in _on_new_video_sample.
+        self._video_q: queue.Queue = queue.Queue(maxsize=2)
+        # Audio: maxsize=2000; Full → drop chunk in _on_sample (put_nowait).
+        self._audio_q: queue.Queue = queue.Queue(maxsize=2000)
 
         self._video_pipeline = None
         self._audio_pipeline = None
@@ -350,9 +456,11 @@ class WFDLPCMMuxer:
         self.frames_sent: int = 0
         self.frames_dropped_video: int = 0
         self.audio_frames_sent: int = 0
+        self.audio_chunks_dropped: int = 0
         # PCR jitter tracking (ms); updated each frame
         self.pcr_jitter_last_ms: float = 0.0
         self.pcr_jitter_max_ms: float = 0.0
+        self._last_psi_mono: float = 0.0
 
     # === GStreamer pipeline helpers ===========================================
 
@@ -370,7 +478,7 @@ class WFDLPCMMuxer:
         if sink is None:
             raise RuntimeError("Video pipeline must contain appsink named 'sink'")
         sink.set_property("emit-signals", True)
-        sink.set_property("max-buffers", 4)
+        sink.set_property("max-buffers", 1)
         sink.set_property("drop", True)
 
         def _on_sample(appsink):
@@ -381,9 +489,19 @@ class WFDLPCMMuxer:
             ok, mapinfo = buf.map(Gst.MapFlags.READ)
             if ok:
                 pts_ns = buf.pts if buf.pts != Gst.CLOCK_TIME_NONE else 0
+                frame = (bytes(mapinfo.data), pts_ns)
                 try:
-                    self._video_q.put_nowait((bytes(mapinfo.data), pts_ns))
+                    self._video_q.put_nowait(frame)
                 except queue.Full:
+                    # Drop oldest, then enqueue the new frame.
+                    try:
+                        self._video_q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._video_q.put_nowait(frame)
+                    except queue.Full:
+                        pass
                     self.frames_dropped_video += 1
                 buf.unmap(mapinfo)
             return Gst.FlowReturn.OK
@@ -404,8 +522,8 @@ class WFDLPCMMuxer:
         if sink is None:
             raise RuntimeError("Audio pipeline must contain appsink named 'sink'")
         sink.set_property("emit-signals", True)
-        sink.set_property("max-buffers", 8)
-        sink.set_property("drop", True)
+        sink.set_property("max-buffers", 32)
+        sink.set_property("drop", False)
 
         def _on_sample(appsink):
             sample = appsink.emit("pull-sample")
@@ -414,12 +532,10 @@ class WFDLPCMMuxer:
             buf = sample.get_buffer()
             ok, mapinfo = buf.map(Gst.MapFlags.READ)
             if ok:
-                arrival = time.monotonic()
                 try:
-                    self._audio_q.put_nowait((bytes(mapinfo.data), arrival))
+                    self._audio_q.put_nowait(bytes(mapinfo.data))
                 except queue.Full:
-                    # Mux behind — drop audio rather than raise into GStreamer.
-                    pass
+                    self.audio_chunks_dropped += 1
                 buf.unmap(mapinfo)
             return Gst.FlowReturn.OK
 
@@ -432,6 +548,8 @@ class WFDLPCMMuxer:
         return int(ns * RTP_CLOCK_HZ / 1_000_000_000) & 0x1FFFFFFFF
 
     def _send(self, ts_packets: list[bytes]) -> None:
+        if not ts_packets:
+            return
         raw = b"".join(ts_packets)
         for pkt in self._rtp.frame(raw):
             try:
@@ -439,17 +557,51 @@ class WFDLPCMMuxer:
             except OSError as e:
                 log.warning("UDP send error: %s", e)
 
+    def _drain_audio_packets(self) -> list[bytes]:
+        """Return TS packets for any complete LPCM access units."""
+        out: list[bytes] = []
+        while not self._audio_q.empty():
+            try:
+                aud_data = self._audio_q.get_nowait()
+            except queue.Empty:
+                break
+            for aud_payload, frame_index in self._audio_packer.feed(aud_data):
+                # Sample-clock PTS.
+                aud_pts_90k = (
+                    (frame_index * RTP_CLOCK_HZ) // AUDIO_RATE + 9000
+                ) & 0x1FFFFFFFF
+                out += _packetize_pes(
+                    PID_AUD, PES_SID_AUDIO, aud_pts_90k,
+                    aud_payload, self._cc_aud,
+                    stuffing=LPCM_PES_STUFFING,
+                )
+                self.audio_frames_sent += 1
+        return out
+
+    def _maybe_psi(self, now: float, wall_start: float, force: bool = False) -> list[bytes]:
+        """PAT/PMT/PCR about every 100 ms (wall clock), not only on video frames."""
+        out: list[bytes] = []
+        if not force and (now - self._last_psi_mono) < 0.1:
+            return out
+        self._last_psi_mono = now
+        pcr_90k = int((now - wall_start) * RTP_CLOCK_HZ) & 0x1FFFFFFFF
+        out.append(_build_pat(self._cc_pat[0]))
+        self._cc_pat[0] = (self._cc_pat[0] + 1) & 0x0F
+        out.append(_build_pmt(self._cc_pmt[0]))
+        self._cc_pmt[0] = (self._cc_pmt[0] + 1) & 0x0F
+        out.append(_pcr_packet(pcr_90k))
+        return out
+
     def _mux_loop(self) -> None:
         log.info("WFDLPCMMuxer mux loop started → %s:%d", *self._dest)
 
         # Disable GC inside the mux thread to avoid unpredictable pauses mid-packet.
         gc.disable()
 
-        pat_pmt_interval = 30   # PAT+PMT every 30 video frames (~1 s at 30 fps)
-        frame_counter    = 0
-        wall_start:      Optional[float] = None
-        pts_offset_90k:  Optional[int]   = None
-        prev_send_time:  float           = time.monotonic()
+        frame_counter = 0
+        wall_start: Optional[float] = None
+        pts_offset_90k: Optional[int] = None
+        prev_send_time: float = time.monotonic()
 
         try:
             while self._running:
@@ -458,76 +610,72 @@ class WFDLPCMMuxer:
                     gc.collect(0)
 
                 # Wait for next video frame
+                have_video = False
+                vid_data = b""
+                vid_pts_ns = 0
                 try:
-                    vid_data, vid_pts_ns = self._video_q.get(timeout=0.1)
+                    vid_data, vid_pts_ns = self._video_q.get(timeout=0.02)
+                    have_video = True
                 except queue.Empty:
-                    continue
+                    pass
 
                 # PCR: wall clock computed RIGHT NOW, epoch = first frame arrival
                 now = time.monotonic()
                 if wall_start is None:
-                    wall_start     = now
+                    if not have_video:
+                        # Frame captured before the first video frame — discard
+                        try:
+                            while True:
+                                self._audio_q.get_nowait()
+                        except queue.Empty:
+                            pass
+                        continue
+                    wall_start = now
                     pts_offset_90k = self._ns_to_90k(vid_pts_ns)
                     prev_send_time = now
+                    self._last_psi_mono = 0.0
+
                 pcr_90k = int((now - wall_start) * RTP_CLOCK_HZ) & 0x1FFFFFFFF
+                if have_video:
+                    # PCR jitter: deviation from expected inter-frame interval
+                    frame_interval_ms = 1000.0 / 30.0   # assume 30 fps
+                    actual_delta_ms = (now - prev_send_time) * 1000.0
+                    jitter_ms = abs(actual_delta_ms - frame_interval_ms)
+                    self.pcr_jitter_last_ms = jitter_ms
+                    if jitter_ms > self.pcr_jitter_max_ms:
+                        self.pcr_jitter_max_ms = jitter_ms
+                    prev_send_time = now
 
-                # PCR jitter: deviation from expected inter-frame interval
-                frame_interval_ms = 1000.0 / 30.0   # assume 30 fps
-                actual_delta_ms   = (now - prev_send_time) * 1000.0
-                jitter_ms         = abs(actual_delta_ms - frame_interval_ms)
-                self.pcr_jitter_last_ms = jitter_ms
-                if jitter_ms > self.pcr_jitter_max_ms:
-                    self.pcr_jitter_max_ms = jitter_ms
-                prev_send_time = now
+                    gst_pts_90k = self._ns_to_90k(vid_pts_ns)
+                    if pts_offset_90k is None:
+                        pts_offset_90k = gst_pts_90k
+                    pts_90k = (gst_pts_90k - pts_offset_90k) & 0x1FFFFFFFF
+                    if pts_90k < pcr_90k:
+                        pts_90k = (pcr_90k + 9000) & 0x1FFFFFFFF
 
+                    ts_out: list[bytes] = []
 
-                gst_pts_90k = self._ns_to_90k(vid_pts_ns)
-                if pts_offset_90k is None:
-                    pts_offset_90k = gst_pts_90k
-                pts_90k = (gst_pts_90k - pts_offset_90k) & 0x1FFFFFFFF
+                    # PAT + PMT
+                    ts_out += self._maybe_psi(now, wall_start)
 
-                if pts_90k < pcr_90k:
-                    pts_90k = (pcr_90k + 9000) & 0x1FFFFFFFF
-
-                ts_out: list[bytes] = []
-
-                # PAT + PMT
-                if frame_counter % pat_pmt_interval == 0:
-                    ts_out.append(_build_pat(self._cc_pat[0]))
-                    self._cc_pat[0] = (self._cc_pat[0] + 1) & 0x0F
-                    ts_out.append(_build_pmt(self._cc_pmt[0]))
-                    self._cc_pmt[0] = (self._cc_pmt[0] + 1) & 0x0F
-                frame_counter += 1
-
-                # Video PES — PCR injected on first TS packet of this frame
-                ts_out += _packetize_pes(
-                    PID_VID, PES_SID_VIDEO, pts_90k,
-                    vid_data, self._cc_vid, pcr_90k=pcr_90k,
-                )
-                self.frames_sent += 1
+                    # Video PES
+                    ts_out += _packetize_pes(
+                        PID_VID, PES_SID_VIDEO, pts_90k,
+                        vid_data, self._cc_vid,
+                    )
+                    self.frames_sent += 1
+                    frame_counter += 1
+                    self._send(ts_out)
+                else:
+                    # PAT + PMT
+                    psi = self._maybe_psi(now, wall_start)
+                    if psi:
+                        self._send(psi)
 
                 # Drain pending audio
-                while not self._audio_q.empty():
-                    try:
-                        aud_data, aud_arrival = self._audio_q.get_nowait()
-                    except queue.Empty:
-                        break
-
-                    if aud_arrival < wall_start:
-                        # Frame captured before the first video frame — discard
-                        self.audio_frames_sent += 1
-                        continue
-                    aud_elapsed_90k = int((aud_arrival - wall_start) * RTP_CLOCK_HZ)
-                    aud_pts_90k = (aud_elapsed_90k + 9000) & 0x1FFFFFFFF
-                    aud_payload = WIDI_LPCM_HEADER + LPCM_FRAME_HEADER + aud_data
-
-                    ts_out += _packetize_pes(
-                        PID_AUD, PES_SID_AUDIO, aud_pts_90k,
-                        aud_payload, self._cc_aud,
-                    )
-                    self.audio_frames_sent += 1
-
-                self._send(ts_out)
+                aud_out = self._drain_audio_packets()
+                if aud_out:
+                    self._send(aud_out)
 
         finally:
             gc.enable()
