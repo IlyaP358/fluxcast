@@ -143,6 +143,11 @@ def active_scan(interface: Optional[str] = None, timeout: int = 8) -> list[WFDPe
             name=_parse_peer_name(details),
             details=details,
             source="wpa_cli",
+            # None, not False, when p2p_peer gave us nothing: a failed
+            # lookup means unknown, and calling a real sink "not a sink"
+            # sends the user away from the device that would have worked.
+            wfd_capable=("wfd_dev_info=" in details or "wfd_subelems=" in details)
+                        if details else None,
         ))
 
     return peers
@@ -157,7 +162,10 @@ def print_scan(peers: list[WFDPeer]) -> None:
         name = f"  {peer.name}" if peer.name else ""
         source = f" via {peer.source}" if peer.source else ""
         print(f"  [{idx}] {peer.address}{name}{source}")
-        if "wfd_subelems" in peer.details or "wfd_dev_info" in peer.details:
+        if peer.wfd_capable:
             print("      WFD capability data detected")
-        elif "wfd_ies=" in peer.details:
-            print("      WFD capability data detected")
+        elif peer.wfd_capable is False:
+            # Say so explicitly. Connecting to a non-sink succeeds at the P2P
+            # layer and then sits in NetworkManager's config state until the
+            # 35s timeout, with nothing on screen explaining why (#121).
+            print("      no WFD capability data - probably not a Miracast sink")
