@@ -300,10 +300,20 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                     "[FluxCast WFD RTSP] TV advertised no AAC/LPCM audio; "
                     "falling back to video-only WFD."
                 )
-            elif audio and not _has_aac and _has_lpcm:
-                self.negotiated_lpcm = True
+            elif audio and not _has_aac and _has_lpcm and not _is_microsoft:
+                # Generic-TV LPCM mux currently thrash-rebinds (EADDRINUSE on
+                # RTP source port) and leaves many orphan wf-recorders. Prefer
+                # AAC so video can establish; audio may be silent on LPCM-only
+                # sets until the muxer restart path is hardened.
                 print(
                     "[FluxCast WFD RTSP] TV advertised LPCM only; "
+                    "negotiating AAC so the session can stay up "
+                    "(TV may stay silent until LPCM mux is stable)."
+                )
+            elif audio and not _has_aac and _has_lpcm and _is_microsoft:
+                self.negotiated_lpcm = True
+                print(
+                    "[FluxCast WFD RTSP] Microsoft LPCM; "
                     "negotiating WFD LPCM (stream_type 0x83)."
                 )
             if _is_microsoft and audio:

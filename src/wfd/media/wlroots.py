@@ -67,7 +67,11 @@ class WlrootsMixin:
                             "DMA-BUF not available (VAAPI missing, scaled deny, "
                             "or RENDER ENGINE is not dmabuf)"
                         )
-                    if getattr(self.config, "prefer_lpcm", False) and not self.config.no_audio:
+                    if (
+                        getattr(self.config, "prefer_lpcm", False)
+                        and not self.config.no_audio
+                        and "microsoft" in (self.config.peer_name or "").lower()
+                    ):
                         self._start_wf_recorder_lpcm(wf_recorder, monitor)
                     else:
                         self._start_wf_recorder_vaapi_dmabuf(wf_recorder, monitor)
