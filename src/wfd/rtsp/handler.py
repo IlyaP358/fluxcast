@@ -623,15 +623,15 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                     sender_path_latency_ms=sender_path_latency_ms,
                 )
             # Detect "alive but stuck": PIDs running, RTSP OK, but almost no RTP.
-            # Healthy 720p/1080p is typically >>100 KiB per 5s probe; idle damage-
-            # aware can be lower, so require several consecutive stalls.
+            # Idle damage-aware can be very quiet — require a long near-zero streak
+            # so we do not thrash-rebind and make the desktop feel laggy.
             if current is not None and self._last_interval_tx is not None:
                 interval = max(0, current - self._last_interval_tx)
-                if interval < 80 * 1024:
+                if interval < 4 * 1024:
                     self._stagnant_tx_streak += 1
                 else:
                     self._stagnant_tx_streak = 0
-                if self._stagnant_tx_streak >= 3:
+                if self._stagnant_tx_streak >= 6:
                     print(
                         "[FluxCast WFD Media] RTP TX stagnant "
                         f"({interval} B / probe); rebinding desktop capture"
