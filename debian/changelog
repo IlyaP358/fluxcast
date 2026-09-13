@@ -10,4 +10,4 @@ fluxcast (0.1.5) unstable; urgency=medium
     Wi-Fi Direct works without the separate privileged step the PyPI path
     needs (upstream issue #113).
 
- -- FluxCast Project <fluxcast@users.noreply.github.com>  Wed, 10 Sep 2026 12:00:00 +0000
+ -- Illia Pukalov <illia@fluxcast.dev>  Wed, 10 Sep 2026 12:00:00 +0000

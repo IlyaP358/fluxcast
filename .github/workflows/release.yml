@@ -43,11 +43,26 @@ jobs:
         # artifact cannot cover them all - debian/rules pins each build to its
         # own python3 so apt refuses a mismatched install rather than
         # installing something that fails on first import.
+        #
+        # Scope is Ubuntu LTS and Debian stable, for as long as each has
+        # upstream support; an entry is dropped once that ends. Ubuntu interim
+        # releases are deliberately absent - one arrives every six months and
+        # lives nine, so including them would mean permanent churn here for
+        # users the python3 bound already reaches (a release shares a build
+        # with whichever entry carries the same python3 minor).
+        #
+        # Tags are pinned to explicit versions, not rolling aliases like
+        # debian:stable, so a release entering or leaving the matrix is always
+        # a visible change here rather than something that happens on its own
+        # when Debian promotes a new stable.
+        #
+        # Support ends (approximate): Debian 12 mid-2028 with LTS, Debian 13
+        # mid-2030 with LTS, Ubuntu 24.04 June 2029, Ubuntu 26.04 April 2031.
         image:
-          - debian:oldstable   # bookworm, python 3.11
-          - debian:stable      # trixie,   python 3.13
-          - ubuntu:24.04       # noble,    python 3.12
-          - ubuntu:26.04       # resolute, python 3.14
+          - debian:12      # bookworm, python 3.11
+          - debian:13      # trixie,   python 3.13
+          - ubuntu:24.04   # noble,    python 3.12
+          - ubuntu:26.04   # resolute, python 3.14
     steps:
       - uses: actions/checkout@v4
 

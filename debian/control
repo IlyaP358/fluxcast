@@ -1,7 +1,7 @@
 Source: fluxcast
 Section: video
 Priority: optional
-Maintainer: FluxCast Project <fluxcast@users.noreply.github.com>
+Maintainer: Illia Pukalov <illia@fluxcast.dev>
 Build-Depends:
  debhelper-compat (= 13),
  python3 (>= 3.10),
