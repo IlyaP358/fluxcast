@@ -285,9 +285,14 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             _caps = (audio or "").upper()
             _has_aac = "AAC" in _caps
             _has_lpcm = "LPCM" in _caps
-            # Prefer AAC encode. Some sinks (incl. many cheap dongles) only list
-            # LPCM; still attempt AAC rather than forcing video-only — many will
-            # play it. Microsoft keeps the dedicated LPCM advertisement path.
+            # Match AOSP WifiDisplaySource codec policy: AAC when present,
+            # otherwise LPCM when that is all the sink has. Escape hatch:
+            # FLUXCAST_WFD_FORCE_AAC=1 keeps the DMA+AAC picture-only path.
+            _force_aac = (os.environ.get("FLUXCAST_WFD_FORCE_AAC") or "").strip() in (
+                "1",
+                "true",
+                "yes",
+            )
             if (
                 audio
                 and not self.media_config.no_audio
@@ -300,21 +305,18 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                     "[FluxCast WFD RTSP] TV advertised no AAC/LPCM audio; "
                     "falling back to video-only WFD."
                 )
-            elif audio and not _has_aac and _has_lpcm and not _is_microsoft:
-                # Generic-TV LPCM mux currently thrash-rebinds (EADDRINUSE on
-                # RTP source port) and leaves many orphan wf-recorders. Prefer
-                # AAC so video can establish; audio may be silent on LPCM-only
-                # sets until the muxer restart path is hardened.
-                print(
-                    "[FluxCast WFD RTSP] TV advertised LPCM only; "
-                    "negotiating AAC so the session can stay up "
-                    "(TV may stay silent until LPCM mux is stable)."
-                )
-            elif audio and not _has_aac and _has_lpcm and _is_microsoft:
+            elif audio and not _has_aac and _has_lpcm and not _force_aac:
                 self.negotiated_lpcm = True
                 print(
-                    "[FluxCast WFD RTSP] Microsoft LPCM; "
-                    "negotiating WFD LPCM (stream_type 0x83)."
+                    "[FluxCast WFD RTSP] TV advertised LPCM only; "
+                    "negotiating WFD LPCM (AOSP-style PIDs 0x1011/0x1100, "
+                    "stream_type 0x83)."
+                )
+            elif audio and not _has_aac and _has_lpcm and _force_aac:
+                self.negotiated_lpcm = False
+                print(
+                    "[FluxCast WFD RTSP] TV advertised LPCM only; "
+                    "FLUXCAST_WFD_FORCE_AAC=1 — stable DMA+AAC (likely silent)."
                 )
             if _is_microsoft and audio:
                 print(f"[FluxCast WFD RTSP] Microsoft adapter audio caps: {audio}")
@@ -644,13 +646,27 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             # Detect "alive but stuck": PIDs running, RTSP OK, but almost no RTP.
             # Idle damage-aware can be very quiet — require a long near-zero streak
             # so we do not thrash-rebind and make the desktop feel laggy.
+            # LPCM muxer keeps sending audio/PAT during video gaps; treat that as
+            # healthy even if the iface counter looks quiet for one interval.
+            lpcm = getattr(media, "_lpcm_muxer", None)
+            lpcm_activity = 0
+            if lpcm is not None:
+                lpcm_activity = int(getattr(lpcm, "frames_sent", 0)) + int(
+                    getattr(lpcm, "audio_frames_sent", 0)
+                )
+                prev_lpcm = getattr(self, "_last_lpcm_activity", None)
+                self._last_lpcm_activity = lpcm_activity
+                if prev_lpcm is not None and lpcm_activity > prev_lpcm:
+                    self._stagnant_tx_streak = 0
             if current is not None and self._last_interval_tx is not None:
                 interval = max(0, current - self._last_interval_tx)
                 if interval < 4 * 1024:
                     self._stagnant_tx_streak += 1
                 else:
                     self._stagnant_tx_streak = 0
-                if self._stagnant_tx_streak >= 6:
+                # 12 × ~5s ≈ 60s before rebind; LPCM path is burstier.
+                stagnant_limit = 12 if lpcm is not None else 6
+                if self._stagnant_tx_streak >= stagnant_limit:
                     print(
                         "[FluxCast WFD Media] RTP TX stagnant "
                         f"({interval} B / probe); rebinding desktop capture"
@@ -659,6 +675,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                         media.restart_video()
                         self._stagnant_tx_streak = 0
                         self._last_interval_tx = None
+                        self._last_lpcm_activity = None
                     except Exception as exc:  # noqa: BLE001
                         print(
                             "[FluxCast WFD Media] Capture rebind after "
@@ -708,9 +725,11 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         try:
             media.restart_video()
             self._unhealthy_probe_streak = 0
+            self._schedule_probe(5.0)
         except Exception as exc:  # noqa: BLE001 — keep probe chain alive
             print(f"[FluxCast WFD Media] Capture rebind after sender death failed: {exc}")
-        self._schedule_probe(2.0)
+            # Back off hard on bind failures so we do not spawn orphan recorders.
+            self._schedule_probe(10.0)
 
     def _stop_media(self) -> None:
         if self.media is not None:
