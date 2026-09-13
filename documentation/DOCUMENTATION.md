@@ -271,7 +271,9 @@ and protocol selection remain controlled by the tray and cannot be set here.
   - Escape hatch: `FLUXCAST_WFD_FORCE_AAC=1` keeps the DMA+AAC path (picture often
     works; speakers stay silent on true LPCM-only TVs).
   - Unit coverage: `tests/test_wfd_lpcm_mux.py` (AU framing, AOSP-style PIDs);
-    `tests/test_lpcm_audio_capture.py` (pw-cat/parec argv + S16LE→BE pipeline).
+    `tests/test_lpcm_audio_capture.py` (pw-cat/parec argv + S16LE→BE pipeline);
+    `tests/test_icc_integration.py` (PROTO=icc selection, LPCM/DMA `-D`/`-r` flags,
+    optional live ICC binary smoke via `FLUXCAST_WFD_WF_RECORDER_BIN`).
 - `--wfd-rtsp-port`
   - RTSP port in WFD source IE (usually does not need changes).
 - `--wfd-rtp-source-port`

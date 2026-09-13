@@ -193,7 +193,11 @@ class WlrootsDamageFlagTest(unittest.TestCase):
         self.assertNotIn("hwupload", " ".join(cmds["ffmpeg"]))
 
     def test_dmabuf_icc_binary_passes_capture_rate(self):
-        """ICC builds need -r for capture cadence; stock must not get -r on DMA."""
+        """ICC builds need -r for capture cadence; stock must not get -r on DMA.
+
+        Default ICC capture rate is 60 (interactive latency); override with
+        FLUXCAST_WFD_ICC_CAPTURE_FPS.
+        """
         with mock.patch("wfd.hw_encode._vaapi_usable", return_value=True):
             with mock.patch("wfd.hw_encode._requested_gpu_encode", return_value=True):
                 with mock.patch("wfd.hw_encode.monitor_scale", return_value=1.0):
@@ -204,7 +208,7 @@ class WlrootsDamageFlagTest(unittest.TestCase):
                         icc=True,
                     )
         self.assertIn("-r", cmds["wf"])
-        self.assertEqual(cmds["wf"][cmds["wf"].index("-r") + 1], "30")
+        self.assertEqual(cmds["wf"][cmds["wf"].index("-r") + 1], "60")
         self.assertIn("h264_vaapi", cmds["wf"])
 
     def test_dmabuf_failure_falls_back_to_vaapi_pipe(self):
