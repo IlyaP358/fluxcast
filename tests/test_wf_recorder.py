@@ -6,10 +6,17 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from wfd.wf_recorder import find_wf_recorder  # noqa: E402
+from wfd.wf_recorder import find_wf_recorder, wf_recorder_supports_icc  # noqa: E402
 
 
 class FindWfRecorderTest(unittest.TestCase):
+    def tearDown(self):
+        os.environ.pop("FLUXCAST_WFD_WF_RECORDER_BIN", None)
+        os.environ.pop("FLUXCAST_WFD_WF_RECORDER_PROTO", None)
+        from wfd import wf_recorder as wr
+
+        wr._icc_cache.clear()
+
     @mock.patch("wfd.wf_recorder.shutil.which", return_value=None)
     def test_missing_recorder(self, _which):
         self.assertIsNone(find_wf_recorder())
@@ -33,19 +40,50 @@ class FindWfRecorderTest(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess([], 1, "", "unknown option")
         self.assertEqual(find_wf_recorder(), "/usr/bin/wf-recorder")
 
+    @mock.patch("wfd.wf_recorder.subprocess.run")
+    @mock.patch("wfd.wf_recorder.shutil.which", return_value="/usr/bin/wf-recorder")
+    def test_bin_override_preferred(self, _which, run):
+        run.return_value = subprocess.CompletedProcess([], 0, "wf-recorder icc", "")
+        os.environ["FLUXCAST_WFD_WF_RECORDER_BIN"] = "/opt/wf-recorder-icc"
+        self.assertEqual(find_wf_recorder(), "/opt/wf-recorder-icc")
+
+    @mock.patch("wfd.wf_recorder.wf_recorder_supports_icc", return_value=False)
+    @mock.patch("wfd.wf_recorder.subprocess.run")
+    @mock.patch("wfd.wf_recorder.shutil.which", return_value="/usr/bin/wf-recorder")
+    def test_proto_icc_rejects_stock(self, _which, run, _icc):
+        run.return_value = subprocess.CompletedProcess([], 0, "wf-recorder 0.6.0", "")
+        os.environ["FLUXCAST_WFD_WF_RECORDER_PROTO"] = "icc"
+        self.assertIsNone(find_wf_recorder())
+
+    @mock.patch("wfd.wf_recorder.subprocess.run")
+    def test_supports_icc_detects_toplevel(self, run):
+        def side_effect(cmd, **kwargs):
+            if "--help" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "  -t, --toplevel[=ID]\n", "")
+            return subprocess.CompletedProcess(cmd, 0, "wf-recorder 0.6.0-bf567c2\n", "")
+
+        run.side_effect = side_effect
+        self.assertTrue(wf_recorder_supports_icc("/opt/icc"))
+        self.assertTrue(wf_recorder_supports_icc("/opt/icc"))  # cached
+
 
 class WlrootsDamageFlagTest(unittest.TestCase):
     """Regression: default keeps -D; FLUXCAST_WFD_WF_RECORDER_DAMAGE=1 omits it."""
 
     def tearDown(self):
         os.environ.pop("FLUXCAST_WFD_WF_RECORDER_DAMAGE", None)
+        os.environ.pop("FLUXCAST_WFD_WF_RECORDER_BIN", None)
+        os.environ.pop("FLUXCAST_WFD_WF_RECORDER_PROTO", None)
         os.environ.pop("FLUXCAST_WFD_ENCODER", None)
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE_FILE", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE_PREF", None)
+        from wfd import wf_recorder as wr
 
-    def _capture_cmds(self, *, encoder="libx264", capture_encode=None, bias="full"):
+        wr._icc_cache.clear()
+
+    def _capture_cmds(self, *, encoder="libx264", capture_encode=None, bias="full", icc=False):
         from types import SimpleNamespace
 
         from wfd.media.wlroots import WlrootsMixin
@@ -113,7 +151,11 @@ class WlrootsDamageFlagTest(unittest.TestCase):
                         pref.side_effect = (
                             lambda monitor=None: hw_encode.prefer_wf_recorder_vaapi_dmabuf(monitor)
                         )
-                        harness._start_desktop_wf_recorder()
+                        with mock.patch(
+                            "wfd.media.wlroots.wf_recorder_supports_icc",
+                            return_value=bool(icc),
+                        ):
+                            harness._start_desktop_wf_recorder()
         return captured
 
     def _capture_wf_cmd(self):
@@ -145,10 +187,25 @@ class WlrootsDamageFlagTest(unittest.TestCase):
         self.assertIn("quality=4", wf)
         # 2s GOP (fps=30 → 60) to reduce IDR-driven quality dips.
         self.assertIn("gop_size=60", wf)
-        self.assertNotIn("-r", cmds["wf"])  # -r appends fps= after vaapi and glitches
+        self.assertNotIn("-r", cmds["wf"])  # stock: -r appends fps= after vaapi and glitches
         self.assertNotIn("rawvideo", cmds["wf"])
         self.assertEqual(cmds["ffmpeg"][cmds["ffmpeg"].index("-c:v") + 1], "copy")
         self.assertNotIn("hwupload", " ".join(cmds["ffmpeg"]))
+
+    def test_dmabuf_icc_binary_passes_capture_rate(self):
+        """ICC builds need -r for capture cadence; stock must not get -r on DMA."""
+        with mock.patch("wfd.hw_encode._vaapi_usable", return_value=True):
+            with mock.patch("wfd.hw_encode._requested_gpu_encode", return_value=True):
+                with mock.patch("wfd.hw_encode.monitor_scale", return_value=1.0):
+                    cmds = self._capture_cmds(
+                        encoder="auto",
+                        capture_encode="vaapi",
+                        bias="efficient",
+                        icc=True,
+                    )
+        self.assertIn("-r", cmds["wf"])
+        self.assertEqual(cmds["wf"][cmds["wf"].index("-r") + 1], "30")
+        self.assertIn("h264_vaapi", cmds["wf"])
 
     def test_dmabuf_failure_falls_back_to_vaapi_pipe(self):
         """RENDER ENGINE dmabuf → on DMA failure try GPU · VAAPI pipe."""

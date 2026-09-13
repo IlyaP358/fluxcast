@@ -334,6 +334,8 @@ historical software encode pipeline (`libx264` over a raw pipe).
 | `FLUXCAST_WFD_DMABUF_ALLOW_SCALED` | allow | When the Hyprland output scale is not `1`, DMA-BUF is still allowed by default. Set to `0` / `false` / `no` / `off` / `never` to force the pipe path on scaled outputs. |
 | `FLUXCAST_WFD_VAAPI_QP` | `18` | Constant QP for the DMA-BUF `h264_vaapi` path (`rc_mode=CQP`). Lower is sharper / larger; only applies when DMA-BUF encode is used. |
 | `FLUXCAST_WFD_WF_RECORDER_DAMAGE` | unset | Set to `1` / `true` / `yes` / `on` to omit `wf-recorder -D` (damage-aware capture). Default keeps `-D` for historical continuous capture. |
+| `FLUXCAST_WFD_WF_RECORDER_BIN` | unset | Absolute path to a `wf-recorder` binary. When set (and usable), preferred over `PATH`. Use this to opt into a local [PR #347](https://github.com/ammen99/wf-recorder/pull/347) ext-image-copy-capture build. |
+| `FLUXCAST_WFD_WF_RECORDER_PROTO` | unset / `auto` | `icc` requires an ICC-capable binary (`--toplevel` / `ext-copy-capture` in help/version) and returns no recorder if the chosen binary is stock wlr-screencopy. `wlr` / unset / `auto` accept any usable binary (default stays stock `PATH`). |
 | `FLUXCAST_WFD_MODE_STATE` | unset | If set to a file path, write sink-advertised CEA/VESA modes (chosen mode, supported list, peer MAC / name) as JSON after RTSP negotiation — for external UIs. |
 
 #### Capture preference and fallback
@@ -342,7 +344,7 @@ With no preference file and default `FLUXCAST_WFD_ENCODER=libx264`, capture stay
 
 When preference is `dmabuf` (or derived from `CAPTURE_ENCODE=auto`/`vaapi` with a GPU encoder request), FluxCast tries in order:
 
-1. `wf-recorder -c h264_vaapi` DMA-BUF (CQP, `out_range=tv`, no `-r`, `bf=0`)
+1. `wf-recorder -c h264_vaapi` DMA-BUF (CQP, `out_range=tv`, `bf=0`; stock omits `-r`, ICC builds pass `-r $fps`)
 2. raw pipe → `hwupload` → `h264_vaapi`
 3. raw pipe → `libx264`
 
@@ -366,6 +368,12 @@ FLUXCAST_WFD_CAPTURE_ENCODE_FILE=/tmp/fluxcast-capture-encode \
 
 # Quieter Hyprland capture (omit wf-recorder -D)
 FLUXCAST_WFD_WF_RECORDER_DAMAGE=1 python3 src/main.py
+
+# Opt into a local ext-image-copy-capture wf-recorder (PR #347) — not the default
+FLUXCAST_WFD_WF_RECORDER_BIN=/path/to/wf-recorder-icc \
+  FLUXCAST_WFD_WF_RECORDER_PROTO=icc \
+  FLUXCAST_WFD_ENCODER=auto FLUXCAST_WFD_CAPTURE_ENCODE_PREF=dmabuf \
+  python3 src/main.py
 ```
 
 ## Latency Log Events
