@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|purge)
+        # Bytecode caches written at runtime are not dpkg's, so /opt/fluxcast
+        # would otherwise survive removal as a half-empty tree.
+        rm -rf /opt/fluxcast
+        # Drop the policy grant along with the package.
+        if [ -d /run/systemd/system ]; then
+            systemctl reload dbus.service >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

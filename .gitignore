@@ -12,5 +12,8 @@ tray_test_2.py
 build/
 *.egg-info/
 dist/
+/fluxcast_*.deb
+/fluxcast_*.buildinfo
+/fluxcast_*.changes
 fluxcast_domains
 tools/

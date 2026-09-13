@@ -1,0 +1,62 @@
+Source: fluxcast
+Section: video
+Priority: optional
+Maintainer: Illia Pukalov <illia@fluxcast.dev>
+Build-Depends:
+ debhelper-compat (= 13),
+ python3 (>= 3.10),
+ python3-venv,
+ python3-pip,
+Standards-Version: 4.6.2
+Homepage: https://fluxcast.secweb.cloud
+Vcs-Browser: https://github.com/IlyaP358/fluxcast
+Vcs-Git: https://github.com/IlyaP358/fluxcast.git
+Rules-Requires-Root: no
+
+Package: fluxcast
+Architecture: amd64
+# Kept to what FluxCast cannot start or cast without. The capture and
+# transcode stacks are large and most desktops already have them, so they are
+# Recommends: apt still pulls them by default, but the closure stays optional
+# for anyone installing with --no-install-recommends.
+Depends:
+ ${misc:Depends},
+ ${fluxcast:PythonBound},
+ python3-gi,
+ python3-gi-cairo,
+ gir1.2-gtk-3.0,
+ gir1.2-ayatanaappindicator3-0.1,
+ dbus,
+ network-manager,
+ wpasupplicant,
+ iw,
+ ffmpeg,
+Recommends:
+ pulseaudio-utils,
+ pipewire,
+ wireplumber,
+ gstreamer1.0-pipewire,
+ gstreamer1.0-plugins-base,
+ gstreamer1.0-plugins-good,
+ wf-recorder,
+ dnsmasq-base,
+ xdg-desktop-portal,
+Suggests:
+ gstreamer1.0-tools,
+ gstreamer1.0-plugins-bad,
+ gstreamer1.0-plugins-ugly,
+ gstreamer1.0-libav,
+ x11-xserver-utils,
+Description: Stream your Linux desktop to a Smart TV
+ FluxCast mirrors a Linux desktop to a Smart TV over Miracast/Wi-Fi Display,
+ DLNA, or Chromecast, with a system tray applet and a command line interface.
+ .
+ Wi-Fi Display is the primary path: screen and audio capture are encoded to
+ H.264/AAC and carried over a Wi-Fi Direct link negotiated through
+ NetworkManager or wpa_supplicant, with RTSP session control.
+ .
+ The Python dependencies that the archive does not carry at a usable version
+ (python3-upnpclient is absent, python3-pychromecast is too old) ship in a
+ private virtualenv under /opt/fluxcast rather than as system packages. That
+ virtualenv is tied to the Python version this package was built against, so
+ the dependency on python3 is pinned to a single minor version.
