@@ -278,16 +278,28 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                     )
             audio = params.get("wfd_audio_codecs", "")
             _is_microsoft = "microsoft" in self.media_config.peer_name.lower()
+            _caps = (audio or "").upper()
+            _has_aac = "AAC" in _caps
+            _has_lpcm = "LPCM" in _caps
+            # Prefer AAC encode. Some sinks (incl. many cheap dongles) only list
+            # LPCM; still attempt AAC rather than forcing video-only — many will
+            # play it. Microsoft keeps the dedicated LPCM advertisement path.
             if (
                 audio
                 and not self.media_config.no_audio
-                and "AAC" not in audio.upper()
+                and not _has_aac
+                and not _has_lpcm
                 and not _is_microsoft
             ):
                 self.negotiated_no_audio = True
                 print(
-                    "[FluxCast WFD RTSP] TV did not advertise AAC; "
+                    "[FluxCast WFD RTSP] TV advertised no AAC/LPCM audio; "
                     "falling back to video-only WFD."
+                )
+            elif audio and not _has_aac and _has_lpcm and not _is_microsoft:
+                print(
+                    "[FluxCast WFD RTSP] TV advertised LPCM only; "
+                    "negotiating AAC encode anyway."
                 )
             if _is_microsoft and audio:
                 print(f"[FluxCast WFD RTSP] Microsoft adapter audio caps: {audio}")
