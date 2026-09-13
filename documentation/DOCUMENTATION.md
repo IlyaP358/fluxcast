@@ -267,10 +267,12 @@ and protocol selection remain controlled by the tray and cannot be set here.
   - FluxCast negotiates WFD LPCM and muxes MPEG-TS with `stream_type=0x83`
     (custom `WFDLPCMMuxer`; GStreamer/ffmpeg cannot emit that type).
   - Desktop audio should be routed to a dedicated null sink whose `.monitor`
-    is passed as `--wfd-audio-device`; capture uses `ffmpeg -f pulse` into the muxer.
+    is passed as `--wfd-audio-device`; capture uses `pw-cat --target` (not
+    `ffmpeg -f pulse` / Lavf — stream-restore remapped Lavf onto Speakers.monitor).
   - Escape hatch: `FLUXCAST_WFD_FORCE_AAC=1` keeps the DMA+AAC path (picture often
     works; speakers stay silent on true LPCM-only TVs).
-  - Unit coverage: `tests/test_wfd_lpcm_mux.py` (AU framing, AOSP-style PIDs).
+  - Unit coverage: `tests/test_wfd_lpcm_mux.py` (AU framing, AOSP-style PIDs);
+    `tests/test_lpcm_audio_capture.py` (pw-cat/parec argv + S16LE→BE pipeline).
 - `--wfd-rtsp-port`
   - RTSP port in WFD source IE (usually does not need changes).
 - `--wfd-rtp-source-port`
