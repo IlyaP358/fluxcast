@@ -1,3 +1,9 @@
 #!/usr/bin/env bash
 
-exec python3 /opt/fluxcast/main.py $@
+# The .deb ships its Python dependencies in a private venv, since Debian has
+# no upnpclient package and its pychromecast is too old. A from-source install
+# has no venv here and uses the system interpreter.
+PYTHON=/opt/fluxcast/venv/bin/python3
+[ -x "$PYTHON" ] || PYTHON=python3
+
+exec "$PYTHON" /opt/fluxcast/main.py "$@"
