@@ -93,6 +93,19 @@ class NmScanCapabilityTest(unittest.TestCase):
         # and the misleading detail is dropped rather than shown as evidence
         self.assertNotIn("wfd_ies=", found[0].details)
 
+    def test_failed_read_is_unknown_not_incapable(self):
+        """_nm_get_property returns "" when the gdbus call fails, not only when
+        the property is empty - a peer that ages out mid-scan hits this. That
+        is unknown, not incapable: reporting False labels a real sink
+        "probably not a Miracast sink", the mirror of the wpa_cli case below.
+        """
+        found = self._scan_with_wfd_ies("")
+        self.assertEqual(len(found), 1)
+        self.assertIsNone(found[0].wfd_capable)
+        out = _capture(peers.print_scan, found)
+        self.assertNotIn("probably not a Miracast sink", out)
+        self.assertNotIn("WFD capability data detected", out)
+
     def test_real_sink_is_capable(self):
         found = self._scan_with_wfd_ies(SINK_WFD_IES)
         self.assertEqual(len(found), 1)

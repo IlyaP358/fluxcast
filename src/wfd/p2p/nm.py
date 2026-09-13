@@ -140,7 +140,12 @@ def _nm_scan(interface: Optional[str], timeout: int) -> list[WFDPeer]:
         # A peer with no Wi-Fi Display data still returns "(<@ay []>,)" here:
         # an empty array, but a non-empty string. Gate on the parsed bytes, or
         # printers and every other P2P device get reported as valid sinks.
-        wfd_capable = bool(wfd_ies_list)
+        #
+        # An empty string is a different thing again: _nm_get_property returns
+        # "" when the gdbus call fails, which happens for a peer that ages out
+        # mid-scan. That is unknown, not incapable - calling it False labels a
+        # real sink "probably not a Miracast sink".
+        wfd_capable = bool(wfd_ies_list) if wfd_ies_raw else None
 
         details = "; ".join(
             part for part in [
