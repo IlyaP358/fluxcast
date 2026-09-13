@@ -312,9 +312,19 @@ class WFDLPCMMuxer:
     Both pipelines must end in appsink named 'sink'.
     """
 
-    def __init__(self, dest_ip: str, dest_port: int):
+    def __init__(
+        self,
+        dest_ip: str,
+        dest_port: int,
+        local_ip: str | None = None,
+        local_port: int | None = None,
+    ):
         self._dest   = (dest_ip, dest_port)
         self._sock   = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # WFD RTSP advertises a fixed client_rtp_ports source port; sinks often
+        # drop RTP that does not come from that port.
+        if local_port:
+            self._sock.bind((local_ip or "0.0.0.0", int(local_port)))
         self._rtp    = _RTPFramer()
         self._running = False
 

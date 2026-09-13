@@ -67,13 +67,7 @@ class WlrootsMixin:
                             "DMA-BUF not available (VAAPI missing, scaled deny, "
                             "or RENDER ENGINE is not dmabuf)"
                         )
-                    # prefer_lpcm Hyprland path is gated to Microsoft for now —
-                    # generic-TV LPCM mux wedged connect (UI streaming, TX=0).
-                    if (
-                        getattr(self.config, "prefer_lpcm", False)
-                        and not self.config.no_audio
-                        and "microsoft" in (self.config.peer_name or "").lower()
-                    ):
+                    if getattr(self.config, "prefer_lpcm", False) and not self.config.no_audio:
                         self._start_wf_recorder_lpcm(wf_recorder, monitor)
                     else:
                         self._start_wf_recorder_vaapi_dmabuf(wf_recorder, monitor)
@@ -268,7 +262,12 @@ class WlrootsMixin:
             "appsink name=sink sync=false max-buffers=8 drop=true"
         )
 
-        muxer = WFDLPCMMuxer(self.tv_ip, self.sink_rtp_port)
+        muxer = WFDLPCMMuxer(
+            self.tv_ip,
+            self.sink_rtp_port,
+            local_ip=self.local_ip,
+            local_port=self.config.source_port,
+        )
         try:
             muxer.start(vid_pipeline, aud_pipeline)
         except Exception:

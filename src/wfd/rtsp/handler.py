@@ -300,19 +300,10 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                     "[FluxCast WFD RTSP] TV advertised no AAC/LPCM audio; "
                     "falling back to video-only WFD."
                 )
-            elif audio and not _has_aac and _has_lpcm and not _is_microsoft:
-                # LPCM muxer for generic TVs is still unstable on the Hyprland
-                # DMA path (wedged sessions / stuck "connecting"). Keep AAC
-                # attempt for now so video can establish; Microsoft keeps LPCM.
-                print(
-                    "[FluxCast WFD RTSP] TV advertised LPCM only; "
-                    "negotiating AAC for session stability "
-                    "(WFD LPCM mux pending hardening)."
-                )
-            elif audio and not _has_aac and _has_lpcm and _is_microsoft:
+            elif audio and not _has_aac and _has_lpcm:
                 self.negotiated_lpcm = True
                 print(
-                    "[FluxCast WFD RTSP] Microsoft adapter LPCM caps; "
+                    "[FluxCast WFD RTSP] TV advertised LPCM only; "
                     "negotiating WFD LPCM (stream_type 0x83)."
                 )
             if _is_microsoft and audio:
