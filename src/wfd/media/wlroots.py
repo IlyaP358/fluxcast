@@ -298,14 +298,14 @@ class WlrootsMixin:
             muxer.stop()
             raise
 
-        # Always continuous (-D) on the LPCM path. Damage-aware ICC capture
-        # often skips frames when only terminal glyphs change — keys then
-        # appear on the TV only after pointer motion (or a burst of typing)
-        # creates "real" damage. Audio still flows during quiet video.
+        # Honor FLUXCAST_WFD_WF_RECORDER_DAMAGE like the DMA paths.
+        # Default remains continuous (-D). With DAMAGE=1, omit -D (damage-aware).
+        # Note: on stock Hyprland ICC, damage-aware can lag keystrokes until
+        # pointer motion; patched scheduleFrame-on-share mitigates that.
         wf_cmd = [
             wf_recorder,
             "-y",
-            "-D",
+            *self._wf_damage_flag(),
             *self._wf_capture_rate_args(wf_recorder),
             "-o", monitor.name,
             "-c", "h264_vaapi",
