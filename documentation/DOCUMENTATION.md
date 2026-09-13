@@ -260,7 +260,16 @@ and protocol selection remain controlled by the tray and cannot be set here.
   - **Video-only mode** - May cause immediate disconnects on Samsung TVs during WFD negotiation.
   - Use primarily for diagnostic/testing purposes.
 - `--wfd-audio-device`
-  - Explicit Pulse/PipeWire monitor source.
+  - Explicit Pulse/PipeWire **sink monitor** (e.g. `miracast.monitor`). Prefer a
+    `.monitor` device — never the default mic/`alsa_input` source.
+- **LPCM-only sinks** (many cheap Miracast dongles advertise `LPCM` and no `AAC`):
+  - FluxCast negotiates WFD LPCM and muxes MPEG-TS with `stream_type=0x83`
+    (custom `WFDLPCMMuxer`; GStreamer/ffmpeg cannot emit that type).
+  - Desktop audio should be routed to a dedicated null sink whose `.monitor`
+    is passed as `--wfd-audio-device`; capture uses `ffmpeg -f pulse` into the muxer.
+  - Escape hatch: `FLUXCAST_WFD_FORCE_AAC=1` keeps the DMA+AAC path (picture often
+    works; speakers stay silent on true LPCM-only TVs).
+  - Unit coverage: `tests/test_wfd_lpcm_mux.py` (AU framing, AOSP-style PIDs).
 - `--wfd-rtsp-port`
   - RTSP port in WFD source IE (usually does not need changes).
 - `--wfd-rtp-source-port`

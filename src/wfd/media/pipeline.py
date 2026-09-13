@@ -129,17 +129,53 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
         if self._lpcm_muxer is not None:
             self._lpcm_muxer.stop()
             self._lpcm_muxer = None
-        fd = getattr(self, "_lpcm_video_fd", None)
-        if fd is not None:
-            try:
-                import os as _os
+        for attr in ("_lpcm_video_fd", "_lpcm_audio_fd"):
+            fd = getattr(self, attr, None)
+            if fd is not None:
+                try:
+                    import os as _os
 
-                _os.close(fd)
-            except OSError:
-                pass
-            self._lpcm_video_fd = None
+                    _os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, attr, None)
         close_portal_capture(self.portal_session)
         self.portal_session = None
+
+    def _kill_orphan_wf_recorders(self) -> None:
+        """Best-effort: reap wf-recorder children left after a failed rebind."""
+        import os as _os
+        import signal as _signal
+
+        tracked = {proc.pid for proc in self.processes if proc.pid}
+        try:
+            import subprocess as _sp
+
+            out = _sp.check_output(["pgrep", "-a", "wf-recorder"], text=True)
+        except Exception:
+            return
+        for line in out.splitlines():
+            parts = line.split(None, 1)
+            if not parts:
+                continue
+            try:
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            if pid in tracked or pid == _os.getpid():
+                continue
+            # Only touch recorders aimed at our capture output / stdout pipe.
+            cmd = parts[1] if len(parts) > 1 else ""
+            if "/dev/stdout" not in cmd and "-f /dev/stdout" not in cmd:
+                continue
+            try:
+                _os.kill(pid, _signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            try:
+                _os.waitpid(pid, _os.WNOHANG)
+            except ChildProcessError:
+                pass
 
     def restart_video(self) -> None:
         """Restart capture/encode while leaving the RTSP session intact.
@@ -183,12 +219,26 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
                     proc.kill()
                     proc.wait(timeout=1)
             self.processes.clear()
+            if self._lpcm_muxer is not None:
+                self._lpcm_muxer.stop()
+                self._lpcm_muxer = None
+            for attr in ("_lpcm_video_fd", "_lpcm_audio_fd"):
+                fd = getattr(self, attr, None)
+                if fd is not None:
+                    try:
+                        import os as _os
+
+                        _os.close(fd)
+                    except OSError:
+                        pass
+                    setattr(self, attr, None)
+            self._kill_orphan_wf_recorders()
             close_portal_capture(self.portal_session)
             self.portal_session = None
             self._portal_gst_cmd = None
             self._portal_pw_fd = None
-            # Brief pause so RTP source ports can be rebound by the new ffmpeg.
-            _time.sleep(0.35)
+            # Allow the RTP source port to be rebound (LPCM muxer binds it).
+            _time.sleep(0.75)
             self._start_desktop()
             self.remember_capture_geometry()
             print("[FluxCast WFD Media] Desktop capture pipeline restarted.")
