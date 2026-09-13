@@ -390,7 +390,7 @@ class WFDLPCMMuxer:
             raise RuntimeError("Audio pipeline must contain appsink named 'sink'")
         sink.set_property("emit-signals", True)
         sink.set_property("max-buffers", 8)
-        sink.set_property("drop", False)
+        sink.set_property("drop", True)
 
         def _on_sample(appsink):
             sample = appsink.emit("pull-sample")
@@ -400,7 +400,11 @@ class WFDLPCMMuxer:
             ok, mapinfo = buf.map(Gst.MapFlags.READ)
             if ok:
                 arrival = time.monotonic()
-                self._audio_q.put((bytes(mapinfo.data), arrival), block=False)
+                try:
+                    self._audio_q.put_nowait((bytes(mapinfo.data), arrival))
+                except queue.Full:
+                    # Mux behind — drop audio rather than raise into GStreamer.
+                    pass
                 buf.unmap(mapinfo)
             return Gst.FlowReturn.OK
 
