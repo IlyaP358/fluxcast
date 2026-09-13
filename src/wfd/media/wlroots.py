@@ -172,13 +172,17 @@ class WlrootsMixin:
         only when the binary advertises ICC/toplevel support.
         """
         if wf_recorder_supports_icc(wf_recorder):
-            # Prefer 60 Hz capture for interactive latency on the Extend head.
-            # Stream/encode may still be 30 fps (VAAPI -p framerate=); capturing
-            # faster keeps keystrokes from waiting on a 33 ms capture tick.
-            # Override with FLUXCAST_WFD_ICC_CAPTURE_FPS (e.g. 30 to match stream).
+            # Match the user-selected / negotiated stream profile FPS
+            # (e.g. 1280x720p30 → 30). Encode already uses config.fps
+            # (-p framerate=); oversampling at a hardcoded 60 desyncs from
+            # Miracast mode pills and can overproduce vs a 30 Hz stream.
+            # Explicit override: FLUXCAST_WFD_ICC_CAPTURE_FPS.
             icc_fps = (os.environ.get("FLUXCAST_WFD_ICC_CAPTURE_FPS") or "").strip()
             if not icc_fps:
-                icc_fps = "60"
+                try:
+                    icc_fps = str(int(self.config.fps))
+                except (TypeError, ValueError, AttributeError):
+                    icc_fps = "30"
             return ["-r", icc_fps]
         return []
 
