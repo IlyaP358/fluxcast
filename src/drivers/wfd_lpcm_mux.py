@@ -324,7 +324,12 @@ class WFDLPCMMuxer:
         # WFD RTSP advertises a fixed client_rtp_ports source port; sinks often
         # drop RTP that does not come from that port.
         if local_port:
-            self._sock.bind((local_ip or "0.0.0.0", int(local_port)))
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                self._sock.bind((local_ip or "0.0.0.0", int(local_port)))
+            except OSError:
+                # Fall back to ephemeral if the RTSP port is still held.
+                pass
         self._rtp    = _RTPFramer()
         self._running = False
 
