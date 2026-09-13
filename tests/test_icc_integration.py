@@ -64,33 +64,32 @@ class IccCaptureRateArgsTest(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("FLUXCAST_WFD_ICC_CAPTURE_FPS", None)
 
+    def _harness(self, fps: int = 30):
+        from wfd.media.wlroots import WlrootsMixin
+
+        class H(WlrootsMixin):
+            def __init__(self):
+                self.config = SimpleNamespace(fps=fps)
+
+        return H()
+
     def test_stock_gets_no_rate_flag(self):
-        from wfd.media.wlroots import WlrootsMixin
-
-        class H(WlrootsMixin):
-            pass
-
         with mock.patch("wfd.media.wlroots.wf_recorder_supports_icc", return_value=False):
-            self.assertEqual(H()._wf_capture_rate_args("/usr/bin/wf-recorder"), [])
+            self.assertEqual(self._harness()._wf_capture_rate_args("/usr/bin/wf-recorder"), [])
 
-    def test_icc_defaults_to_60(self):
-        from wfd.media.wlroots import WlrootsMixin
-
-        class H(WlrootsMixin):
-            pass
-
+    def test_icc_follows_config_fps_30(self):
         with mock.patch("wfd.media.wlroots.wf_recorder_supports_icc", return_value=True):
-            self.assertEqual(H()._wf_capture_rate_args("/opt/icc"), ["-r", "60"])
+            self.assertEqual(self._harness(30)._wf_capture_rate_args("/opt/icc"), ["-r", "30"])
+
+    def test_icc_follows_config_fps_60(self):
+        with mock.patch("wfd.media.wlroots.wf_recorder_supports_icc", return_value=True):
+            self.assertEqual(self._harness(60)._wf_capture_rate_args("/opt/icc"), ["-r", "60"])
 
     def test_icc_fps_override(self):
-        from wfd.media.wlroots import WlrootsMixin
-
-        class H(WlrootsMixin):
-            pass
-
-        os.environ["FLUXCAST_WFD_ICC_CAPTURE_FPS"] = "30"
+        os.environ["FLUXCAST_WFD_ICC_CAPTURE_FPS"] = "60"
         with mock.patch("wfd.media.wlroots.wf_recorder_supports_icc", return_value=True):
-            self.assertEqual(H()._wf_capture_rate_args("/opt/icc"), ["-r", "30"])
+            # Override wins even when profile/stream is 30.
+            self.assertEqual(self._harness(30)._wf_capture_rate_args("/opt/icc"), ["-r", "60"])
 
 
 class LpcmIccFlagsTest(unittest.TestCase):
@@ -192,11 +191,12 @@ class LpcmIccFlagsTest(unittest.TestCase):
         self.assertIn("-D", wf)
         self.assertNotIn("-r", wf)
 
-    def test_lpcm_icc_has_d_and_r_60(self):
+    def test_lpcm_icc_has_d_and_r_matching_config_fps(self):
         wf = self._run_lpcm(icc=True)
         self.assertIn("-D", wf)
         self.assertIn("-r", wf)
-        self.assertEqual(wf[wf.index("-r") + 1], "60")
+        # LPCM harness config.fps is 30 (typical UI profile).
+        self.assertEqual(wf[wf.index("-r") + 1], "30")
 
 
 class LiveIccBinarySmokeTest(unittest.TestCase):
