@@ -242,7 +242,7 @@ class WlrootsMixin:
         print(f"[FluxCast WFD Media] Capturing screen : {monitor.name} ({meta['src_res']})")
         print(
             f"[FluxCast WFD Media] Capturing audio  : {audio_monitor} "
-            "(Pulse sink monitor via ffmpeg — not mic)"
+            "(sink monitor via pw-cat — not mic)"
         )
         print(
             "[FluxCast WFD Media] Video encoder   : h264_vaapi DMA-BUF + "
@@ -271,13 +271,15 @@ class WlrootsMixin:
             "video/x-h264,stream-format=byte-stream,alignment=au ! "
             "appsink name=sink sync=false max-buffers=1 drop=true"
         )
-        # Pulse monitor via ffmpeg (same device API as AAC/wf-recorder).
-        # pipewiresrc target-object=*.monitor is unreliable and can latch onto
-        # the default source (mic) → speaker feedback on the TV.
+        # Sink-monitor PCM via pw-cat (not ffmpeg/Lavf, not pipewiresrc).
+        # Pulse stream-restore keys on Lavf* and was remapping capture onto
+        # Speakers.monitor — picture OK, TV speakers silent. pw-cat --target
+        # binds the monitor node directly. Host-endian S16 → BE for WFD LPCM.
         aud_pipeline = (
             f"fdsrc fd={ar_fd} do-timestamp=true ! "
-            "audio/x-raw,format=S16BE,rate=48000,channels=2,"
+            "audio/x-raw,format=S16LE,rate=48000,channels=2,"
             "layout=interleaved ! "
+            "audioconvert ! audio/x-raw,format=S16BE ! "
             "audiobuffersplit output-buffer-size=1920 ! "
             "appsink name=sink sync=false max-buffers=32 drop=false"
         )
@@ -324,19 +326,34 @@ class WlrootsMixin:
         )
         os.close(w_fd)
 
-        # Explicit Pulse sink-monitor → raw S16BE (never default source/mic).
+        # Explicit sink-monitor → raw S16LE (never default source/mic).
+        # Prefer pw-cat --target so WirePlumber/stream-restore cannot remap
+        # the capture onto Speakers.monitor (ffmpeg -f pulse Lavf* did that).
         aud_cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel", "error",
-            "-f", "pulse",
-            "-i", audio_monitor,
-            "-f", "s16be",
-            "-ac", "2",
-            "-ar", "48000",
-            "-acodec", "pcm_s16be",
+            "pw-cat",
+            "-r",
+            "-a",
+            "--target", audio_monitor,
+            "--rate", "48000",
+            "--channels", "2",
+            "--format", "s16",
+            "-P", "application.name=fluxcast-wfd-capture",
+            "-P", f"media.name={audio_monitor}",
+            "-P", "media.role=Video",
             "-",
         ]
+        if shutil.which("pw-cat") is None:
+            # Fallback: parec with a unique client name (still Pulse, but not Lavf).
+            aud_cmd = [
+                "parec",
+                f"--device={audio_monitor}",
+                "--client-name=fluxcast-wfd-capture",
+                f"--stream-name={audio_monitor}",
+                "--rate=48000",
+                "--channels=2",
+                "--format=s16le",
+                "--raw",
+            ]
         aud_proc = subprocess.Popen(
             aud_cmd,
             stdout=aw_fd,
