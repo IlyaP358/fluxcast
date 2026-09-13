@@ -54,6 +54,9 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         # Consecutive unhealthy sender probes; capped so a dead stock pipeline
         # does not warn forever (see _UNHEALTHY_PROBE_GRACE).
         self._unhealthy_probe_streak = 0
+        # PIDs alive but RTP barely moving (e.g. encoder backlog / frozen TV).
+        self._stagnant_tx_streak = 0
+        self._last_interval_tx: Optional[int] = None
 
         if hasattr(self.server, "parent_server"):
             self.server.parent_server.has_connected_client = True  # type: ignore[attr-defined]
@@ -619,6 +622,33 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                     setup_ms=self.setup_ms,
                     sender_path_latency_ms=sender_path_latency_ms,
                 )
+            # Detect "alive but stuck": PIDs running, RTSP OK, but almost no RTP.
+            # Healthy 720p/1080p is typically >>100 KiB per 5s probe; idle damage-
+            # aware can be lower, so require several consecutive stalls.
+            if current is not None and self._last_interval_tx is not None:
+                interval = max(0, current - self._last_interval_tx)
+                if interval < 80 * 1024:
+                    self._stagnant_tx_streak += 1
+                else:
+                    self._stagnant_tx_streak = 0
+                if self._stagnant_tx_streak >= 3:
+                    print(
+                        "[FluxCast WFD Media] RTP TX stagnant "
+                        f"({interval} B / probe); rebinding desktop capture"
+                    )
+                    try:
+                        media.restart_video()
+                        self._stagnant_tx_streak = 0
+                        self._last_interval_tx = None
+                    except Exception as exc:  # noqa: BLE001
+                        print(
+                            "[FluxCast WFD Media] Capture rebind after "
+                            f"stagnant TX failed: {exc}"
+                        )
+                    self._schedule_probe(2.0)
+                    return
+            if current is not None:
+                self._last_interval_tx = current
             print(
                 f"[FluxCast WFD Media] Sender health: "
                 f"{', '.join(states)}; {media.tx_summary()}"
