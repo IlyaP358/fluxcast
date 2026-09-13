@@ -225,39 +225,32 @@ class WlrootsMixin:
             "-m", "nut",
             "-f", "/dev/stdout",
         ]
+        # Bake AAC into the same nut as video. A second live pulse input in
+        # ffmpeg stalls reading pipe:0 and fills wf-recorder's buffer pool.
+        if not self.config.no_audio and audio_monitor:
+            wf_cmd[1:1] = [f"--audio={audio_monitor}", "-C", "aac", "-R", "48000"]
 
         ffmpeg_cmd = [
             *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             "-fflags", "+genpts",
-            "-thread_queue_size", "1024",
+            "-thread_queue_size", "4096",
             "-f", "nut",
             "-i", "pipe:0",
+            "-map", "0:v:0",
+            "-c:v", "copy",
         ]
-
-        if not self.config.no_audio:
+        if not self.config.no_audio and audio_monitor:
             ffmpeg_cmd += [
-                "-thread_queue_size", "1024",
-                "-f", "pulse",
-                "-i", audio_monitor,
-                "-map", "0:v:0",
-                "-map", "1:a:0",
-                "-c:v", "copy",
-                "-af", "aresample=async=1",
-                "-c:a", "aac",
-                "-profile:a", "aac_low",
-                "-b:a", "128k",
-                "-ac", "2",
-                "-ar", "48000",
+                "-map", "0:a:0",
+                "-c:a", "copy",
                 "-streamid", "1:4352",
             ]
-        else:
-            ffmpeg_cmd += ["-map", "0:v:0", "-c:v", "copy"]
 
         ffmpeg_cmd += self._common_output_args()
 
         print(f"[FluxCast WFD Media] Capturing screen : {monitor.name} ({meta['src_res']})")
         if not self.config.no_audio:
-            print(f"[FluxCast WFD Media] Capturing audio  : {audio_monitor}")
+            print(f"[FluxCast WFD Media] Capturing audio  : {audio_monitor} (via wf-recorder)")
         if meta["out_res"] != meta["src_res"]:
             print(f"[FluxCast WFD Media] Scaling output  : {meta['out_res']}")
         proto = "icc" if icc else "wlr-screencopy"
@@ -321,14 +314,14 @@ class WlrootsMixin:
             *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             *plan.pre_input,
             "-fflags", "+genpts",
-            "-thread_queue_size", "1024",
+            "-thread_queue_size", "4096",
             "-f", "nut",
             "-i", "pipe:0",
         ]
 
         if not self.config.no_audio:
             ffmpeg_cmd += [
-                "-thread_queue_size", "1024",
+                "-thread_queue_size", "4096",
                 "-f", "pulse",
                 "-i", audio_monitor,
                 "-map", "0:v:0",
