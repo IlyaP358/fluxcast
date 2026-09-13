@@ -149,7 +149,7 @@ def _active_rtsp_probe(
                         vfmt = _selected_video_format(media_config, st["sink_vfmt"])
                         if st["no_audio"]:
                             afmt = "none"
-                        elif _probe_microsoft or _has_lpcm:
+                        elif _probe_microsoft:
                             afmt = WFD_AUDIO_LPCM_48K
                         else:
                             afmt = WFD_AUDIO_AAC
