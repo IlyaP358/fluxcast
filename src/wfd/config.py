@@ -13,6 +13,8 @@ class WFDMediaConfig:
     output_resolution: Optional[str] = None
     audio_device: Optional[str] = None
     no_audio: bool = False
+    # Sink advertised LPCM but not AAC — mux WFD LPCM (stream_type 0x83).
+    prefer_lpcm: bool = False
     test_pattern: bool = False
     ffmpeg_stats: bool = False
     source_port: int = 19002

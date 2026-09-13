@@ -159,6 +159,15 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
         if self._lpcm_muxer is not None:
             self._lpcm_muxer.stop()
             self._lpcm_muxer = None
+        fd = getattr(self, "_lpcm_video_fd", None)
+        if fd is not None:
+            try:
+                import os as _os
+
+                _os.close(fd)
+            except OSError:
+                pass
+            self._lpcm_video_fd = None
         close_portal_capture(self.portal_session)
         self.portal_session = None
 

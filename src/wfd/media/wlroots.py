@@ -67,7 +67,10 @@ class WlrootsMixin:
                             "DMA-BUF not available (VAAPI missing, scaled deny, "
                             "or RENDER ENGINE is not dmabuf)"
                         )
-                    self._start_wf_recorder_vaapi_dmabuf(wf_recorder, monitor)
+                    if getattr(self.config, "prefer_lpcm", False) and not self.config.no_audio:
+                        self._start_wf_recorder_lpcm(wf_recorder, monitor)
+                    else:
+                        self._start_wf_recorder_vaapi_dmabuf(wf_recorder, monitor)
                     self._emit_capture_encode(
                         capture_path="dmabuf",
                         encoder="h264_vaapi",
@@ -171,6 +174,118 @@ class WlrootsMixin:
         if wf_recorder_supports_icc(wf_recorder):
             return ["-r", str(self.config.fps)]
         return []
+
+    def _start_wf_recorder_lpcm(self, wf_recorder: str, monitor) -> None:
+        """DMA-BUF H.264 + WFD LPCM mux for LPCM-only sinks (e.g. many TVs).
+
+        ffmpeg mpegtsmux cannot emit WFD stream_type 0x83; reuse WFDLPCMMuxer
+        (same path as the Microsoft adapter) with wf-recorder annex-B video and
+        pulsesrc PCM audio.
+        """
+        meta = self._desktop_bitrate_plan(monitor)
+        audio_monitor = self.config.audio_device or _detect_audio_monitor()
+        if not audio_monitor:
+            raise WFDNotReady("LPCM path requires a Pulse/PipeWire audio monitor")
+
+        try:
+            from drivers.wfd_lpcm_mux import WFDLPCMMuxer
+        except ImportError as exc:
+            raise WFDNotReady(f"WFDLPCMMuxer unavailable: {exc}") from exc
+
+        qp = (os.environ.get("FLUXCAST_WFD_VAAPI_QP", "") or "18").strip() or "18"
+        gop = max(meta["gop"], int(self.config.fps) * 2)
+        out_w, out_h = meta["parsed_out"]
+        device = os.environ.get("FLUXCAST_VAAPI_DEVICE", "").strip() or "/dev/dri/renderD128"
+        if meta["out_res"] != meta["src_res"]:
+            vf = f"scale_vaapi=w={out_w}:h={out_h}:format=nv12:out_range=tv"
+        else:
+            vf = "scale_vaapi=format=nv12:out_range=tv"
+
+        r_fd, w_fd = os.pipe()
+        os.set_inheritable(r_fd, True)
+        os.set_inheritable(w_fd, True)
+
+        wf_cmd = [
+            wf_recorder,
+            "-y",
+            *self._wf_damage_flag(),
+            *self._wf_capture_rate_args(wf_recorder),
+            "-o", monitor.name,
+            "-c", "h264_vaapi",
+            "-d", device,
+            "-b", "0",
+            "-F", vf,
+            "-p", "rc_mode=CQP",
+            "-p", f"qp={qp}",
+            "-p", f"gop_size={gop}",
+            "-p", "quality=4",
+            "-p", "bf=0",
+            "-p", "profile=constrained_baseline",
+            "-p", f"framerate={self.config.fps}",
+            "-m", "h264",
+            "-f", "/dev/stdout",
+        ]
+
+        print(f"[FluxCast WFD Media] Capturing screen : {monitor.name} ({meta['src_res']})")
+        print(f"[FluxCast WFD Media] Capturing audio  : {audio_monitor} (WFD LPCM)")
+        print(
+            "[FluxCast WFD Media] Video encoder   : h264_vaapi DMA-BUF + "
+            "WFDLPCMMuxer (stream_type=0x83)"
+        )
+        print(
+            f"[FluxCast WFD Media] RTP target      : "
+            f"{self.tv_ip}:{self.sink_rtp_port} from local port {self.config.source_port}"
+        )
+
+        wf_proc = subprocess.Popen(
+            wf_cmd,
+            stdout=w_fd,
+            stderr=None,
+            pass_fds=(w_fd,),
+        )
+        os.close(w_fd)
+
+        vid_pipeline = (
+            f"fdsrc fd={r_fd} do-timestamp=true ! queue max-size-buffers=8 ! "
+            "h264parse config-interval=-1 ! "
+            "video/x-h264,stream-format=byte-stream ! "
+            "appsink name=sink sync=false max-buffers=4 drop=true"
+        )
+        # Prefer PipeWire node name (miracast) over Pulse *.monitor — this host
+        # has no gst pulsesrc plugin.
+        pw_target = audio_monitor.removesuffix(".monitor")
+        aud_pipeline = (
+            f"pipewiresrc target-object={pw_target} do-timestamp=true ! "
+            "audioconvert ! audioresample ! "
+            "audio/x-raw,format=S16BE,rate=48000,channels=2,"
+            "layout=interleaved ! "
+            "appsink name=sink sync=false max-buffers=8 drop=true"
+        )
+
+        muxer = WFDLPCMMuxer(self.tv_ip, self.sink_rtp_port)
+        try:
+            muxer.start(vid_pipeline, aud_pipeline)
+        except Exception:
+            wf_proc.terminate()
+            try:
+                wf_proc.wait(timeout=2)
+            except Exception:
+                wf_proc.kill()
+            os.close(r_fd)
+            raise
+
+        time.sleep(2.0)
+        if wf_proc.poll() is not None or not muxer._mux_thread or not muxer._mux_thread.is_alive():
+            muxer.stop()
+            if wf_proc.poll() is None:
+                wf_proc.terminate()
+            os.close(r_fd)
+            raise WFDNotReady("WFD LPCM muxer failed to stay up")
+
+        self._lpcm_muxer = muxer
+        self.processes.append(wf_proc)
+        # r_fd stays open for in-process fdsrc for the session lifetime
+        self._lpcm_video_fd = r_fd
 
     def _start_wf_recorder_vaapi_dmabuf(self, wf_recorder: str, monitor) -> None:
         """Capture+encode on GPU (DMA-BUF); ffmpeg only remuxes to RTP.

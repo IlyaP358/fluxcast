@@ -45,6 +45,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         self.source_rtp_port = self.media_config.source_port
         self.sink_video_format: Optional[WFDVideoFormat] = None
         self.negotiated_no_audio = False
+        self.negotiated_lpcm = False
         self.m3_sent = False
         self.media: Optional[WFDMediaPipeline] = None
         self.connected_at = time.monotonic()
@@ -111,7 +112,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
     def _audio_codecs(self) -> str:
         if self.media_config.no_audio or self.negotiated_no_audio:
             return "none"
-        if "microsoft" in self.media_config.peer_name.lower():
+        if self.negotiated_lpcm or "microsoft" in self.media_config.peer_name.lower():
             return WFD_AUDIO_LPCM_48K
         return WFD_AUDIO_AAC
 
@@ -299,10 +300,11 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                     "[FluxCast WFD RTSP] TV advertised no AAC/LPCM audio; "
                     "falling back to video-only WFD."
                 )
-            elif audio and not _has_aac and _has_lpcm and not _is_microsoft:
+            elif audio and not _has_aac and _has_lpcm:
+                self.negotiated_lpcm = True
                 print(
                     "[FluxCast WFD RTSP] TV advertised LPCM only; "
-                    "negotiating AAC encode anyway."
+                    "negotiating WFD LPCM (stream_type 0x83)."
                 )
             if _is_microsoft and audio:
                 print(f"[FluxCast WFD RTSP] Microsoft adapter audio caps: {audio}")
@@ -448,6 +450,13 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 output_resolution=mode.resolution,
                 fps=mode.fps,
                 no_audio=self.media_config.no_audio or self.negotiated_no_audio,
+                prefer_lpcm=(
+                    (
+                        self.negotiated_lpcm
+                        or "microsoft" in self.media_config.peer_name.lower()
+                    )
+                    and not (self.media_config.no_audio or self.negotiated_no_audio)
+                ),
                 h264_profile=_encoder_h264_profile(self.sink_video_format),
             )
             # Say so when the sink has no mode matching an explicit --output-res,
