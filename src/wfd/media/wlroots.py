@@ -529,10 +529,13 @@ class WlrootsMixin:
         if not self.config.no_audio and audio_monitor:
             wf_cmd[1:1] = [f"--audio={audio_monitor}", "-C", "aac", "-R", "48000"]
 
+        # Keep demux queue small — 4096 buffered nut packets can add hundreds of
+        # ms of glass-to-glass lag. Override with FLUXCAST_WFD_THREAD_QUEUE_SIZE.
+        _tqs = (os.environ.get("FLUXCAST_WFD_THREAD_QUEUE_SIZE", "") or "64").strip() or "64"
         ffmpeg_cmd = [
             *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             "-fflags", "+genpts",
-            "-thread_queue_size", "4096",
+            "-thread_queue_size", _tqs,
             "-f", "nut",
             "-i", "pipe:0",
             "-map", "0:v:0",
@@ -608,18 +611,19 @@ class WlrootsMixin:
             "-f", "/dev/stdout",
         ]
 
+        _tqs = (os.environ.get("FLUXCAST_WFD_THREAD_QUEUE_SIZE", "") or "64").strip() or "64"
         ffmpeg_cmd = [
             *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             *plan.pre_input,
             "-fflags", "+genpts",
-            "-thread_queue_size", "4096",
+            "-thread_queue_size", _tqs,
             "-f", "nut",
             "-i", "pipe:0",
         ]
 
         if not self.config.no_audio:
             ffmpeg_cmd += [
-                "-thread_queue_size", "4096",
+                "-thread_queue_size", _tqs,
                 "-f", "pulse",
                 "-i", audio_monitor,
                 "-map", "0:v:0",
@@ -666,15 +670,96 @@ class WlrootsMixin:
         return plan.name
 
     def _spawn_wf_ffmpeg(self, wf_cmd: list[str], ffmpeg_cmd: list[str]) -> None:
+        """Spawn wf-recorder | ffmpeg with stage timing on the nut pipe."""
+        import fcntl
+
+        t_spawn = time.monotonic()
+        fps = int(getattr(self.config, "fps", 30) or 30)
+        # Rough glass-to-glass budget (ms) for logs — TV display buffer unknown.
+        budget = {
+            "capture_frame_ms": round(1000.0 / max(fps, 1), 1),
+            "encode_budget_ms": round(2 * 1000.0 / max(fps, 1), 1),
+            "net_budget_ms": 30.0,
+            "tv_display_budget_ms": round(3 * 1000.0 / max(fps, 1), 1),
+        }
+        budget["sum_excl_queue_ms"] = round(
+            budget["capture_frame_ms"]
+            + budget["encode_budget_ms"]
+            + budget["net_budget_ms"]
+            + budget["tv_display_budget_ms"],
+            1,
+        )
+        print(
+            "[FluxCast WFD Media] Latency budget (est., excl. demux queue): "
+            f"capture≈{budget['capture_frame_ms']}ms + encode≈{budget['encode_budget_ms']}ms "
+            f"+ net≈{budget['net_budget_ms']}ms + TV≈{budget['tv_display_budget_ms']}ms "
+            f"→ ~{budget['sum_excl_queue_ms']}ms @ {fps}fps",
+            flush=True,
+        )
+        _append_latency_log(
+            getattr(self.config, "latency_log_path", None),
+            "latency_budget",
+            fps=fps,
+            **budget,
+        )
+
         wf_proc = subprocess.Popen(wf_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if wf_proc.stdout is None:
             wf_proc.kill()
             raise WFDNotReady("wf-recorder did not expose stdout.")
 
+        # Relay wf→ffmpeg so we can timestamp first captured nut bytes without
+        # a large ffmpeg demux backlog owning the pipe.
+        r_fd, w_fd = os.pipe()
+        try:
+            fcntl.fcntl(r_fd, fcntl.F_SETPIPE_SZ, 1 << 20)
+            fcntl.fcntl(w_fd, fcntl.F_SETPIPE_SZ, 1 << 20)
+        except OSError:
+            pass
+
         ffmpeg_proc = subprocess.Popen(
-            ffmpeg_cmd, stdin=wf_proc.stdout, stderr=subprocess.PIPE
+            ffmpeg_cmd, stdin=r_fd, stderr=subprocess.PIPE, pass_fds=(r_fd,)
         )
-        wf_proc.stdout.close()
+        os.close(r_fd)
+
+        first_nut = {"t": None}
+
+        def _relay() -> None:
+            try:
+                while True:
+                    chunk = wf_proc.stdout.read(256 * 1024)
+                    if not chunk:
+                        break
+                    if first_nut["t"] is None:
+                        first_nut["t"] = time.monotonic()
+                        dt_ms = round((first_nut["t"] - t_spawn) * 1000.0, 1)
+                        print(
+                            f"[FluxCast WFD Media] Latency probe: first capture bytes "
+                            f"(nut) {dt_ms} ms after sender spawn",
+                            flush=True,
+                        )
+                        _append_latency_log(
+                            getattr(self.config, "latency_log_path", None),
+                            "first_capture_bytes",
+                            ms_after_spawn=dt_ms,
+                        )
+                    try:
+                        os.write(w_fd, chunk)
+                    except BrokenPipeError:
+                        break
+            except Exception:
+                pass
+            finally:
+                try:
+                    wf_proc.stdout.close()
+                except Exception:
+                    pass
+                try:
+                    os.close(w_fd)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_relay, name="fluxcast-nut-relay", daemon=True).start()
         self._watch_sender_stderr(wf_proc, "wf-recorder")
         self._watch_sender_stderr(ffmpeg_proc, "ffmpeg")
         time.sleep(1.0)
