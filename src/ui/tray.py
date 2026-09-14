@@ -3,6 +3,7 @@ import sys
 import subprocess
 import threading
 import webbrowser
+from version import get_fluxcast_version
 from i18n import _l
 
 os.environ.setdefault("PYSTRAY_BACKEND", "appindicator")
@@ -20,6 +21,7 @@ _TRAY_ICON_PATHS = {
     "casting": os.path.join(_BASE, "assets", "tray-casting.png"),
 }
 _MAIN = os.path.join(_BASE, "main.py")
+_REPO = "https://github.com/IlyaP358/fluxcast"
 _PY = sys.executable
 _LOG_PATH = "/tmp/fluxcast-cast.log"
 
@@ -385,6 +387,7 @@ def _show_about() -> None:
         return 1.0
 
     _scale = _get_font_scale()
+    version = get_fluxcast_version()
 
     def _run():
         import tkinter as tk
@@ -400,11 +403,30 @@ def _show_about() -> None:
 
         root = tk.Tk()
         root.title("About FluxCast")
-        root.resizable(False, False)
+        root.resizable(True, True)
         root.configure(bg=BG)
+        try:
+            root.attributes("-type", "dialog")
+        except tk.TclError:
+            pass
 
-        frame = tk.Frame(root, bg=BG, padx=28, pady=20)
-        frame.pack()
+        def _link(parent, text, url, size, colour):
+            font = ("sans-serif", int(size * _scale))
+            lbl = tk.Label(parent, text=text, fg=colour, bg=BG, cursor="hand2", font=font)
+            lbl.bind("<Enter>", lambda _: lbl.configure(font=font + ("underline",)))
+            lbl.bind("<Leave>", lambda _: lbl.configure(font=font))
+            lbl.bind("<Button-1>", lambda _: webbrowser.open(url))
+            return lbl
+
+        canvas = tk.Canvas(root, bg=BG, bd=0, highlightthickness=0)
+        scrollbar = tk.Scrollbar(root, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        root.rowconfigure(0, weight=1)
+        root.columnconfigure(0, weight=1)
+
+        frame = tk.Frame(canvas, bg=BG, padx=int(28 * _scale), pady=int(20 * _scale))
+        body = canvas.create_window(0, 0, window=frame, anchor="nw")
 
         try:
             img = Image.open(_ICON_PATH).resize((72, 72), Image.LANCZOS)
@@ -415,8 +437,10 @@ def _show_about() -> None:
         except Exception:
             pass
 
-        tk.Label(frame, text="FluxCast", font=("sans-serif", int(16 * _scale), "bold"),
+        tk.Label(frame, text=f"FluxCast", font=("sans-serif", int(16 * _scale), "bold"),
                  bg=BG, fg=FG).pack()
+        tk.Label(frame, text=version, font=("sans-serif", int(10 * _scale)),
+                 bg=BG, fg=FG).pack(pady=(0, 8), anchor="center")
         tk.Label(frame, text=_l("Desktop → Smart TV streaming for Linux"),
                  font=("sans-serif", int(10 * _scale)), bg=BG, fg=ACCENT).pack(pady=(2, 14))
 
@@ -430,19 +454,16 @@ def _show_about() -> None:
             "full RTSP handshake, RTP media stream. ~1 second latency, "
             "video and audio. It actually works."
         )
-        tk.Label(frame, text=story, font=("sans-serif", int(10 * _scale)), wraplength=360,
-                 justify="left", bg=BG, fg=FG).pack(pady=(0, 14))
+        tk.Label(frame, text=story, font=("sans-serif", int(10 * _scale)),
+                 wraplength=int(360 * _scale), justify="left", bg=BG, fg=FG).pack(pady=(0, 14))
 
         tk.Frame(frame, bg=SEP, height=1).pack(fill="x", pady=(0, 10))
 
         for text, url in [
             ("fluxcast.dev", "https://fluxcast.dev/"),
-            ("github.com/IlyaP358/fluxcast", "https://github.com/IlyaP358/fluxcast"),
+            ("github.com/IlyaP358/fluxcast", _REPO),
         ]:
-            lbl = tk.Label(frame, text=text, fg=LINK, cursor="hand2",
-                           font=("sans-serif", int(10 * _scale), "underline"), bg=BG)
-            lbl.pack(anchor="w")
-            lbl.bind("<Button-1>", lambda _, u=url: webbrowser.open(u))
+            _link(frame, text, url, 10, LINK).pack(anchor="center", expand=True)
 
         KOFI_W, KOFI_H, KOFI_R = 300, 60, 13
         KOFI_GLOW_PAD = 27
@@ -489,24 +510,60 @@ def _show_about() -> None:
 
         FG_DIM = "#6b7280"
         for text, url in [
-            ("illia.pukalov@teleinformatika.eu", "mailto:illia.pukalov@teleinformatika.eu"),
+            ("illia@fluxcast.dev", "mailto:illia@fluxcast.dev"),
             ("Join our Discord", "https://discord.gg/GCmPNpJZM7"),
             ("View Contributors", "https://fluxcast.dev/contributors.html"),
         ]:
-            lbl = tk.Label(frame, text=_l(text), fg=FG_DIM, cursor="hand2",
-                           font=("sans-serif", int(8 * _scale), "underline"), bg=BG)
-            lbl.pack()
-            lbl.bind("<Button-1>", lambda _, u=url: webbrowser.open(u))
+            _link(frame, _l(text), url, 8, FG_DIM).pack()
 
         tk.Frame(frame, bg=SEP, height=1).pack(fill="x", pady=(12, 10))
 
-        tk.Label(frame, text=_l("Author: IlyaP358  |  Code licensed under GPL-3.0"),
-                 font=("sans-serif", int(7 * _scale)), bg=BG, fg=FG_DIM).pack(pady=(8, 0))
+        credit = _l("Author: IlyaP358  |  Code licensed under GPL-3.0")
+        author, separator, licence = credit.partition("|")
+        footer = tk.Frame(frame, bg=BG)
+        footer.pack(pady=(8, 0))
+        if separator:
+            _link(footer, author.strip(), _REPO.rsplit("/", 1)[0], 7, FG_DIM).pack(side="left")
+            tk.Label(footer, text=f"  {separator}  ", font=("sans-serif", int(7 * _scale)),
+                     bg=BG, fg=FG_DIM).pack(side="left")
+            _link(footer, licence.strip(), f"{_REPO}/blob/main/LICENSE", 7, FG_DIM).pack(side="left")
+        else:
+            _link(footer, credit, f"{_REPO}/blob/main/LICENSE", 7, FG_DIM).pack()
 
         tk.Button(frame, text=_l("Close"), command=root.destroy, width=10,
                   bg=BTN_BG, fg=FG, activebackground="#253d2a",
                   activeforeground=FG, relief="flat",
                   cursor="hand2").pack(pady=(12, 0))
+
+        root.update_idletasks()
+        natural_w, natural_h = frame.winfo_reqwidth(), frame.winfo_reqheight()
+        # Leave room for the panel and title bar rather than filling the screen.
+        height = min(natural_h, int(root.winfo_screenheight() * 0.85))
+        scrolls = height < natural_h
+        if scrolls:
+            scrollbar.grid(row=0, column=1, sticky="ns")
+        root.geometry(f"{natural_w + (scrollbar.winfo_reqwidth() if scrolls else 0)}x{height}")
+        root.minsize(natural_w, int(240 * _scale))
+
+        def _fit(_=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfigure(body, width=canvas.winfo_width())
+            if frame.winfo_reqheight() > canvas.winfo_height():
+                scrollbar.grid(row=0, column=1, sticky="ns")
+            else:
+                scrollbar.grid_remove()
+
+        def _wheel(event):
+            if event.num == 4 or event.delta > 0:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5 or event.delta < 0:
+                canvas.yview_scroll(1, "units")
+
+        frame.bind("<Configure>", _fit)
+        canvas.bind("<Configure>", _fit)
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            root.bind_all(sequence, _wheel)
+
         root.mainloop()
 
     _about_thread = threading.Thread(target=_run, daemon=True)
