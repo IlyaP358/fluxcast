@@ -227,6 +227,8 @@ and protocol selection remain controlled by the tray and cannot be set here.
     is missing, but never raises GO intent on its own: `go_intent 0` is a
     deliberate fix for some sinks (see #72), and silently overriding it
     would break those.
+  - Also accepts non-DFS 5GHz `36|40|44|48|149|153|157|161` and applies for
+    `--wfd-p2p-backend nm` as well as `wpas` (wpa OperChannel before connect).
 - `--wfd-monitor NAME`
   - **Deprecated** alias for `--monitor`, kept for backward compatibility. Use `--monitor` instead.
 
@@ -261,7 +263,23 @@ and protocol selection remain controlled by the tray and cannot be set here.
   - **Video-only mode** - May cause immediate disconnects on Samsung TVs during WFD negotiation.
   - Use primarily for diagnostic/testing purposes.
 - `--wfd-audio-device`
-  - Explicit Pulse/PipeWire monitor source.
+  - Explicit Pulse/PipeWire **sink monitor** (e.g. `miracast.monitor`). Prefer a
+    `.monitor` device — never the default mic/`alsa_input` source.
+- **LPCM-only sinks** (many cheap Miracast dongles advertise `LPCM` and no `AAC`):
+  - FluxCast negotiates WFD LPCM and muxes MPEG-TS with `stream_type=0x83`
+    (custom `WFDLPCMMuxer`; GStreamer/ffmpeg cannot emit that type).
+  - Desktop audio should be routed to a dedicated null sink whose `.monitor`
+    is passed as `--wfd-audio-device`; capture uses `pw-cat --target` with
+    `media.role=Abstract` (not `Video` — stream-restore remapped that onto the
+    default mic → feedback; also not `ffmpeg -f pulse` / Lavf).
+  - Escape hatch: `FLUXCAST_WFD_FORCE_AAC=1` keeps the DMA+AAC path (picture often
+    works; speakers stay silent on true LPCM-only TVs).
+  - Sender stderr is watched for `buffer pool full` / non-monotonic DTS; after a
+    short debounce FluxCast auto-rebinds desktop capture (keeps RTSP up).
+  - Unit coverage: `tests/test_wfd_lpcm_mux.py` (AU framing, AOSP-style PIDs);
+    `tests/test_lpcm_audio_capture.py` (pw-cat/parec argv + Abstract role +
+    S16LE→BE); `tests/test_vaapi_rc.py` (CQP vs CBR `-p` order);
+    `tests/test_icc_integration.py` (PROTO=icc, `-D`/`-r` vs `config.fps`).
 - `--wfd-rtsp-port`
   - RTSP port in WFD source IE (usually does not need changes).
 - `--wfd-rtp-source-port`
@@ -319,6 +337,68 @@ python3 src/main.py --wfd-latency-log
 python3 src/main.py --wfd-latency-log /tmp/my-latency.jsonl
 ```
 
+### WFD environment variables
+
+Optional knobs for the wlroots/`wf-recorder` capture path. Defaults preserve the
+historical software encode pipeline (`libx264` over a raw pipe).
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `FLUXCAST_WFD_ENCODER` | `libx264` | Encode backend: `libx264` (historical default), `vaapi`, `qsv`, or `auto` (VAAPI then QSV then libx264). |
+| `FLUXCAST_WFD_ENCODE_BIAS` | unset | Force `full` or `efficient` bitrate/preset bias. When unset, automatic battery / power-saver bias only applies if GPU encode was opted in (`vaapi` / `qsv` / `auto`). |
+| `FLUXCAST_WFD_VAAPI_DEVICE` | first `/dev/dri/renderD12x` | VAAPI render node override. |
+| `FLUXCAST_WFD_CAPTURE_ENCODE` | unset → pipe | Capture path when no preference file/pref is set: `pipe` / `raw` / `hwupload` = raw `wf-recorder` → ffmpeg encode; `vaapi` / `dmabuf` / `gpu` = prefer `wf-recorder -c h264_vaapi` (DMA-BUF); `auto` = DMA-BUF when GPU encode was requested. |
+| `FLUXCAST_WFD_CAPTURE_ENCODE_PREF` | unset | Explicit capture preference: `dmabuf` (DMA-BUF + VAAPI CQP), `vaapi` (raw pipe → `hwupload` → `h264_vaapi`), or `cpu` (raw pipe → `libx264`). Overrides deriving preference from `FLUXCAST_WFD_CAPTURE_ENCODE` / `FLUXCAST_WFD_ENCODER`. |
+| `FLUXCAST_WFD_CAPTURE_ENCODE_FILE` | unset | Path to a one-line preference file (`dmabuf`, `vaapi`, or `cpu`). Read on every desktop capture start/rebind so an external controller can change path without restarting the process. Wins over `FLUXCAST_WFD_CAPTURE_ENCODE_PREF`. |
+| `FLUXCAST_WFD_DMABUF_ALLOW_SCALED` | allow | When the Hyprland output scale is not `1`, DMA-BUF is still allowed by default. Set to `0` / `false` / `no` / `off` / `never` to force the pipe path on scaled outputs. |
+| `FLUXCAST_WFD_VAAPI_RC` | `CQP` | DMA-BUF `h264_vaapi` rate control: `CQP` (default, best for desktop text), `CBR`, `VBR`, … On Intel, CBR often **undershoots** (~3 Mbps despite a high target) → blocky video; prefer CQP for quality. |
+| `FLUXCAST_WFD_VAAPI_QP` | `18` | Constant QP when `RC=CQP`. Lower is sharper / larger. |
+| `FLUXCAST_WFD_VAAPI_BITRATE` | desktop plan / `12M` | Target for CBR/VBR (AVOption `b=` in bits/s). Ignored for CQP. |
+| `FLUXCAST_WFD_VAAPI_GOP` | stream fps | GOP length in frames (default ≈ 1s). Shorter recovers faster after drops; longer is more efficient for film. |
+| `FLUXCAST_WFD_VAAPI_QUALITY` | `4` | VAAPI speed/quality tradeoff (lower = slower/better). |
+| `FLUXCAST_WFD_WF_RECORDER_DAMAGE` | unset | Set to `1` / `true` / `yes` / `on` to omit `wf-recorder -D` (damage-aware capture). Default keeps `-D` for historical continuous capture. LPCM honors this the same as DMA paths. |
+| `FLUXCAST_WFD_WF_RECORDER_BIN` | unset | Absolute path to a `wf-recorder` binary. When set (and usable), preferred over `PATH`. Opt-in for a local [PR #347](https://github.com/ammen99/wf-recorder/pull/347) ICC build — **not** probed automatically. |
+| `FLUXCAST_WFD_WF_RECORDER_PROTO` | unset / `auto` | `icc` requires an ICC-capable binary (`--toplevel` / `ext-copy-capture`). In FluxCast alone, a non-ICC binary with `PROTO=icc` yields no recorder; Omarchy `miracast-ctl` fail-softs to PATH instead. `wlr` / unset / `auto` accept any usable binary (default stock `PATH`). |
+| `FLUXCAST_WFD_MODE_STATE` | unset | If set to a file path, write sink-advertised CEA/VESA modes (chosen mode, supported list, peer MAC / name) as JSON after RTSP negotiation — for external UIs. |
+
+#### Capture preference and fallback
+
+With no preference file and default `FLUXCAST_WFD_ENCODER=libx264`, capture stays on the historical raw-pipe + software encode path.
+
+When preference is `dmabuf` (or derived from `CAPTURE_ENCODE=auto`/`vaapi` with a GPU encoder request), FluxCast tries in order:
+
+1. `wf-recorder -c h264_vaapi` DMA-BUF (`rc_mode` from `FLUXCAST_WFD_VAAPI_RC`, default CQP; `out_range=tv`, `bf=0`; stock omits `-r`, ICC builds pass `-r $fps`)
+2. raw pipe → `hwupload` → `h264_vaapi`
+3. raw pipe → `libx264`
+
+Preference `vaapi` skips DMA-BUF and tries steps 2 then 3. Preference `cpu` uses step 3 only.
+
+Examples:
+
+```bash
+# Opt into GPU encode when ffmpeg has h264_vaapi / h264_qsv
+FLUXCAST_WFD_ENCODER=auto python3 src/main.py
+
+# Prefer DMA-BUF capture+encode (falls back to pipe VAAPI, then libx264)
+FLUXCAST_WFD_ENCODER=auto FLUXCAST_WFD_CAPTURE_ENCODE_PREF=dmabuf python3 src/main.py
+
+# Force software encode over the raw pipe
+FLUXCAST_WFD_CAPTURE_ENCODE_PREF=cpu python3 src/main.py
+
+# Live-updatable preference (write "vaapi\n" or "cpu\n" into the file, then SIGUSR1)
+FLUXCAST_WFD_CAPTURE_ENCODE_FILE=/tmp/fluxcast-capture-encode \
+  FLUXCAST_WFD_ENCODER=auto python3 src/main.py
+
+# Quieter Hyprland capture (omit wf-recorder -D)
+FLUXCAST_WFD_WF_RECORDER_DAMAGE=1 python3 src/main.py
+
+# Opt into a local ext-image-copy-capture wf-recorder (PR #347) — not the default
+FLUXCAST_WFD_WF_RECORDER_BIN=/path/to/wf-recorder-icc \
+  FLUXCAST_WFD_WF_RECORDER_PROTO=icc \
+  FLUXCAST_WFD_ENCODER=auto FLUXCAST_WFD_CAPTURE_ENCODE_PREF=dmabuf \
+  python3 src/main.py
+```
+
 ## Latency Log Events
 
 - `rtsp_connected`
@@ -333,6 +413,9 @@ python3 src/main.py --wfd-latency-log /tmp/my-latency.jsonl
   - This is an accurate sender-path latency metric inside FluxCast (excludes TV decode/render delay).
 - `sender_health`
   - Periodic telemetry of process health and transmitted-byte counter.
+- `capture_encode`
+  - Emitted when a desktop capture/encode path starts (including after SIGUSR1 rebind).
+  - Fields: `capture_path` (`dmabuf` or `pipe`), `encoder` (e.g. `h264_vaapi`, `libx264`), `preference` (`dmabuf` / `vaapi` / `cpu`), `fallback` (true if not the first attempt).
 
 ## Practical Command Combinations
 

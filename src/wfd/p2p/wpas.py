@@ -18,6 +18,7 @@ module's job is just to drive the connection itself, replacing
 _connect_peer / _wait_for_nm_activation from nm.py.
 """
 
+import subprocess
 import time
 from typing import Optional
 
@@ -29,8 +30,9 @@ from .dbus import (
 )
 from .device import _p2p_device_iface_paths, _set_p2p_go_intent, _set_p2p_oper_channel
 from .peers import _default_wifi_interface
-from .wpas_ip import configure_ip, get_p2p_role, release_ip_config
-
+from .wpas_ip import (
+    configure_ip, get_p2p_role, mark_managed, mark_unmanaged, release_ip_config,
+)
 WPA_IFACE = "fi.w1.wpa_supplicant1.Interface"
 WPA_P2P_IFACE = "fi.w1.wpa_supplicant1.Interface.P2PDevice"
 
@@ -127,13 +129,30 @@ def _wait_for_peer(iface_path: str, peer_mac: str, timeout: int = 20) -> str:
     )
 
 
+def _channel_to_freq_mhz(channel: int) -> int:
+    """Map a P2P channel number to center frequency in MHz."""
+    if 1 <= channel <= 13:
+        return 2407 + 5 * channel
+    if channel == 14:
+        return 2484
+    if 32 <= channel <= 177:
+        return 5000 + 5 * channel
+    raise ValueError(f"unsupported P2P channel for freq mapping: {channel}")
+
+
 def _wpas_connect(iface_path: str, peer_path: str, go_intent: int = 0,
-                   wps_method: str = "pbc") -> None:
+                   wps_method: str = "pbc",
+                   frequency_mhz: Optional[int] = None) -> None:
+    # Optional Connect 'frequency' (MHz) hard-forces GO channel when MCC allows.
+    freq_part = ""
+    if frequency_mhz is not None:
+        freq_part = f"'frequency': <int32 {int(frequency_mhz)}>, "
     args = (
         "{"
         f"'peer': <objectpath '{peer_path}'>, "
         f"'wps_method': <'{wps_method}'>, "
         f"'go_intent': <int32 {go_intent}>, "
+        f"{freq_part}"
         "'persistent': <false>"
         "}"
     )
@@ -159,6 +178,44 @@ def _list_wpas_interfaces() -> set[str]:
     return set(_object_paths(result.stdout))
 
 
+def _wait_for_go_peer_associated(data_iface: str, peer_mac: str,
+                                  timeout: float = 35.0) -> None:
+    """Wait for AP-STA-CONNECTED before IP setup (flush during WPS kills the GO)."""
+    print(f"[FluxCast WFD] Waiting for AP-STA-CONNECTED ({peer_mac} on {data_iface})...")
+    deadline = time.monotonic() + timeout
+    peer = peer_mac.lower().replace("-", ":")
+    since = time.strftime("%Y-%m-%d %H:%M:%S")
+    while time.monotonic() < deadline:
+        info = subprocess.run(
+            ["iw", "dev", data_iface, "info"],
+            capture_output=True, text=True, timeout=5.0,
+        )
+        if info.returncode != 0 or "type P2P-GO" not in (info.stdout or ""):
+            raise WFDNotReady(
+                f"P2P group interface {data_iface} disappeared before "
+                "AP-STA-CONNECTED (group formation likely failed)."
+            )
+        journal = subprocess.run(
+            [
+                "journalctl", "-b", "--since", since,
+                "_COMM=wpa_supplicant", "--no-pager",
+            ],
+            capture_output=True, text=True, timeout=5.0,
+        )
+        text = (journal.stdout or "").lower()
+        if "p2p-group-formation-failure" in text:
+            raise WFDNotReady(
+                "P2P-GROUP-FORMATION-FAILURE before AP-STA-CONNECTED"
+            )
+        if "ap-sta-connected" in text and peer in text:
+            print(f"[FluxCast WFD] AP-STA-CONNECTED for {peer_mac} on {data_iface}.")
+            return
+        time.sleep(0.4)
+    raise WFDNotReady(
+        f"Timed out waiting for AP-STA-CONNECTED ({peer_mac} on {data_iface})."
+    )
+
+
 def _wait_for_group_interface(before: set[str], timeout: float = 40.0) -> str:
     """Detect the new wpa_supplicant Interface object GO Negotiation creates,
     then read its Ifname to get the real OS network interface name.
@@ -178,6 +235,11 @@ def _wait_for_group_interface(before: set[str], timeout: float = 40.0) -> str:
         for path in new_paths:
             ifname = _wpas_get_string(path, WPA_IFACE, "Ifname", privileged=True)
             if ifname:
+                # Mark unmanaged before WPS completes so NM does not take the iface.
+                try:
+                    mark_unmanaged(ifname)
+                except Exception as exc:
+                    print(f"[FluxCast WFD] Warning: could not mark {ifname} unmanaged: {exc}")
                 return ifname
         time.sleep(0.5)
     raise WFDNotReady(
@@ -202,14 +264,20 @@ def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
     # Must happen before Find/Connect - see _set_wfd_ies's docstring.
     _set_wfd_ies(rtsp_port)
 
+    force_freq: Optional[int] = None
     if p2p_channel is not None:
         _set_p2p_oper_channel(interface, p2p_channel)
+        try:
+            force_freq = _channel_to_freq_mhz(p2p_channel)
+        except ValueError as exc:
+            print(f"[FluxCast WFD] Warning: {exc}; Connect will not hard-force freq")
 
     # GO intent only matters for GO Negotiation (Connect()), so it's set
     # right before that call rather than up here alongside discovery.
     # Setting it earlier raced wpa_supplicant's P2P state machine: Find()
     # would report success, but Peers stayed empty.
     previous_intent = None
+    p2p_dev_iface = f"p2p-dev-{physical_iface}" if physical_iface else None
     try:
         peer_path = _wait_for_peer(iface_path, peer_mac)
 
@@ -217,7 +285,12 @@ def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
         interfaces_before = _list_wpas_interfaces()
         print(f"[FluxCast WFD] Connecting to {peer_mac} directly via wpa_supplicant "
               "(NetworkManager not involved in this step)...")
-        _wpas_connect(iface_path, peer_path, go_intent=go_intent)
+        if force_freq is not None:
+            print(f"[FluxCast WFD] Connect frequency={force_freq} MHz "
+                  f"(channel {p2p_channel})")
+        _wpas_connect(
+            iface_path, peer_path, go_intent=go_intent, frequency_mhz=force_freq
+        )
 
         data_iface = _wait_for_group_interface(interfaces_before)
         role = get_p2p_role(data_iface)
@@ -234,6 +307,10 @@ def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
                   "picked the channel instead. Pair this with "
                   "--wfd-go-intent 15 if you need the channel forced.")
 
+        if role == "P2P-GO":
+            _wait_for_go_peer_associated(data_iface, peer_mac)
+        mark_unmanaged(data_iface)
+
         try:
             configure_ip(data_iface, peer_mac, role, physical_iface)
         except Exception:
@@ -246,7 +323,12 @@ def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
 
         print(f"[FluxCast WFD] {data_iface} is up and IP-configured. "
               "Handing off to the RTSP server.")
+        p2p_dev_iface = None
         return data_iface
+    except Exception:
+        if p2p_dev_iface:
+            mark_managed(p2p_dev_iface)
+        raise
     finally:
         if previous_intent is not None:
             _set_p2p_go_intent(interface, previous_intent, restoring=True,
@@ -275,3 +357,8 @@ def release_wpa_supplicant_connection(interface: Optional[str], data_iface: str)
             print("[FluxCast WFD] wpa_supplicant P2P group removed.")
         except Exception as exc:
             print(f"[FluxCast WFD] Warning: GroupRemove failed: {exc}")
+
+    if interface:
+        mark_managed(f"p2p-dev-{interface}")
+    if data_iface:
+        mark_managed(data_iface)

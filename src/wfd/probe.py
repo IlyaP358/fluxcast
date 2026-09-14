@@ -133,10 +133,14 @@ def _active_rtsp_probe(
                         st["sink_vfmt"] = _parse_sink_video_format(params.get("wfd_video_formats", ""))
                         audio = params.get("wfd_audio_codecs", "")
                         _probe_microsoft = "microsoft" in media_config.peer_name.lower()
+                        _caps = (audio or "").upper()
+                        _has_aac = "AAC" in _caps
+                        _has_lpcm = "LPCM" in _caps
                         if (
                             audio
                             and not media_config.no_audio
-                            and "AAC" not in audio.upper()
+                            and not _has_aac
+                            and not _has_lpcm
                             and not _probe_microsoft
                         ):
                             st["no_audio"] = True
@@ -145,7 +149,7 @@ def _active_rtsp_probe(
                         vfmt = _selected_video_format(media_config, st["sink_vfmt"])
                         if st["no_audio"]:
                             afmt = "none"
-                        elif _probe_microsoft:
+                        elif _has_lpcm or _probe_microsoft:
                             afmt = WFD_AUDIO_LPCM_48K
                         else:
                             afmt = WFD_AUDIO_AAC

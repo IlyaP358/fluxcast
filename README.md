@@ -271,6 +271,13 @@ sudo ufw allow 7236/tcp
 Detailed flags, modes, and usage examples:  
 [documentation/DOCUMENTATION.md](documentation/DOCUMENTATION.md)
 
+Optional WFD encode/capture env vars (`FLUXCAST_WFD_ENCODER`, capture
+preference / DMA-BUF, power bias, damage-aware `wf-recorder`, sink mode
+state file) are documented under **WFD environment variables** in that file.
+Default encode stays `libx264`; set `FLUXCAST_WFD_ENCODER=auto` to try
+VAAPI/QSV when available, and optionally `FLUXCAST_WFD_CAPTURE_ENCODE_PREF`
+(`dmabuf` / `vaapi` / `cpu`) to choose the capture path.
+
 ## Tested Environment
 
 ### TVs and receivers:

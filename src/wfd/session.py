@@ -1,3 +1,4 @@
+import signal
 import threading
 import time
 
@@ -8,7 +9,9 @@ from .constants import WFD_RTSP_PORT, WFD_UIBC_PORT
 from .dump import report_ts_dump
 from .env import _is_hyprland_session, _is_wayland_session
 from .firewall import _close_wfd_firewall_port, _open_wfd_firewall_port
-from .p2p.device import _set_p2p_device_name, _set_p2p_go_intent
+from .p2p.device import (
+    _set_p2p_device_name, _set_p2p_go_intent, _set_p2p_oper_channel,
+)
 from .p2p.nm import (
     _connect_peer, _deactivate_connection, _disconnect_device,
     _nm_p2p_device_path, _wait_for_nm_activation,
@@ -108,6 +111,7 @@ def start_experimental_backend(args) -> None:
         latency_log_path=getattr(args, "wfd_latency_log", None),
         capture_backend=getattr(args, "wfd_capture_backend", "auto"),
         peer_name=peer.name,
+        peer_address=peer.address,
         uibc=getattr(args, "wfd_uibc", False),
         aosp_pmt_pid=getattr(args, "wfd_aosp_pmt_pid", False),
         dump_ts_path=getattr(args, "wfd_dump_ts", None),
@@ -151,6 +155,11 @@ def start_experimental_backend(args) -> None:
             previous_go_intent = _set_p2p_go_intent(
                 args.wfd_interface, getattr(args, "wfd_go_intent", 0)
             )
+            p2p_channel = getattr(args, "wfd_p2p_channel", None)
+            if p2p_channel is not None:
+                # NM wifi-p2p has no channel property; set OperChannel on wpa
+                # before AddAndActivateConnection2 (only applies if we are GO).
+                _set_p2p_oper_channel(args.wfd_interface, p2p_channel)
             active_path = _connect_peer(
                 device_path,
                 peer,
@@ -172,9 +181,28 @@ def start_experimental_backend(args) -> None:
         )
         probe_thread.start()
 
+        # SIGUSR1 = rebind desktop capture without tearing down RTSP/P2P.
+        # Omarchy monitor-scale / miracast-ctl ensure-capture use this when
+        # Hyprland geometry changes mid-session (eDP scale, extend reseat).
+        restart_capture = threading.Event()
+
+        def _request_capture_restart(signum, frame):  # noqa: ARG001
+            print("[FluxCast WFD] SIGUSR1: capture restart requested")
+            restart_capture.set()
+
+        signal.signal(signal.SIGUSR1, _request_capture_restart)
+
         print("[FluxCast WFD] Waiting for TV RTSP/WFD session. Press Ctrl+C to stop.")
+        print("[FluxCast WFD] Tip: kill -USR1 <pid> rebinds capture without dropping RTSP.")
         while True:
-            time.sleep(1)
+            if restart_capture.is_set():
+                restart_capture.clear()
+                try:
+                    n = rtsp.restart_active_media()
+                    print(f"[FluxCast WFD] Capture restart finished ({n} pipeline(s)).")
+                except Exception as exc:
+                    print(f"[FluxCast WFD] Capture restart failed: {exc}")
+            time.sleep(0.25)
     except KeyboardInterrupt:
         print("\n[FluxCast WFD] Stopping WFD session...")
     finally:

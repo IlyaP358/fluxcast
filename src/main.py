@@ -191,15 +191,11 @@ def parse_args() -> argparse.Namespace:
                           "the group owner, which most Miracast TVs require to "
                           "start the session (default: 0)")
     wfd.add_argument("--wfd-p2p-channel", type=int, default=None, dest="wfd_p2p_channel",
-                     choices=[1, 6, 11],
-                     help="Force the P2P group onto this 2.4GHz channel instead of "
-                          "letting the driver pick (only used by --wfd-p2p-backend "
-                          "wpas). Some WFD sinks only support Wi-Fi Direct on "
-                          "2.4GHz, and silently never associate if the group forms "
-                          "on 5GHz - GO Negotiation completes fine, but the sink "
-                          "never shows up at the 802.11 level. Default: unset "
-                          "(driver picks the channel).")
-    wfd.add_argument("--wfd-monitor", default=None, dest="monitor_name",
+                     help="Force the P2P group onto this channel when we are GO "
+                          "(2.4GHz 1|6|11 or non-DFS 5GHz 36|40|44|48|149|153|157|161). "
+                          "Applied for nm and wpas via wpa_supplicant OperChannel. "
+                          "Default: unset (driver picks the channel).")
+    wfd.add_argument("--wfd-monitor"wfd.add_argument("--wfd-monitor", default=None, dest="monitor_name",
                      help="Deprecated alias for --monitor, kept for compatibility")
     wfd.add_argument("--wfd-p2p-backend", default="nm", dest="wfd_p2p_backend",
                      choices=["nm", "wpas"],

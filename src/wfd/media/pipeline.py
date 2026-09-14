@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 from typing import Optional
@@ -11,6 +12,36 @@ from .portal import PortalMixin
 from .testpattern import TestPatternMixin
 from .wlroots import WlrootsMixin
 from .x11 import X11Mixin
+
+
+def hypr_monitor_fingerprint(monitor_name: str) -> Optional[str]:
+    """Return name|w|h|refresh|scale|x|y for a Hyprland output, or None."""
+    if not monitor_name:
+        return None
+    try:
+        raw = subprocess.check_output(
+            ["hyprctl", "-j", "monitors"],
+            text=True,
+            timeout=2,
+            stderr=subprocess.DEVNULL,
+        )
+        for mon in json.loads(raw):
+            if str(mon.get("name") or "") != monitor_name:
+                continue
+            return "|".join(
+                [
+                    monitor_name,
+                    str(int(mon.get("width") or 0)),
+                    str(int(mon.get("height") or 0)),
+                    str(mon.get("refreshRate") or 0),
+                    str(mon.get("scale") or 0),
+                    str(int(mon.get("x") or 0)),
+                    str(int(mon.get("y") or 0)),
+                ]
+            )
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    return None
 
 
 class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
@@ -32,6 +63,13 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
         self._portal_gst_cmd: Optional[list[str]] = None
         self._portal_pw_fd: Optional[int] = None
         self._lpcm_muxer = None   # WFDLPCMMuxer instance for Microsoft adapter
+        # True while restart_video() is swapping capture/encode processes.
+        # RTSP keepalive/health probes skip hard-fail while this is set.
+        self.restarting: bool = False
+        # Hyprland output geometry when desktop capture last (re)bound. A
+        # hyprctl reload can leave senders alive while feeding black frames;
+        # health probes compare live geometry to this fingerprint.
+        self.capture_geometry_fp: Optional[str] = None
 
     def start(self) -> None:
         if self.processes:
@@ -70,6 +108,36 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
             self._start_test_pattern()
         else:
             self._start_desktop()
+        self.remember_capture_geometry()
+
+    def capture_monitor_name(self) -> Optional[str]:
+        mon = self.config.monitor
+        if mon is None:
+            return None
+        name = getattr(mon, "name", None)
+        return str(name) if name else None
+
+    def remember_capture_geometry(self) -> None:
+        """Snapshot Hyprland geometry for the captured output after bind."""
+        if not _is_hyprland_session():
+            return
+        name = self.capture_monitor_name()
+        if not name:
+            return
+        self.capture_geometry_fp = hypr_monitor_fingerprint(name)
+
+    def capture_geometry_drifted(self) -> bool:
+        """True when the captured Hyprland output moved/resized since bind."""
+        if not self.capture_geometry_fp:
+            return False
+        name = self.capture_monitor_name()
+        if not name:
+            return False
+        current = hypr_monitor_fingerprint(name)
+        if current is None:
+            # hyprctl failed or output missing — force rebind to recover.
+            return True
+        return current != self.capture_geometry_fp
 
     def tx_summary(self) -> str:
         current = _netdev_tx_bytes(self.tx_interface)
@@ -91,28 +159,121 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
         if self._lpcm_muxer is not None:
             self._lpcm_muxer.stop()
             self._lpcm_muxer = None
+        for attr in ("_lpcm_video_fd", "_lpcm_audio_fd"):
+            fd = getattr(self, attr, None)
+            if fd is not None:
+                try:
+                    import os as _os
+
+                    _os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, attr, None)
         close_portal_capture(self.portal_session)
         self.portal_session = None
 
-    def restart_video(self) -> None:
-        if self._portal_gst_cmd is None or self._portal_pw_fd is None:
+    def _kill_orphan_wf_recorders(self) -> None:
+        """Best-effort: reap wf-recorder children left after a failed rebind."""
+        import os as _os
+        import signal as _signal
+
+        tracked = {proc.pid for proc in self.processes if proc.pid}
+        try:
+            import subprocess as _sp
+
+            out = _sp.check_output(["pgrep", "-a", "wf-recorder"], text=True)
+        except Exception:
             return
-        for proc in self.processes:
-            if proc.poll() is None:
-                proc.terminate()
+        for line in out.splitlines():
+            parts = line.split(None, 1)
+            if not parts:
+                continue
             try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=1)
-        self.processes.clear()
-        new_proc = subprocess.Popen(
-            self._portal_gst_cmd,
-            stderr=None,
-            pass_fds=(self._portal_pw_fd,),
-        )
-        self.processes = [new_proc]
-        print("[FluxCast WFD Media] Pipeline restarted for IDR request.")
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            if pid in tracked or pid == _os.getpid():
+                continue
+            # Only touch recorders aimed at our capture output / stdout pipe.
+            cmd = parts[1] if len(parts) > 1 else ""
+            if "/dev/stdout" not in cmd and "-f /dev/stdout" not in cmd:
+                continue
+            try:
+                _os.kill(pid, _signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            try:
+                _os.waitpid(pid, _os.WNOHANG)
+            except ChildProcessError:
+                pass
+
+    def restart_video(self) -> None:
+        """Restart capture/encode while leaving the RTSP session intact.
+
+        Portal GStreamer path can respawn from the retained PipeWire fd.
+        Desktop backends (wf-recorder/x11/…) tear down and re-launch the
+        sender so Hyprland geometry changes (eDP scale, extend reseat) do not
+        leave a hollow RTSP session with dead capture PIDs.
+        """
+        import time as _time
+
+        self.restarting = True
+        try:
+            if self._portal_gst_cmd is not None and self._portal_pw_fd is not None:
+                for proc in self.processes:
+                    if proc.poll() is None:
+                        proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=1)
+                self.processes.clear()
+                new_proc = subprocess.Popen(
+                    self._portal_gst_cmd,
+                    stderr=None,
+                    pass_fds=(self._portal_pw_fd,),
+                )
+                self.processes = [new_proc]
+                print("[FluxCast WFD Media] Pipeline restarted for IDR request.")
+                return
+
+            # Desktop / hollow recovery: rebuild even when senders already exited
+            # (pause-capture kills wf-recorder/ffmpeg from outside).
+            for proc in self.processes:
+                if proc.poll() is None:
+                    proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=1)
+            self.processes.clear()
+            if self._lpcm_muxer is not None:
+                self._lpcm_muxer.stop()
+                self._lpcm_muxer = None
+            for attr in ("_lpcm_video_fd", "_lpcm_audio_fd"):
+                fd = getattr(self, attr, None)
+                if fd is not None:
+                    try:
+                        import os as _os
+
+                        _os.close(fd)
+                    except OSError:
+                        pass
+                    setattr(self, attr, None)
+            self._kill_orphan_wf_recorders()
+            close_portal_capture(self.portal_session)
+            self.portal_session = None
+            self._portal_gst_cmd = None
+            self._portal_pw_fd = None
+            # Allow the RTP source port to be rebound (LPCM muxer binds it).
+            _time.sleep(0.75)
+            self._start_desktop()
+            self.remember_capture_geometry()
+            print("[FluxCast WFD Media] Desktop capture pipeline restarted.")
+        finally:
+            self.restarting = False
 
     def _rtp_output(self) -> str:
         return _rtp_url(self.tv_ip, self.sink_rtp_port, self.config.source_port, self.local_ip)
