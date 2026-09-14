@@ -128,7 +128,24 @@ def _set_p2p_go_intent(iface: Optional[str], value: int,
         print("[FluxCast WFD] Warning: could not set P2P GO intent (connection will proceed with the default).")
     return None
 
-def _set_p2p_oper_channel(iface: Optional[str], channel: int, reg_class: int = 81) -> bool:
+def _reg_class_for_channel(channel: int) -> int:
+    """IEEE global operating class for P2P OperRegClass (81/115/118/121/125)."""
+    if 1 <= channel <= 13:
+        return 81
+    if channel in (36, 40, 44, 48):
+        return 115
+    if channel in (52, 56, 60, 64):
+        return 118
+    if 100 <= channel <= 144:
+        return 121
+    if channel in (149, 153, 157, 161, 165):
+        return 125
+    raise ValueError(f"unsupported P2P channel: {channel}")
+
+
+def _set_p2p_oper_channel(iface: Optional[str], channel: int,
+                          reg_class: Optional[int] = None,
+                          privileged: bool = True) -> bool:
     """Force the operating channel wpa_supplicant picks when we end up as GO.
 
     Some WFD sinks only support Wi-Fi Direct on 2.4GHz. Left to its own
@@ -143,7 +160,19 @@ def _set_p2p_oper_channel(iface: Optional[str], channel: int, reg_class: int = 8
     P2PDeviceConfig struct as GOIntent above; wpa_supplicant merges
     whichever keys are present rather than requiring the whole struct on
     every call.
+
+    If reg_class is None, it is derived from channel (2.4 or non-DFS 5GHz).
+    privileged defaults True like other P2PDeviceConfig setters; pass False
+    when the caller already has D-Bus access.
     """
+    if reg_class is None:
+        try:
+            reg_class = _reg_class_for_channel(channel)
+        except ValueError as exc:
+            print(f"[FluxCast WFD] Warning: {exc} "
+                  "(connection will proceed on whatever channel the driver picks).")
+            return False
+
     wpa_dest = "fi.w1.wpa_supplicant1"
     wpa_iface = "fi.w1.wpa_supplicant1.Interface"
 
@@ -153,6 +182,7 @@ def _set_p2p_oper_channel(iface: Optional[str], channel: int, reg_class: int = 8
               "(connection will proceed on whatever channel the driver picks).")
         return False
 
+    band = "2.4GHz" if reg_class == 81 else "5GHz"
     for iface_path in paths:
         try:
             result = _gdbus_call([
@@ -162,10 +192,10 @@ def _set_p2p_oper_channel(iface: Optional[str], channel: int, reg_class: int = 8
                 f"{wpa_iface}.P2PDevice", "P2PDeviceConfig",
                 f"<{{'OperRegClass': <uint32 {reg_class}>, "
                 f"'OperChannel': <uint32 {channel}>}}>",
-            ], timeout=3.0)
+            ], timeout=3.0, privileged=privileged)
             if result.returncode == 0:
                 print(f"[FluxCast WFD] P2P operating channel forced to channel "
-                      f"{channel} (2.4GHz, reg class {reg_class}).")
+                      f"{channel} ({band}, reg class {reg_class}).")
                 return True
         except Exception:
             pass

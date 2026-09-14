@@ -357,3 +357,11 @@ def mark_unmanaged(iface: str) -> None:
         _sudo_run(["nmcli", "device", "set", iface, "managed", "no"], timeout=5.0)
     except Exception as exc:
         print(f"[FluxCast WFD] Warning: could not mark {iface} unmanaged: {exc}")
+
+
+def mark_managed(iface: str) -> None:
+    """Hand an interface back to NetworkManager after a wpas-session."""
+    try:
+        _sudo_run(["nmcli", "device", "set", iface, "managed", "yes"], timeout=5.0)
+    except Exception as exc:
+        print(f"[FluxCast WFD] Warning: could not mark {iface} managed: {exc}")
