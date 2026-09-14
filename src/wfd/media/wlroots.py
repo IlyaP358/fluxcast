@@ -12,15 +12,14 @@ from ..encoding import (
 )
 from ..env import _detect_audio_monitor
 from ..hw_encode import (
-    apply_bitrate_bias,
+    apply_bitrate_plan,
     build_encode_plan,
     capture_encode_attempts,
     capture_encode_mode,
     capture_encode_preference,
-    power_bias,
     prefer_wf_recorder_vaapi_dmabuf,
-    vaapi_quality_for_bias,
 )
+from ..power_plan import active_power_plan, encode_throttled
 from ..latency import _append_latency_log
 from ..modes import _h264_level_for_mode
 from ..net import _ffmpeg_sender_args
@@ -127,14 +126,15 @@ class WlrootsMixin:
         parsed_out = _parse_resolution(out_res) or (monitor.width, monitor.height)
         requested_kbits = _bitrate_to_kbits(self.config.bitrate)
         floor_kbits = _quality_floor_kbits(parsed_out[0], parsed_out[1], self.config.fps)
-        bias = power_bias()
-        if bias == "efficient":
+        plan = active_power_plan()
+        throttled = encode_throttled(plan)
+        if throttled:
             effective_kbits = requested_kbits
         else:
             effective_kbits = max(requested_kbits, floor_kbits)
         effective_bitrate = _kbits_to_bitrate_text(effective_kbits)
-        effective_bitrate = apply_bitrate_bias(effective_bitrate, bias)
-        if effective_kbits > requested_kbits and bias == "full":
+        effective_bitrate = apply_bitrate_plan(effective_bitrate, throttled=throttled)
+        if effective_kbits > requested_kbits and not throttled:
             print(
                 "[FluxCast WFD Media] Raising bitrate for desktop clarity: "
                 f"{self.config.bitrate} -> {effective_bitrate}"
@@ -144,7 +144,11 @@ class WlrootsMixin:
             "out_res": out_res,
             "gop": gop,
             "parsed_out": parsed_out,
-            "bias": bias,
+            "power_plan": plan.id,
+            "power_plan_name": plan.name,
+            "throttled": throttled,
+            # Deprecated alias for older log formatters.
+            "bias": plan.id,
             "effective_bitrate": effective_bitrate,
             "effective_kbits": _bitrate_to_kbits(effective_bitrate),
             "level": _h264_level_for_mode(self.config),
@@ -551,7 +555,7 @@ class WlrootsMixin:
         proto = "icc" if icc else "wlr-screencopy"
         print(
             f"[FluxCast WFD Media] Video encoder   : h264_vaapi via wf-recorder "
-            f"DMA-BUF on {device} ({meta['bias']} power bias, "
+            f"DMA-BUF on {device} ({meta['power_plan']} / {meta['power_plan_name']}, "
             f"{rc_desc}, tv-range, no-bframes, proto={proto})"
         )
         print(

@@ -8,6 +8,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wfd import hw_encode  # noqa: E402
+from wfd import power_plan as power_plan_mod  # noqa: E402
 
 
 def _supply_tree(entries: dict[str, dict[str, str]]) -> tempfile.TemporaryDirectory:
@@ -92,7 +93,7 @@ class OnMainsPowerTest(unittest.TestCase):
             self.assertFalse(self._on_mains(root))
 
     def test_device_scoped_battery_is_ignored(self):
-        # HID UPS / peripheral packs must not flip a desktop into "efficient".
+        # HID UPS / peripheral packs must not flip a desktop into throttled encode.
         with _supply_tree({
             "hidpp_battery_0": {
                 "type": "Battery",
@@ -124,62 +125,104 @@ class OnMainsPowerTest(unittest.TestCase):
             self.assertTrue(self._on_mains(root))
 
 
-class PowerBiasTest(unittest.TestCase):
+class PowerPlanEncodeTest(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
+        os.environ.pop("FLUXCAST_WFD_POWER_PLAN", None)
+        os.environ.pop("FLUXCAST_WFD_ENCODER", None)
 
-    def test_env_override_wins(self):
+    def _fake_plans(self, names, active):
+        from wfd.power_plan import PowerPlan
+
+        plans = [
+            PowerPlan(id=f"power_plan_{i}", name=n, source="test", index=i)
+            for i, n in enumerate(names)
+        ]
+        return plans, active
+
+    def test_legacy_encode_bias_override_wins(self):
         os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "efficient"
-        with mock.patch.object(hw_encode, "_on_mains_power", return_value=True):
-            with mock.patch.object(hw_encode, "_power_profile", return_value="performance"):
+        with mock.patch.object(power_plan_mod, "on_mains_power", return_value=True):
+            with mock.patch(
+                "wfd.power_plan.discover_power_plans",
+                return_value=self._fake_plans(
+                    ["performance", "balanced", "power-saver"], "performance"
+                ),
+            ):
+                self.assertTrue(power_plan_mod.encode_throttled())
                 self.assertEqual(hw_encode.power_bias(), "efficient")
 
         os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "full"
-        with mock.patch.object(hw_encode, "_on_mains_power", return_value=False):
+        with mock.patch.object(power_plan_mod, "on_mains_power", return_value=False):
+            self.assertFalse(power_plan_mod.encode_throttled())
             self.assertEqual(hw_encode.power_bias(), "full")
+
+    def test_power_plan_override_by_id_and_name(self):
+        os.environ["FLUXCAST_WFD_ENCODER"] = "auto"
+        plans = self._fake_plans(
+            ["performance", "balanced", "power-saver"], "performance"
+        )
+        with mock.patch("wfd.power_plan.discover_power_plans", return_value=plans):
+            with mock.patch.object(power_plan_mod, "on_mains_power", return_value=True):
+                os.environ["FLUXCAST_WFD_POWER_PLAN"] = "power_plan_2"
+                self.assertEqual(power_plan_mod.active_power_plan().name, "power-saver")
+                self.assertTrue(power_plan_mod.encode_throttled())
+                os.environ["FLUXCAST_WFD_POWER_PLAN"] = "balanced"
+                self.assertEqual(power_plan_mod.active_power_plan().id, "power_plan_1")
+                self.assertFalse(power_plan_mod.encode_throttled())
 
     def test_default_libx264_ignores_battery(self):
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
+        os.environ.pop("FLUXCAST_WFD_POWER_PLAN", None)
         os.environ.pop("FLUXCAST_WFD_ENCODER", None)
-        with mock.patch.object(hw_encode, "_on_mains_power", return_value=False):
-            with mock.patch.object(hw_encode, "_power_profile", return_value="power-saver"):
-                self.assertEqual(hw_encode.power_bias(), "full")
+        plans = self._fake_plans(["power-saver"], "power-saver")
+        with mock.patch.object(power_plan_mod, "on_mains_power", return_value=False):
+            with mock.patch("wfd.power_plan.discover_power_plans", return_value=plans):
+                self.assertFalse(power_plan_mod.encode_throttled())
 
-    def test_battery_forces_efficient_when_gpu_opted_in(self):
+    def test_battery_throttles_when_gpu_opted_in(self):
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
         os.environ["FLUXCAST_WFD_ENCODER"] = "auto"
-        with mock.patch.object(hw_encode, "_on_mains_power", return_value=False):
-            with mock.patch.object(hw_encode, "_power_profile", return_value="performance"):
-                self.assertEqual(hw_encode.power_bias(), "efficient")
+        plans = self._fake_plans(["performance"], "performance")
+        with mock.patch.object(power_plan_mod, "on_mains_power", return_value=False):
+            with mock.patch("wfd.power_plan.discover_power_plans", return_value=plans):
+                self.assertTrue(power_plan_mod.encode_throttled())
 
-    def test_power_saver_profile_on_ac_is_efficient_when_gpu_opted_in(self):
+    def test_power_saver_profile_on_ac_throttles_when_gpu_opted_in(self):
         os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
-        with mock.patch.object(hw_encode, "_on_mains_power", return_value=True):
-            with mock.patch.object(hw_encode, "_power_profile", return_value="power-saver"):
-                self.assertEqual(hw_encode.power_bias(), "efficient")
+        plans = self._fake_plans(
+            ["performance", "balanced", "power-saver"], "power-saver"
+        )
+        with mock.patch.object(power_plan_mod, "on_mains_power", return_value=True):
+            with mock.patch("wfd.power_plan.discover_power_plans", return_value=plans):
+                self.assertTrue(power_plan_mod.encode_throttled())
 
-    def test_balanced_or_unknown_profile_on_ac_is_full(self):
+    def test_balanced_or_performance_on_ac_not_throttled(self):
         os.environ["FLUXCAST_WFD_ENCODER"] = "auto"
-        with mock.patch.object(hw_encode, "_on_mains_power", return_value=True):
-            for profile in ("balanced", "performance", "unknown"):
-                with mock.patch.object(hw_encode, "_power_profile", return_value=profile):
-                    self.assertEqual(hw_encode.power_bias(), "full", profile)
+        with mock.patch.object(power_plan_mod, "on_mains_power", return_value=True):
+            for profile in ("balanced", "performance"):
+                plans = self._fake_plans(
+                    ["performance", "balanced", "power-saver"], profile
+                )
+                with mock.patch(
+                    "wfd.power_plan.discover_power_plans", return_value=plans
+                ):
+                    self.assertFalse(power_plan_mod.encode_throttled(), profile)
 
-    def test_missing_powerprofilesctl_is_unknown_not_efficient(self):
-        with mock.patch.object(hw_encode.shutil, "which", return_value=None):
-            self.assertEqual(hw_encode._power_profile(), "unknown")
 
+class BitratePlanTest(unittest.TestCase):
+    def test_unthrottled_unchanged(self):
+        self.assertEqual(hw_encode.apply_bitrate_plan("4M", throttled=False), "4M")
 
-class BitrateBiasTest(unittest.TestCase):
-    def test_full_bias_unchanged(self):
+    def test_throttled_trims_megabit(self):
+        self.assertEqual(hw_encode.apply_bitrate_plan("4M", throttled=True), "3.6M")
+
+    def test_throttled_trims_kilobit_with_floor(self):
+        self.assertEqual(hw_encode.apply_bitrate_plan("600k", throttled=True), "540k")
+
+    def test_legacy_bias_wrapper(self):
         self.assertEqual(hw_encode.apply_bitrate_bias("4M", "full"), "4M")
-
-    def test_efficient_trims_megabit(self):
         self.assertEqual(hw_encode.apply_bitrate_bias("4M", "efficient"), "3.6M")
-
-    def test_efficient_trims_kilobit_with_floor(self):
-        self.assertEqual(hw_encode.apply_bitrate_bias("600k", "efficient"), "540k")
-
 
 class ProbeEncoderTest(unittest.TestCase):
     def tearDown(self):
@@ -223,16 +266,107 @@ class ProbeEncoderTest(unittest.TestCase):
                     self.assertEqual(hw_encode.probe_encoder("vaapi"), "libx264")
 
 
+def _fake_power_plans(names, active):
+    plans = [
+        power_plan_mod.PowerPlan(id=f"power_plan_{i}", name=n, source="test", index=i)
+        for i, n in enumerate(names)
+    ]
+    return plans, active
+
+
 class BuildEncodePlanTest(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("FLUXCAST_WFD_ENCODER", None)
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
+        os.environ.pop("FLUXCAST_WFD_POWER_PLAN", None)
+
+    def _with_plans(self, names, active, on_mains=True):
+        return mock.patch.multiple(
+            power_plan_mod,
+            discover_power_plans=mock.Mock(return_value=_fake_power_plans(names, active)),
+            on_mains_power=mock.Mock(return_value=on_mains),
+        )
 
     def test_default_plan_is_historical_libx264(self):
         os.environ.pop("FLUXCAST_WFD_ENCODER", None)
-        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "full"
-        with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
-            with mock.patch("os.path.exists", return_value=True):
+        os.environ.pop("FLUXCAST_WFD_POWER_PLAN", None)
+        with self._with_plans(["performance", "balanced", "power-saver"], "performance"):
+            with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
+                with mock.patch("os.path.exists", return_value=True):
+                    plan = hw_encode.build_encode_plan(
+                        h264_profile="baseline",
+                        level="3.1",
+                        fps=30,
+                        gop=30,
+                        bitrate="4M",
+                        bufsize="8M",
+                        vf_scale=None,
+                        output_height=1080,
+                    )
+        self.assertEqual(plan.name, "libx264")
+        self.assertEqual(plan.pre_input, [])
+        self.assertIn("libx264", plan.video_args)
+        self.assertIn("zerolatency", plan.video_args)
+        self.assertIn("repeat-headers=1:aud=1", plan.video_args)
+        self.assertIn("veryfast", plan.video_args)
+        self.assertEqual(plan.vf, ["-vf", "format=yuv420p"])
+        self.assertNotIn("no usable GPU encoder", plan.note)
+        self.assertIn("power_plan_0 (performance)", plan.note)
+
+    def test_unthrottled_uses_ultrafast_above_1080p(self):
+        os.environ.pop("FLUXCAST_WFD_ENCODER", None)
+        os.environ["FLUXCAST_WFD_POWER_PLAN"] = "performance"
+        with self._with_plans(["performance", "power-saver"], "performance"):
+            plan = hw_encode.build_encode_plan(
+                h264_profile="baseline",
+                level="5.1",
+                fps=30,
+                gop=30,
+                bitrate="8M",
+                bufsize="16M",
+                vf_scale=None,
+                output_height=1440,
+            )
+        self.assertIn("ultrafast", plan.video_args)
+
+    def test_throttled_software_uses_ultrafast(self):
+        os.environ["FLUXCAST_WFD_ENCODER"] = "libx264"
+        os.environ["FLUXCAST_WFD_POWER_PLAN"] = "power-saver"
+        with self._with_plans(["performance", "power-saver"], "performance"):
+            plan = hw_encode.build_encode_plan(
+                h264_profile="baseline",
+                level="3.1",
+                fps=30,
+                gop=30,
+                bitrate="3M",
+                bufsize="6M",
+                vf_scale=None,
+                output_height=720,
+            )
+        self.assertIn("ultrafast", plan.video_args)
+        self.assertIn("power_plan_1 (power-saver)", plan.note)
+
+    def test_legacy_encode_bias_still_throttles_software(self):
+        os.environ["FLUXCAST_WFD_ENCODER"] = "libx264"
+        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "efficient"
+        with self._with_plans(["performance"], "performance"):
+            plan = hw_encode.build_encode_plan(
+                h264_profile="baseline",
+                level="3.1",
+                fps=30,
+                gop=30,
+                bitrate="3M",
+                bufsize="6M",
+                vf_scale=None,
+                output_height=720,
+            )
+        self.assertIn("ultrafast", plan.video_args)
+
+    def test_gpu_fallback_note_mentions_missing_encoder(self):
+        os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
+        os.environ["FLUXCAST_WFD_POWER_PLAN"] = "performance"
+        with self._with_plans(["performance"], "performance"):
+            with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=False):
                 plan = hw_encode.build_encode_plan(
                     h264_profile="baseline",
                     level="3.1",
@@ -244,60 +378,8 @@ class BuildEncodePlanTest(unittest.TestCase):
                     output_height=1080,
                 )
         self.assertEqual(plan.name, "libx264")
-        self.assertEqual(plan.pre_input, [])
-        self.assertIn("libx264", plan.video_args)
-        self.assertIn("zerolatency", plan.video_args)
-        self.assertIn("repeat-headers=1:aud=1", plan.video_args)
-        self.assertIn("veryfast", plan.video_args)
-        self.assertEqual(plan.vf, ["-vf", "format=yuv420p"])
-        self.assertNotIn("no usable GPU encoder", plan.note)
-
-    def test_full_bias_uses_ultrafast_above_1080p(self):
-        os.environ.pop("FLUXCAST_WFD_ENCODER", None)
-        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "full"
-        plan = hw_encode.build_encode_plan(
-            h264_profile="baseline",
-            level="5.1",
-            fps=30,
-            gop=30,
-            bitrate="8M",
-            bufsize="16M",
-            vf_scale=None,
-            output_height=1440,
-        )
-        self.assertIn("ultrafast", plan.video_args)
-
-    def test_efficient_software_uses_ultrafast(self):
-        os.environ["FLUXCAST_WFD_ENCODER"] = "libx264"
-        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "efficient"
-        plan = hw_encode.build_encode_plan(
-            h264_profile="baseline",
-            level="3.1",
-            fps=30,
-            gop=30,
-            bitrate="3M",
-            bufsize="6M",
-            vf_scale=None,
-            output_height=720,
-        )
-        self.assertIn("ultrafast", plan.video_args)
-
-    def test_gpu_fallback_note_mentions_missing_encoder(self):
-        os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
-        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "full"
-        with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=False):
-            plan = hw_encode.build_encode_plan(
-                h264_profile="baseline",
-                level="3.1",
-                fps=30,
-                gop=30,
-                bitrate="4M",
-                bufsize="8M",
-                vf_scale=None,
-                output_height=1080,
-            )
-        self.assertEqual(plan.name, "libx264")
         self.assertIn("no usable GPU encoder", plan.note)
+        self.assertIn("power_plan_0 (performance)", plan.note)
 
 
 class LevelToIdcTest(unittest.TestCase):
@@ -330,15 +412,88 @@ class VaapiQsvPlanShapeTest(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("FLUXCAST_WFD_ENCODER", None)
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
+        os.environ.pop("FLUXCAST_WFD_POWER_PLAN", None)
         os.environ.pop("FLUXCAST_WFD_VAAPI_DEVICE", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE", None)
 
+    def _with_plans(self, names, active, on_mains=True):
+        return mock.patch.multiple(
+            power_plan_mod,
+            discover_power_plans=mock.Mock(return_value=_fake_power_plans(names, active)),
+            on_mains_power=mock.Mock(return_value=on_mains),
+        )
+
     def test_vaapi_plan_uses_device_and_h264_vaapi(self):
         os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
-        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "full"
+        os.environ["FLUXCAST_WFD_POWER_PLAN"] = "performance"
         os.environ["FLUXCAST_WFD_VAAPI_DEVICE"] = "/dev/dri/renderD128"
-        with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
-            with mock.patch("os.path.exists", return_value=True):
+        with self._with_plans(["performance", "power-saver"], "performance"):
+            with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
+                with mock.patch("os.path.exists", return_value=True):
+                    plan = hw_encode.build_encode_plan(
+                        h264_profile="baseline",
+                        level="3.1",
+                        fps=30,
+                        gop=30,
+                        bitrate="4M",
+                        bufsize="8M",
+                        vf_scale=None,
+                    )
+        self.assertEqual(plan.name, "vaapi")
+        self.assertEqual(plan.pre_input, ["-vaapi_device", "/dev/dri/renderD128"])
+        self.assertIn("h264_vaapi", plan.video_args)
+        self.assertIn("hwupload", plan.vf[1])
+        self.assertIn("-quality", plan.video_args)
+        self.assertEqual(plan.video_args[plan.video_args.index("-quality") + 1], "4")
+        self.assertIn("power_plan_0 (performance)", plan.note)
+
+    def test_vaapi_nv12_skips_format_convert(self):
+        os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
+        os.environ["FLUXCAST_WFD_POWER_PLAN"] = "power-saver"
+        with self._with_plans(["performance", "power-saver"], "performance"):
+            with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
+                with mock.patch("os.path.exists", return_value=True):
+                    plan = hw_encode.build_encode_plan(
+                        h264_profile="baseline",
+                        level="3.1",
+                        fps=30,
+                        gop=30,
+                        bitrate="3M",
+                        bufsize="6M",
+                        vf_scale=None,
+                        input_pix_fmt="nv12",
+                    )
+        self.assertEqual(plan.vf, ["-vf", "hwupload"])
+        self.assertNotIn("format=nv12", plan.vf[1])
+
+    def test_vaapi_throttled_uses_faster_quality_cbr_no_low_power(self):
+        os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
+        os.environ["FLUXCAST_WFD_POWER_PLAN"] = "power-saver"
+        with self._with_plans(["performance", "power-saver"], "performance"):
+            with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
+                with mock.patch("os.path.exists", return_value=True):
+                    plan = hw_encode.build_encode_plan(
+                        h264_profile="baseline",
+                        level="3.1",
+                        fps=30,
+                        gop=30,
+                        bitrate="3M",
+                        bufsize="6M",
+                        vf_scale=None,
+                    )
+        self.assertEqual(plan.video_args[plan.video_args.index("-quality") + 1], "5")
+        self.assertEqual(plan.video_args[plan.video_args.index("-async_depth") + 1], "2")
+        self.assertEqual(plan.video_args[plan.video_args.index("-b:v") + 1], "3M")
+        self.assertNotIn("-low_power", plan.video_args)
+        self.assertNotIn("CQP", plan.video_args)
+        self.assertIn("power_plan_1 (power-saver)", plan.note)
+        self.assertNotIn("efficient power bias", plan.note)
+
+    def test_qsv_plan_uses_init_hw_device(self):
+        os.environ["FLUXCAST_WFD_ENCODER"] = "qsv"
+        os.environ["FLUXCAST_WFD_POWER_PLAN"] = "performance"
+        with self._with_plans(["performance"], "performance"):
+            with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
                 plan = hw_encode.build_encode_plan(
                     h264_profile="baseline",
                     level="3.1",
@@ -348,70 +503,10 @@ class VaapiQsvPlanShapeTest(unittest.TestCase):
                     bufsize="8M",
                     vf_scale=None,
                 )
-        self.assertEqual(plan.name, "vaapi")
-        self.assertEqual(plan.pre_input, ["-vaapi_device", "/dev/dri/renderD128"])
-        self.assertIn("h264_vaapi", plan.video_args)
-        self.assertIn("hwupload", plan.vf[1])
-        self.assertIn("-quality", plan.video_args)
-        self.assertEqual(plan.video_args[plan.video_args.index("-quality") + 1], "4")
-
-    def test_vaapi_nv12_skips_format_convert(self):
-        os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
-        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "efficient"
-        with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
-            with mock.patch("os.path.exists", return_value=True):
-                plan = hw_encode.build_encode_plan(
-                    h264_profile="baseline",
-                    level="3.1",
-                    fps=30,
-                    gop=30,
-                    bitrate="3M",
-                    bufsize="6M",
-                    vf_scale=None,
-                    input_pix_fmt="nv12",
-                )
-        self.assertEqual(plan.vf, ["-vf", "hwupload"])
-        self.assertNotIn("format=nv12", plan.vf[1])
-
-    def test_vaapi_efficient_uses_faster_quality_cbr_no_low_power(self):
-        os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
-        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "efficient"
-        with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
-            with mock.patch("os.path.exists", return_value=True):
-                plan = hw_encode.build_encode_plan(
-                    h264_profile="baseline",
-                    level="3.1",
-                    fps=30,
-                    gop=30,
-                    bitrate="3M",
-                    bufsize="6M",
-                    vf_scale=None,
-                )
-        self.assertEqual(plan.video_args[plan.video_args.index("-quality") + 1], "5")
-        self.assertEqual(plan.video_args[plan.video_args.index("-async_depth") + 1], "2")
-        self.assertEqual(plan.video_args[plan.video_args.index("-b:v") + 1], "3M")
-        self.assertNotIn("-low_power", plan.video_args)
-        self.assertNotIn("CQP", plan.video_args)
-        self.assertIn("efficient power bias", plan.note)
-        self.assertNotIn("low_power", plan.note)
-
-    def test_qsv_plan_uses_init_hw_device(self):
-        os.environ["FLUXCAST_WFD_ENCODER"] = "qsv"
-        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "full"
-        with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
-            plan = hw_encode.build_encode_plan(
-                h264_profile="baseline",
-                level="3.1",
-                fps=30,
-                gop=30,
-                bitrate="4M",
-                bufsize="8M",
-                vf_scale=None,
-            )
         self.assertEqual(plan.name, "qsv")
         self.assertIn("-init_hw_device", plan.pre_input)
         self.assertIn("h264_qsv", plan.video_args)
-        self.assertIn("balanced", plan.video_args)
+        self.assertIn("balanced", plan.video_args)  # QSV preset name, not power plan
         self.assertIn("-level", plan.video_args)
         self.assertEqual(plan.video_args[plan.video_args.index("-level") + 1], "31")
         self.assertEqual(
@@ -420,17 +515,18 @@ class VaapiQsvPlanShapeTest(unittest.TestCase):
 
     def test_qsv_maps_constrained_baseline_profile(self):
         os.environ["FLUXCAST_WFD_ENCODER"] = "qsv"
-        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "full"
-        with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
-            plan = hw_encode.build_encode_plan(
-                h264_profile="constrained_baseline",
-                level="4.0",
-                fps=30,
-                gop=30,
-                bitrate="4M",
-                bufsize="8M",
-                vf_scale=None,
-            )
+        os.environ["FLUXCAST_WFD_POWER_PLAN"] = "performance"
+        with self._with_plans(["performance"], "performance"):
+            with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
+                plan = hw_encode.build_encode_plan(
+                    h264_profile="constrained_baseline",
+                    level="4.0",
+                    fps=30,
+                    gop=30,
+                    bitrate="4M",
+                    bufsize="8M",
+                    vf_scale=None,
+                )
         self.assertEqual(
             plan.video_args[plan.video_args.index("-profile:v") + 1], "baseline"
         )
@@ -438,27 +534,8 @@ class VaapiQsvPlanShapeTest(unittest.TestCase):
 
     def test_vaapi_falls_back_to_libx264_when_encoder_missing(self):
         os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
-        with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=False):
-            plan = hw_encode.build_encode_plan(
-                h264_profile="baseline",
-                level="3.1",
-                fps=30,
-                gop=30,
-                bitrate="4M",
-                bufsize="8M",
-                vf_scale=None,
-            )
-        self.assertEqual(plan.name, "libx264")
-
-    def test_vaapi_plan_keeps_letterbox_before_hwupload(self):
-        os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
-        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = "full"
-        letterbox = (
-            "scale=1280:720:force_original_aspect_ratio=decrease,"
-            "pad=1280:720:(ow-iw)/2:(oh-ih)/2"
-        )
-        with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
-            with mock.patch("os.path.exists", return_value=True):
+        with self._with_plans(["performance"], "performance"):
+            with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=False):
                 plan = hw_encode.build_encode_plan(
                     h264_profile="baseline",
                     level="3.1",
@@ -466,13 +543,33 @@ class VaapiQsvPlanShapeTest(unittest.TestCase):
                     gop=30,
                     bitrate="4M",
                     bufsize="8M",
-                    vf_scale=letterbox,
+                    vf_scale=None,
                 )
+        self.assertEqual(plan.name, "libx264")
+
+    def test_vaapi_plan_keeps_letterbox_before_hwupload(self):
+        os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
+        os.environ["FLUXCAST_WFD_POWER_PLAN"] = "performance"
+        letterbox = (
+            "scale=1280:720:force_original_aspect_ratio=decrease,"
+            "pad=1280:720:(ow-iw)/2:(oh-ih)/2"
+        )
+        with self._with_plans(["performance"], "performance"):
+            with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
+                with mock.patch("os.path.exists", return_value=True):
+                    plan = hw_encode.build_encode_plan(
+                        h264_profile="baseline",
+                        level="3.1",
+                        fps=30,
+                        gop=30,
+                        bitrate="4M",
+                        bufsize="8M",
+                        vf_scale=letterbox,
+                    )
         self.assertEqual(plan.name, "vaapi")
         self.assertEqual(plan.vf[0], "-vf")
         self.assertTrue(plan.vf[1].startswith(letterbox))
         self.assertIn(",format=nv12,hwupload", plan.vf[1])
-
 
 
 class CaptureEncodeModeTest(unittest.TestCase):
@@ -482,6 +579,7 @@ class CaptureEncodeModeTest(unittest.TestCase):
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE_PREF", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE_FILE", None)
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
+        os.environ.pop("FLUXCAST_WFD_POWER_PLAN", None)
         os.environ.pop("FLUXCAST_WFD_DMABUF_ALLOW_SCALED", None)
 
     def test_default_capture_encode_is_pipe(self):
@@ -515,7 +613,9 @@ class CaptureEncodeModeTest(unittest.TestCase):
         with mock.patch.object(hw_encode, "_vaapi_usable", return_value=True):
             self.assertTrue(hw_encode.prefer_wf_recorder_vaapi_dmabuf())
 
-    def test_vaapi_quality_bias(self):
+    def test_vaapi_quality_for_plan(self):
+        self.assertEqual(hw_encode.vaapi_quality_for_plan(throttled=True), "5")
+        self.assertEqual(hw_encode.vaapi_quality_for_plan(throttled=False), "4")
         self.assertEqual(hw_encode.vaapi_quality_for_bias("efficient"), "5")
         self.assertEqual(hw_encode.vaapi_quality_for_bias("full"), "4")
 

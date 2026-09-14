@@ -76,6 +76,8 @@ class WlrootsDamageFlagTest(unittest.TestCase):
         os.environ.pop("FLUXCAST_WFD_WF_RECORDER_PROTO", None)
         os.environ.pop("FLUXCAST_WFD_ENCODER", None)
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
+        os.environ.pop("FLUXCAST_WFD_POWER_PLAN", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_GOP", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE_FILE", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE_PREF", None)
@@ -83,7 +85,9 @@ class WlrootsDamageFlagTest(unittest.TestCase):
 
         wr._icc_cache.clear()
 
-    def _capture_cmds(self, *, encoder="libx264", capture_encode=None, bias="full", icc=False):
+    def _capture_cmds(
+        self, *, encoder="libx264", capture_encode=None, power_plan="performance", icc=False
+    ):
         from types import SimpleNamespace
 
         from wfd.media.wlroots import WlrootsMixin
@@ -95,7 +99,21 @@ class WlrootsDamageFlagTest(unittest.TestCase):
                 self.args = args
                 self.kwargs = kwargs
                 self.stdout = mock.Mock()
+                self.stderr = mock.Mock()
                 self.pid = 1
+                self.returncode = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def communicate(self, input=None, timeout=None):
+                return ("", "")
+
+            def wait(self, timeout=None):
+                return 0
 
             def poll(self):
                 return None
@@ -137,16 +155,43 @@ class WlrootsDamageFlagTest(unittest.TestCase):
                 return ["-f", "mpegts", f"udp://{self.tv_ip}:{self.sink_rtp_port}"]
 
         os.environ["FLUXCAST_WFD_ENCODER"] = encoder
-        os.environ["FLUXCAST_WFD_ENCODE_BIAS"] = bias
+        os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
+        os.environ["FLUXCAST_WFD_POWER_PLAN"] = power_plan
         if capture_encode is None:
             os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE", None)
         else:
             os.environ["FLUXCAST_WFD_CAPTURE_ENCODE"] = capture_encode
         harness = Harness()
+        from wfd.power_plan import PowerPlan, _throttle_name
+
+        fake_plan = PowerPlan(
+            id="power_plan_0",
+            name=power_plan,
+            source="test",
+            index=0,
+        )
+        throttled = _throttle_name(power_plan)
         with mock.patch("wfd.media.wlroots.find_wf_recorder", return_value="/usr/bin/wf-recorder"):
             with mock.patch("wfd.media.wlroots.subprocess.Popen", side_effect=fake_popen):
                 with mock.patch("wfd.media.wlroots.time.sleep", return_value=None):
-                    with mock.patch("wfd.media.wlroots.prefer_wf_recorder_vaapi_dmabuf") as pref:
+                    with mock.patch(
+                        "wfd.media.wlroots.active_power_plan", return_value=fake_plan
+                    ), mock.patch(
+                        "wfd.hw_encode.active_power_plan", return_value=fake_plan
+                    ), mock.patch(
+                        "wfd.power_plan.active_power_plan", return_value=fake_plan
+                    ), mock.patch(
+                        "wfd.media.wlroots.encode_throttled",
+                        return_value=throttled,
+                    ), mock.patch(
+                        "wfd.hw_encode.encode_throttled",
+                        return_value=throttled,
+                    ), mock.patch(
+                        "wfd.power_plan.encode_throttled",
+                        return_value=throttled,
+                    ), mock.patch(
+                        "wfd.media.wlroots.prefer_wf_recorder_vaapi_dmabuf"
+                    ) as pref:
                         from wfd import hw_encode
                         pref.side_effect = (
                             lambda monitor=None: hw_encode.prefer_wf_recorder_vaapi_dmabuf(monitor)
@@ -172,10 +217,13 @@ class WlrootsDamageFlagTest(unittest.TestCase):
         self.assertNotIn("-D", wf_cmd)
 
     def test_dmabuf_path_uses_wf_recorder_vaapi_and_ffmpeg_copy(self):
+        os.environ["FLUXCAST_WFD_VAAPI_GOP"] = "60"
         with mock.patch("wfd.hw_encode._vaapi_usable", return_value=True):
             with mock.patch("wfd.hw_encode._requested_gpu_encode", return_value=True):
                 with mock.patch("wfd.hw_encode.monitor_scale", return_value=1.0):
-                    cmds = self._capture_cmds(encoder="auto", capture_encode="vaapi", bias="efficient")
+                    cmds = self._capture_cmds(
+                        encoder="auto", capture_encode="vaapi", power_plan="power-saver"
+                    )
         wf = " ".join(cmds["wf"])
         self.assertIn("h264_vaapi", cmds["wf"])
         self.assertIn("scale_vaapi=format=nv12:out_range=tv", wf)
@@ -185,7 +233,7 @@ class WlrootsDamageFlagTest(unittest.TestCase):
         self.assertIn("rc_mode=CQP", wf)
         self.assertIn("qp=18", wf)
         self.assertIn("quality=4", wf)
-        # 2s GOP (fps=30 → 60) to reduce IDR-driven quality dips.
+        # Explicit 2s GOP via FLUXCAST_WFD_VAAPI_GOP (fps=30 → 60).
         self.assertIn("gop_size=60", wf)
         self.assertNotIn("-r", cmds["wf"])  # stock: -r appends fps= after vaapi and glitches
         self.assertNotIn("rawvideo", cmds["wf"])
@@ -204,7 +252,7 @@ class WlrootsDamageFlagTest(unittest.TestCase):
                     cmds = self._capture_cmds(
                         encoder="auto",
                         capture_encode="vaapi",
-                        bias="efficient",
+                        power_plan="power-saver",
                         icc=True,
                     )
         self.assertIn("-r", cmds["wf"])
