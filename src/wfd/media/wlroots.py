@@ -612,10 +612,27 @@ class WlrootsMixin:
         ]
 
         _tqs = (os.environ.get("FLUXCAST_WFD_THREAD_QUEUE_SIZE", "") or "64").strip() or "64"
+        # VAAPI pipe low-latency input: skip demux probing / extra buffering.
+        # Enable with FLUXCAST_WFD_VAAPI_PIPE_LOW_LATENCY=1 (test before defaulting).
+        _pipe_ll = (os.environ.get("FLUXCAST_WFD_VAAPI_PIPE_LOW_LATENCY", "") or "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if _pipe_ll and _tqs == "64":
+            _tqs = (os.environ.get("FLUXCAST_WFD_THREAD_QUEUE_SIZE", "") or "8").strip() or "8"
         ffmpeg_cmd = [
             *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             *plan.pre_input,
-            "-fflags", "+genpts",
+        ]
+        if _pipe_ll:
+            ffmpeg_cmd += [
+                "-fflags", "nobuffer+genpts+flush_packets",
+                "-flags", "low_delay",
+                "-probesize", "32",
+                "-analyzeduration", "0",
+            ]
+        else:
+            ffmpeg_cmd += ["-fflags", "+genpts"]
+        ffmpeg_cmd += [
             "-thread_queue_size", _tqs,
             "-f", "nut",
             "-i", "pipe:0",
