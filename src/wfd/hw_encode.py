@@ -4,10 +4,14 @@ Default encode path stays historical libx264 so existing FluxCast users see no
 pipeline change. Set FLUXCAST_WFD_ENCODER to vaapi, qsv, or auto (VAAPI then
 QSV then libx264) to opt into GPU encode.
 
-Automatic battery / power-saver encode bias only engages when GPU encode was
-opted in (vaapi / qsv / auto) or FLUXCAST_WFD_ENCODE_BIAS is set explicitly.
-Default libx264 sessions keep historical bitrate and presets. When a GPU
-request falls back to libx264, bias still applies because the request was GPU.
+Automatic battery / saver-profile encode throttling only engages when GPU
+encode was opted in (vaapi / qsv / auto) or ``FLUXCAST_WFD_POWER_PLAN`` /
+legacy ``FLUXCAST_WFD_ENCODE_BIAS`` is set. Default libx264 sessions keep
+historical bitrate and presets. When a GPU request falls back to libx264,
+throttling still applies because the request was GPU.
+
+Power plans use stable ``power_plan_N`` ids with OS profile strings as names
+(see ``wfd.power_plan``).
 """
 
 from __future__ import annotations
@@ -19,6 +23,19 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .outputs import monitor_scale
+from .power_plan import (
+    active_power_plan,
+    encode_throttled,
+    on_mains_power,
+)
+
+# Re-exports / aliases for call sites and tests.
+_on_mains_power = on_mains_power
+
+
+def power_bias() -> str:
+    """Deprecated shim: ``efficient`` if throttled else ``full``."""
+    return "efficient" if encode_throttled() else "full"
 
 
 @dataclass(frozen=True)
@@ -189,97 +206,22 @@ def prefer_wf_recorder_vaapi_dmabuf(monitor=None) -> bool:
     return True
 
 
-def vaapi_quality_for_bias(bias: Optional[str] = None) -> str:
+def vaapi_quality_for_plan(*, throttled: Optional[bool] = None) -> str:
     """ffmpeg/wf-recorder h264_vaapi -quality (higher = faster/worse).
 
-    Efficient used to force ``7`` (very blocky on Miracast TVs). GPU encode is
+    Throttled used to force ``7`` (very blocky on Miracast TVs). GPU encode is
     cheap enough that ``5`` still saves work without looking like a slideshow.
     """
-    b = bias or power_bias()
-    return "5" if b == "efficient" else "4"
+    if throttled is None:
+        throttled = encode_throttled()
+    return "5" if throttled else "4"
 
 
-def _sysfs_text(path: str) -> Optional[str]:
-    try:
-        with open(path, encoding="utf-8") as fh:
-            return fh.read().strip()
-    except OSError:
-        return None
-
-
-def _is_system_supply(base: str) -> bool:
-    """Ignore Device-scoped supplies (HID UPS, mouse, etc.).
-
-    Missing scope is treated as System — older kernels omit the attribute on
-    the laptop pack / AC adapter.
-    """
-    scope = _sysfs_text(os.path.join(base, "scope"))
-    if scope is None:
-        return True
-    return scope.lower() == "system"
-
-
-def _on_mains_power() -> bool:
-    """True when system AC is online, or no system battery is present."""
-    supply = "/sys/class/power_supply"
-    try:
-        names = os.listdir(supply)
-    except OSError:
-        return True
-    saw_system_battery = False
-    for name in names:
-        base = os.path.join(supply, name)
-        kind = (_sysfs_text(os.path.join(base, "type")) or "").lower()
-        if not kind or not _is_system_supply(base):
-            continue
-        if kind == "mains":
-            if _sysfs_text(os.path.join(base, "online")) == "1":
-                return True
-        elif kind == "battery":
-            saw_system_battery = True
-            status = (_sysfs_text(os.path.join(base, "status")) or "").lower()
-            if status in ("charging", "full"):
-                return True
-    # Desktop / no system pack → treat as mains so we do not trim bitrate.
-    return not saw_system_battery
-
-
-def _power_profile() -> str:
-    ctl = shutil.which("powerprofilesctl")
-    if not ctl:
-        return "unknown"
-    try:
-        result = subprocess.run(
-            [ctl, "get"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return "unknown"
-    return (result.stdout or "").strip().lower() or "unknown"
-
-
-def power_bias() -> str:
-    """full | efficient — efficient on battery or power-saver profile.
-
-    Automatic battery / power-saver detection only engages when GPU encode was
-    opted in (FLUXCAST_WFD_ENCODER=vaapi|qsv|auto) or the caller set
-    FLUXCAST_WFD_ENCODE_BIAS explicitly. Default libx264 sessions keep
-    historical bitrate and presets.
-    """
-    override = os.environ.get("FLUXCAST_WFD_ENCODE_BIAS", "").strip().lower()
-    if override in ("full", "efficient"):
-        return override
-    encoder = _requested_encoder()
-    if encoder in ("libx264", "x264", "software", "sw"):
-        return "full"
-    if not _on_mains_power():
-        return "efficient"
-    if _power_profile() == "power-saver":
-        return "efficient"
-    return "full"
+# Deprecated name kept for callers/tests not yet updated.
+def vaapi_quality_for_bias(bias: Optional[str] = None) -> str:
+    if bias is None:
+        return vaapi_quality_for_plan()
+    return vaapi_quality_for_plan(throttled=(bias == "efficient"))
 
 
 def _level_to_idc(level: str) -> str:
@@ -338,9 +280,9 @@ def _requested_gpu_encode() -> bool:
     return _requested_encoder() not in ("libx264", "x264", "software", "sw")
 
 
-def apply_bitrate_bias(bitrate_text: str, bias: str) -> str:
-    """On efficient bias, mildly trim bitrate (GPU encode is cheap; heavy trim looks blocky on TVs)."""
-    if bias != "efficient":
+def apply_bitrate_plan(bitrate_text: str, *, throttled: bool) -> str:
+    """When throttled, mildly trim bitrate (GPU encode is cheap; heavy trim looks blocky on TVs)."""
+    if not throttled:
         return bitrate_text
     text = bitrate_text.strip().lower()
     try:
@@ -351,6 +293,11 @@ def apply_bitrate_bias(bitrate_text: str, bias: str) -> str:
     except ValueError:
         return bitrate_text
     return bitrate_text
+
+
+def apply_bitrate_bias(bitrate_text: str, bias: str) -> str:
+    """Deprecated: prefer ``apply_bitrate_plan``."""
+    return apply_bitrate_plan(bitrate_text, throttled=(bias == "efficient"))
 
 
 def probe_encoder(prefer: str = "libx264") -> str:
@@ -396,10 +343,12 @@ def build_encode_plan(
     encoder_override: force ``vaapi`` / ``qsv`` / ``libx264`` for RENDER METHOD
     fallbacks (ignores ``FLUXCAST_WFD_ENCODER`` for this plan only).
 
-    output_height selects the historical libx264 preset when bias is full:
+    output_height selects the historical libx264 preset when not throttled:
     ultrafast above 1080p, veryfast otherwise (matches pre-hw-encode FluxCast).
     """
-    bias = power_bias()
+    plan = active_power_plan()
+    throttled = encode_throttled(plan)
+    plan_note = plan.label()
     requested = (encoder_override or _requested_encoder()).strip().lower()
     choice = probe_encoder(requested)
     level_idc = _level_to_idc(level)
@@ -421,8 +370,8 @@ def build_encode_plan(
         #
         # Do NOT use -low_power here: Intel's LP entrypoint only supports CQP,
         # and CQP+low_power measured ~2.5× ffmpeg CPU vs normal CBR VAAPI on
-        # this hardware. Efficient bias = faster quality + trimmed bitrate.
-        quality = vaapi_quality_for_bias(bias)
+        # this hardware. Throttled plan = faster quality + trimmed bitrate.
+        quality = vaapi_quality_for_plan(throttled=throttled)
         return EncodePlan(
             name="vaapi",
             pre_input=["-vaapi_device", device],
@@ -444,7 +393,7 @@ def build_encode_plan(
                 "-quality", quality,
                 "-async_depth", "2",
             ],
-            note=f"h264_vaapi on {device} ({bias} power bias)",
+            note=f"h264_vaapi on {device} ({plan_note})",
         )
 
     if choice == "qsv":
@@ -452,7 +401,8 @@ def build_encode_plan(
             vf = f"{vf_scale},format=nv12,hwupload=extra_hw_frames=64"
         else:
             vf = "format=nv12,hwupload=extra_hw_frames=64"
-        preset = "faster" if bias == "efficient" else "balanced"
+        # "balanced" here is the QSV preset name, not a FluxCast power plan.
+        preset = "faster" if throttled else "balanced"
         return EncodePlan(
             name="qsv",
             pre_input=["-init_hw_device", "qsv=hw", "-filter_hw_device", "hw"],
@@ -470,22 +420,22 @@ def build_encode_plan(
                 "-bufsize", bufsize,
                 "-preset", preset,
             ],
-            note=f"h264_qsv ({bias} power bias)",
+            note=f"h264_qsv ({plan_note})",
         )
 
     # Software path — same shape as the historical FluxCast argv.
-    # full bias: ultrafast above 1080p (CPU headroom), veryfast otherwise.
-    # efficient bias: always ultrafast.
-    if bias == "efficient":
+    # Unthrottled: ultrafast above 1080p (CPU headroom), veryfast otherwise.
+    # Throttled: always ultrafast.
+    if throttled:
         preset = "ultrafast"
     elif output_height is not None and output_height > 1080:
         preset = "ultrafast"
     else:
         preset = "veryfast"
     if wanted_gpu:
-        note = f"libx264 {preset} ({bias} power bias; no usable GPU encoder)"
+        note = f"libx264 {preset} ({plan_note}; no usable GPU encoder)"
     else:
-        note = f"libx264 {preset} ({bias} power bias)"
+        note = f"libx264 {preset} ({plan_note})"
     return EncodePlan(
         name="libx264",
         pre_input=[],

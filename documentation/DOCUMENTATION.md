@@ -345,7 +345,8 @@ historical software encode pipeline (`libx264` over a raw pipe).
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `FLUXCAST_WFD_ENCODER` | `libx264` | Encode backend: `libx264` (historical default), `vaapi`, `qsv`, or `auto` (VAAPI then QSV then libx264). |
-| `FLUXCAST_WFD_ENCODE_BIAS` | unset | Force `full` or `efficient` bitrate/preset bias. When unset, automatic battery / power-saver bias only applies if GPU encode was opted in (`vaapi` / `qsv` / `auto`). |
+| `FLUXCAST_WFD_POWER_PLAN` | unset | Select encode power plan by id (`power_plan_0`) or OS profile name (`balanced`, `power-saver`, …). Plans are discovered from power-profiles-daemon / TLP-pd D-Bus, `powerprofilesctl`, ACPI `platform_profile`, `system76-power`, or `tuned-adm`. |
+| `FLUXCAST_WFD_ENCODE_BIAS` | unset | **Deprecated.** Legacy alias: `full` = unthrottled, `efficient` = throttled. Prefer `FLUXCAST_WFD_POWER_PLAN`. When unset, automatic battery / saver-profile throttling only applies if GPU encode was opted in (`vaapi` / `qsv` / `auto`). |
 | `FLUXCAST_WFD_VAAPI_DEVICE` | first `/dev/dri/renderD12x` | VAAPI render node override. |
 | `FLUXCAST_WFD_CAPTURE_ENCODE` | unset → pipe | Capture path when no preference file/pref is set: `pipe` / `raw` / `hwupload` = raw `wf-recorder` → ffmpeg encode; `vaapi` / `dmabuf` / `gpu` = prefer `wf-recorder -c h264_vaapi` (DMA-BUF); `auto` = DMA-BUF when GPU encode was requested. |
 | `FLUXCAST_WFD_CAPTURE_ENCODE_PREF` | unset | Explicit capture preference: `dmabuf` (DMA-BUF + VAAPI CQP), `vaapi` (raw pipe → `hwupload` → `h264_vaapi`), or `cpu` (raw pipe → `libx264`). Overrides deriving preference from `FLUXCAST_WFD_CAPTURE_ENCODE` / `FLUXCAST_WFD_ENCODER`. |
@@ -360,6 +361,39 @@ historical software encode pipeline (`libx264` over a raw pipe).
 | `FLUXCAST_WFD_WF_RECORDER_BIN` | unset | Absolute path to a `wf-recorder` binary. When set (and usable), preferred over `PATH`. Opt-in for a local [PR #347](https://github.com/ammen99/wf-recorder/pull/347) ICC build — **not** probed automatically. |
 | `FLUXCAST_WFD_WF_RECORDER_PROTO` | unset / `auto` | `icc` requires an ICC-capable binary (`--toplevel` / `ext-copy-capture`). In FluxCast alone, a non-ICC binary with `PROTO=icc` yields no recorder; Omarchy `miracast-ctl` fail-softs to PATH instead. `wlr` / unset / `auto` accept any usable binary (default stock `PATH`). |
 | `FLUXCAST_WFD_MODE_STATE` | unset | If set to a file path, write sink-advertised CEA/VESA modes (chosen mode, supported list, peer MAC / name) as JSON after RTSP negotiation — for external UIs. |
+
+#### Power plans (`power_plan_N`)
+
+FluxCast does not invent profile *names*. It discovers whatever power stack is
+active and assigns stable ids ``power_plan_0`` … ``power_plan_{n-1}`` in that
+backend’s order. The OS string (e.g. ``performance``, ``balanced``,
+``power-saver``, ``battery``, ``quiet``) is the plan’s ``name`` for logs and
+``FLUXCAST_WFD_POWER_PLAN`` overrides.
+
+Discovery order (first backend that yields at least one profile wins):
+
+1. power-profiles-daemon D-Bus (``org.freedesktop.UPower.PowerProfiles`` or
+   legacy ``net.hadess.PowerProfiles``) — also covers TLP 1.9+ ``tlp-pd``
+2. ``powerprofilesctl`` CLI
+3. ACPI ``/sys/firmware/acpi/platform_profile`` (+ ``_choices``)
+4. ``system76-power`` (Pop!_OS: performance / balanced / battery)
+5. ``tuned-adm``
+6. Synthetic ``power_plan_0`` name ``default`` when nothing is available
+
+Encode **throttling** (milder bitrate / faster presets — the old ``efficient``
+knobs) applies when GPU encode was opted in (or an override is set) **and**:
+
+- the system is on battery, or
+- the active plan’s OS name looks saver-like (``power-saver``, ``battery``,
+  ``low-power``, ``cool``, ``quiet``, …)
+
+Default ``FLUXCAST_WFD_ENCODER=libx264`` sessions stay unthrottled unless you
+set ``FLUXCAST_WFD_POWER_PLAN`` or legacy ``FLUXCAST_WFD_ENCODE_BIAS``.
+
+```bash
+# Force the saver plan by OS name (id also works: power_plan_0, …)
+FLUXCAST_WFD_ENCODER=auto FLUXCAST_WFD_POWER_PLAN=power-saver python3 src/main.py
+```
 
 #### Capture preference and fallback
 
