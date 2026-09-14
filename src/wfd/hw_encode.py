@@ -373,6 +373,13 @@ def build_encode_plan(
         # and CQP+low_power measured ~2.5× ffmpeg CPU vs normal CBR VAAPI on
         # this hardware. Throttled plan = faster quality + trimmed bitrate.
         quality = vaapi_quality_for_plan(throttled=throttled)
+        # Pipe-path latency: async_depth 1 reduces parallelism but cuts encoder
+        # queuing. Override with FLUXCAST_WFD_VAAPI_ASYNC_DEPTH (default 2).
+        _async = (os.environ.get("FLUXCAST_WFD_VAAPI_ASYNC_DEPTH", "") or "2").strip() or "2"
+        try:
+            _async_i = str(max(1, min(4, int(_async))))
+        except ValueError:
+            _async_i = "2"
         return EncodePlan(
             name="vaapi",
             pre_input=["-vaapi_device", device],
@@ -392,7 +399,7 @@ def build_encode_plan(
                 "-maxrate", bitrate,
                 "-bufsize", bufsize,
                 "-quality", quality,
-                "-async_depth", "2",
+                "-async_depth", _async_i,
             ],
             note=f"h264_vaapi on {device} ({plan_note})",
         )
