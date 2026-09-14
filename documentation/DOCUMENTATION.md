@@ -227,6 +227,8 @@ and protocol selection remain controlled by the tray and cannot be set here.
     is missing, but never raises GO intent on its own: `go_intent 0` is a
     deliberate fix for some sinks (see #72), and silently overriding it
     would break those.
+  - Also accepts non-DFS 5GHz `36|40|44|48|149|153|157|161` and applies for
+    `--wfd-p2p-backend nm` as well as `wpas` (wpa OperChannel before connect).
 - `--wfd-monitor NAME`
   - **Deprecated** alias for `--monitor`, kept for backward compatibility. Use `--monitor` instead.
 

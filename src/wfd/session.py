@@ -11,7 +11,9 @@ from .env import _is_hyprland_session, _is_wayland_session
 from .firewall import (
     _close_wfd_firewall_port, _open_wfd_firewall_port, _warn_if_ufw_may_block,
 )
-from .p2p.device import _set_p2p_device_name, _set_p2p_go_intent
+from .p2p.device import (
+    _set_p2p_device_name, _set_p2p_go_intent, _set_p2p_oper_channel,
+)
 from .p2p.nm import (
     _connect_peer, _deactivate_connection, _disconnect_device,
     _nm_p2p_device_path, _nm_p2p_uses_iwd, _wait_for_nm_activation,
@@ -181,7 +183,11 @@ def start_experimental_backend(args) -> None:
                 previous_go_intent = _set_p2p_go_intent(
                     args.wfd_interface, getattr(args, "wfd_go_intent", 0)
                 )
-
+                p2p_channel = getattr(args, "wfd_p2p_channel", None)
+                if p2p_channel is not None:
+                    # NM wifi-p2p has no channel property; set OperChannel on wpa
+                    # before AddAndActivateConnection2 (only applies if we are GO).
+                    _set_p2p_oper_channel(args.wfd_interface, p2p_channel)
             active_path = _connect_peer(
                 device_path,
                 peer,

@@ -51,8 +51,8 @@ class WfdDeviceInfoIeTest(unittest.TestCase):
 
 class OperChannelTest(unittest.TestCase):
     """--wfd-p2p-channel forces the operating channel via the same
-    P2PDeviceConfig struct as GOIntent, using reg_class 81 (2.4GHz,
-    channels 1-13).
+    P2PDeviceConfig struct as GOIntent. Reg class follows the band:
+    81 for 2.4GHz, 115/125 for non-DFS 5GHz UNII-1 / UNII-3.
     """
 
     def test_sends_the_requested_channel_and_reg_class(self):
@@ -67,9 +67,35 @@ class OperChannelTest(unittest.TestCase):
         self.assertIn("'OperChannel': <uint32 6>", payload)
         self.assertIn("'OperRegClass': <uint32 81>", payload)
 
+    def test_maps_5ghz_unii1_reg_class(self):
+        with mock.patch.object(device, "_p2p_device_iface_paths",
+                                return_value=["/fi/w1/wpa_supplicant1/Interfaces/1"]), \
+             mock.patch.object(device, "_gdbus_call", return_value=_completed()) as call:
+            ok = device._set_p2p_oper_channel("wlan0", 36)
+
+        self.assertTrue(ok)
+        payload = call.call_args[0][0][-1]
+        self.assertIn("'OperChannel': <uint32 36>", payload)
+        self.assertIn("'OperRegClass': <uint32 115>", payload)
+
+    def test_maps_5ghz_unii3_reg_class(self):
+        with mock.patch.object(device, "_p2p_device_iface_paths",
+                                return_value=["/fi/w1/wpa_supplicant1/Interfaces/1"]), \
+             mock.patch.object(device, "_gdbus_call", return_value=_completed()) as call:
+            ok = device._set_p2p_oper_channel("wlan0", 149)
+
+        self.assertTrue(ok)
+        payload = call.call_args[0][0][-1]
+        self.assertIn("'OperChannel': <uint32 149>", payload)
+        self.assertIn("'OperRegClass': <uint32 125>", payload)
+
     def test_returns_false_without_a_p2p_interface(self):
         with mock.patch.object(device, "_p2p_device_iface_paths", return_value=[]):
             ok = device._set_p2p_oper_channel("wlan0", 6)
+        self.assertFalse(ok)
+
+    def test_returns_false_for_unsupported_channel(self):
+        ok = device._set_p2p_oper_channel("wlan0", 99)
         self.assertFalse(ok)
 
 
