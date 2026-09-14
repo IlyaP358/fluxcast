@@ -3,7 +3,9 @@ from typing import Optional
 
 from ..config import WFDNotReady
 from ..constants import NM_DEST, NM_PATH, WFD_RTSP_PORT
-from ..ie import WFDPeer, _parse_gdbus_byte_array, _parse_wfd_ies_rtsp_port
+from ..ie import (
+    WFDPeer, _parse_gdbus_byte_array, _parse_wfd_ies_rtsp_port, _wfd_capability,
+)
 from .dbus import (
     NM_ACTIVE_STATE_NAMES, NM_DEVICE_REASON_NAMES, NM_DEVICE_STATE_NAMES,
     _gdbus_call, _nm_get_property, _nm_get_string, _object_paths,
@@ -137,11 +139,24 @@ def _nm_scan(interface: Optional[str], timeout: int) -> list[WFDPeer]:
         wfd_ies_list = _parse_gdbus_byte_array(wfd_ies_raw)
         sink_rtsp_port = _parse_wfd_ies_rtsp_port(wfd_ies_list)
 
+        # A peer with no Wi-Fi Display data still returns "(<@ay []>,)" here:
+        # an empty array, but a non-empty string. Gate on the parsed bytes, or
+        # printers and every other P2P device get reported as valid sinks.
+        #
+        # An empty string is a different thing again: _nm_get_property returns
+        # "" when the gdbus call fails, which happens for a peer that ages out
+        # mid-scan. That is unknown, not incapable - calling it False steers
+        # the user away from a device that would have worked.
+        if wfd_ies_raw:
+            wfd_capable, wfd_device_type = _wfd_capability(wfd_ies_list)
+        else:
+            wfd_capable, wfd_device_type = None, None
+
         details = "; ".join(
             part for part in [
                 f"model={model}" if model else "",
                 f"manufacturer={manufacturer}" if manufacturer else "",
-                f"wfd_ies={wfd_ies_raw}" if wfd_ies_raw else "",
+                f"wfd_ies={wfd_ies_raw}" if wfd_ies_list else "",
                 f"sink_rtsp_port={sink_rtsp_port}",
             ]
             if part
@@ -153,6 +168,8 @@ def _nm_scan(interface: Optional[str], timeout: int) -> list[WFDPeer]:
             path=peer_path,
             source="NetworkManager",
             rtsp_port=sink_rtsp_port,
+            wfd_capable=wfd_capable,
+            wfd_device_type=wfd_device_type,
         ))
     return peers
 

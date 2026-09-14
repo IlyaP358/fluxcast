@@ -6,7 +6,10 @@ from typing import Optional
 
 from ..config import WFDNotReady
 from ..constants import _DEVICE_NAME
-from ..ie import WFDPeer, _wfd_ie_device_info, _wfd_ie_device_name
+from ..ie import (
+    WFD_DEVICE_TYPE_SOURCE, WFDPeer, _wfd_capability_from_hex,
+    _wfd_ie_device_info, _wfd_ie_device_name,
+)
 from ..proc import _run
 from .nm import _nm_scan
 
@@ -75,6 +78,23 @@ def _default_wifi_interface() -> Optional[str]:
             return current_iface
     return None
 
+def _parse_peer_capability(details: str) -> tuple[Optional[bool], Optional[int]]:
+    """Read a peer's WFD device type out of `wpa_cli p2p_peer` output.
+
+    Empty details means the lookup failed, which is unknown rather than
+    incapable. Details that mention no Wi-Fi Display field at all are a real
+    answer: the peer advertised none.
+    """
+    if not details:
+        return None, None
+
+    for line in details.splitlines():
+        stripped = line.strip()
+        for field in ("wfd_dev_info=", "wfd_subelems="):
+            if stripped.startswith(field):
+                return _wfd_capability_from_hex(stripped.partition("=")[2])
+    return False, None
+
 def _parse_peer_name(details: str) -> str:
     for line in details.splitlines():
         stripped = line.strip()
@@ -138,11 +158,14 @@ def active_scan(interface: Optional[str] = None, timeout: int = 8) -> list[WFDPe
                 details = details_result.stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
             pass
+        wfd_capable, wfd_device_type = _parse_peer_capability(details)
         peers.append(WFDPeer(
             address=address,
             name=_parse_peer_name(details),
             details=details,
             source="wpa_cli",
+            wfd_capable=wfd_capable,
+            wfd_device_type=wfd_device_type,
         ))
 
     return peers
@@ -157,7 +180,22 @@ def print_scan(peers: list[WFDPeer]) -> None:
         name = f"  {peer.name}" if peer.name else ""
         source = f" via {peer.source}" if peer.source else ""
         print(f"  [{idx}] {peer.address}{name}{source}")
-        if "wfd_subelems" in peer.details or "wfd_dev_info" in peer.details:
+        if peer.wfd_capable:
             print("      WFD capability data detected")
-        elif "wfd_ies=" in peer.details:
-            print("      WFD capability data detected")
+        elif peer.wfd_capable is False:
+            # Say something, because connecting to a non-sink succeeds at the
+            # P2P layer and then sits in NetworkManager's config state until
+            # the 35s timeout with nothing on screen explaining why (#121).
+            #
+            # Report what was advertised rather than reaching a verdict. A
+            # sink only advertises Wi-Fi Display while it is waiting for a
+            # connection, so "not a sink" and "a sink that is still on a
+            # normal input" look identical from here, and the second is the
+            # common case - a maintainer hit it on a TV he streams to daily.
+            # Naming the state points at the fix instead of at the device.
+            if peer.wfd_device_type == WFD_DEVICE_TYPE_SOURCE:
+                print("      advertising Wi-Fi Display as a source, not a sink "
+                      "- another sender, not a display")
+            else:
+                print("      not advertising Wi-Fi Display; if this is a TV, "
+                      "put it into Screen Share mode first")
