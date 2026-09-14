@@ -35,7 +35,19 @@ def _active_rtsp_probe(
 
     print("[FluxCast WFD RTSP] No passive connection; trying Source-initiated RTSP probe...")
 
-    tv_ip = _wait_for_peer_ip(peer.address, timeout=10.0)
+    # Retry: LG often assigns a different group MAC than the discovery MAC, and
+    # ARP/DHCP can lag the Wi-Fi Direct accept dialog by many seconds.
+    tv_ip = None
+    for attempt in range(1, 4):
+        if rtsp_server.has_connected_client:
+            return
+        tv_ip = _wait_for_peer_ip(peer.address, timeout=8.0)
+        if tv_ip:
+            break
+        print(
+            f"[FluxCast WFD RTSP] Active probe: TV IP not found yet "
+            f"(attempt {attempt}/3, discovery MAC {peer.address})"
+        )
     if not tv_ip:
         print(
             f"[FluxCast WFD RTSP] Active probe: TV IP not found for MAC {peer.address} "
@@ -45,7 +57,7 @@ def _active_rtsp_probe(
 
     if rtsp_server.has_connected_client:
         return
-    
+
     tv_port = peer.rtsp_port if 0 < peer.rtsp_port <= 65535 else 7236
     print(f"[FluxCast WFD RTSP] Active probe: TV={tv_ip}; connecting to RTSP port {tv_port}...")
 
@@ -54,7 +66,9 @@ def _active_rtsp_probe(
     except ConnectionRefusedError:
         print(
             f"[FluxCast WFD RTSP] Active probe: TV port {tv_port} refused "
-            "— Sink-only device; waiting for its passive connection to us."
+            "— Sink-only device; waiting for its passive connection to us. "
+            "If the TV only showed a Wi-Fi Direct prompt, open Screen Share / "
+            "Miracast on the TV so it starts RTSP."
         )
         return
     except OSError as exc:
