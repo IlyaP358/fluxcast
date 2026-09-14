@@ -167,13 +167,17 @@ def capture_encode_attempts(preference: Optional[str] = None) -> list[str]:
 def prefer_wf_recorder_vaapi_dmabuf(monitor=None) -> bool:
     """True when capture should try wf-recorder -c h264_vaapi (DMA-BUF).
 
-    Scaled outputs are allowed: whole-output screencopy still yields physical
+    Integer scales (1, 2, …) are OK: whole-output screencopy yields physical
     mode-sized DMA buffers (logical region in the log is expected). Proven at
-    integer scale 2 with ``out_range=tv`` / no ``-r`` / CQP.
+    scale 2 with ``out_range=tv`` / CQP.
+
+    **Fractional** scales (e.g. 1.6) often produce black/corrupt DMA frames on
+    ICC — fall back to the raw-pipe + hwupload path unless explicitly allowed.
 
     Escape hatches:
     - RENDER METHOD ``vaapi`` / ``cpu`` (or ``FLUXCAST_WFD_CAPTURE_ENCODE=pipe``)
-    - ``FLUXCAST_WFD_DMABUF_ALLOW_SCALED=0`` — pipe only when scale != 1
+    - ``FLUXCAST_WFD_DMABUF_ALLOW_SCALED=0`` — pipe when scale != 1
+    - ``FLUXCAST_WFD_DMABUF_ALLOW_FRACTIONAL=1`` — allow DMA-BUF at 1.6 etc.
     """
     pref = capture_encode_preference()
     if pref in ("vaapi", "cpu"):
@@ -200,8 +204,14 @@ def prefer_wf_recorder_vaapi_dmabuf(monitor=None) -> bool:
             scale = monitor_scale(name)
         if abs(scale - 1.0) > 0.01:
             allow = (os.environ.get("FLUXCAST_WFD_DMABUF_ALLOW_SCALED", "") or "").strip().lower()
-            # Default allow; only an explicit deny forces the pipe fallback.
             if allow in ("0", "false", "no", "off", "never"):
+                return False
+        # Fractional scale (1.6, 1.25, …): DMA-BUF often goes black on ICC.
+        if abs(scale - round(scale)) > 0.01:
+            allow_frac = (
+                os.environ.get("FLUXCAST_WFD_DMABUF_ALLOW_FRACTIONAL", "") or ""
+            ).strip().lower()
+            if allow_frac not in ("1", "true", "yes", "on"):
                 return False
     return True
 
