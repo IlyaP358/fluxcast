@@ -268,6 +268,13 @@ class WlrootsMixin:
         except (TypeError, ValueError):
             gop = max(meta["gop"], int(self.config.fps))
 
+        # Prefer caller async_depth (High uses 2); wf-recorder defaults to 1.
+        _async = (os.environ.get("FLUXCAST_WFD_VAAPI_ASYNC_DEPTH", "") or "2").strip() or "2"
+        try:
+            async_depth = str(max(1, min(4, int(_async))))
+        except ValueError:
+            async_depth = "2"
+
         if rc == "CQP":
             qp = (os.environ.get("FLUXCAST_WFD_VAAPI_QP", "") or "18").strip() or "18"
             params = [
@@ -275,11 +282,12 @@ class WlrootsMixin:
                 "-p", f"qp={qp}",
                 "-p", f"gop_size={gop}",
                 "-p", f"quality={quality}",
+                "-p", f"async_depth={async_depth}",
                 "-p", "bf=0",
                 "-p", "profile=constrained_baseline",
                 "-p", f"framerate={self.config.fps}",
             ]
-            desc = f"{rc} qp={qp}, gop={gop}, quality={quality}"
+            desc = f"{rc} qp={qp}, gop={gop}, quality={quality}, async={async_depth}"
         else:
             # Target bitrate: stream/config bitrate; VAAPI_BITRATE is the peak
             # cap for QVBR/VBR (matches pipe ffmpeg -b:v / -maxrate split).
@@ -314,6 +322,7 @@ class WlrootsMixin:
                 "-p", f"rc_mode={rc}",
                 "-p", f"gop_size={gop}",
                 "-p", f"quality={quality}",
+                "-p", f"async_depth={async_depth}",
                 "-p", "bf=0",
                 "-p", "profile=constrained_baseline",
                 "-p", f"framerate={self.config.fps}",
@@ -324,20 +333,20 @@ class WlrootsMixin:
                 params.extend(["-p", f"qp={qp}", "-p", f"maxrate={peak_bits}"])
                 desc = (
                     f"{rc} qp={qp} b={target} max={peak} buf={buf_bits}, "
-                    f"gop={gop}, quality={quality}"
+                    f"gop={gop}, quality={quality}, async={async_depth}"
                 )
             elif rc in ("VBR", "AVBR"):
                 params.extend(["-p", f"maxrate={peak_bits}"])
                 desc = (
                     f"{rc} b={target} max={peak} buf={buf_bits}, "
-                    f"gop={gop}, quality={quality}"
+                    f"gop={gop}, quality={quality}, async={async_depth}"
                 )
             elif rc == "CBR":
                 # HRD: maxrate == target.
                 params.extend(["-p", f"maxrate={br_bits}"])
                 desc = (
                     f"{rc} bitrate={target} buf={buf_bits}, "
-                    f"gop={gop}, quality={quality}"
+                    f"gop={gop}, quality={quality}, async={async_depth}"
                 )
             else:
                 desc = f"{rc} bitrate={target}, gop={gop}, quality={quality}"
