@@ -277,6 +277,7 @@ class WlrootsMixin:
 
         if rc == "CQP":
             qp = (os.environ.get("FLUXCAST_WFD_VAAPI_QP", "") or "18").strip() or "18"
+            i_qfactor = (os.environ.get("FLUXCAST_WFD_VAAPI_I_QFACTOR", "") or "").strip()
             params = [
                 "-p", f"rc_mode={rc}",
                 "-p", f"qp={qp}",
@@ -287,7 +288,12 @@ class WlrootsMixin:
                 "-p", "profile=constrained_baseline",
                 "-p", f"framerate={self.config.fps}",
             ]
-            desc = f"{rc} qp={qp}, gop={gop}, quality={quality}, async={async_depth}"
+            if i_qfactor:
+                params.extend(["-p", f"i_qfactor={i_qfactor}"])
+            desc = (
+                f"{rc} qp={qp}, gop={gop}, quality={quality}, async={async_depth}"
+                + (f", i_qfactor={i_qfactor}" if i_qfactor else "")
+            )
         else:
             # Target bitrate: stream/config bitrate; VAAPI_BITRATE is the peak
             # cap for QVBR/VBR (matches pipe ffmpeg -b:v / -maxrate split).
