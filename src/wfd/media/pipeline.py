@@ -239,6 +239,18 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
             self._portal_pw_fd = None
             # Allow the RTP source port to be rebound (LPCM muxer binds it).
             _time.sleep(0.75)
+            # Reload encode knobs written by miracast-ctl before SIGUSR1.
+            try:
+                from ..hw_encode import apply_encode_env_file
+
+                apply_encode_env_file()
+                import os as _os_env
+
+                br = (_os_env.environ.get("FLUXCAST_WFD_BITRATE") or "").strip()
+                if br:
+                    self.config.bitrate = br
+            except Exception as exc:
+                print(f"[FluxCast WFD Media] encode.env reload skipped: {exc}")
             self._start_desktop()
             self.remember_capture_geometry()
             print("[FluxCast WFD Media] Desktop capture pipeline restarted.")

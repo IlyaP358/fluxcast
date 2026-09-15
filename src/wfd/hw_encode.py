@@ -33,6 +33,42 @@ from .power_plan import (
 _on_mains_power = on_mains_power
 
 
+def apply_encode_env_file() -> None:
+    """Reload encode knobs from FLUXCAST_WFD_ENCODE_ENV_FILE into os.environ.
+
+    Omarchy miracast-ctl writes this file before SIGUSR1 restart-capture so
+    bitrate/RC/quality changes apply without a full reconnect. Empty values
+    unset the key. If the env var is unset, fall back to the Omarchy state
+    path ``$XDG_STATE_HOME/omarchy-miracast/encode.env``.
+    """
+    path = (os.environ.get("FLUXCAST_WFD_ENCODE_ENV_FILE") or "").strip()
+    if not path:
+        state = (os.environ.get("XDG_STATE_HOME") or "").strip()
+        if not state:
+            state = os.path.join(os.path.expanduser("~"), ".local", "state")
+        candidate = os.path.join(state, "omarchy-miracast", "encode.env")
+        if os.path.isfile(candidate):
+            path = candidate
+    if not path or not os.path.isfile(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key = key.strip()
+                if not key.startswith("FLUXCAST_WFD_"):
+                    continue
+                if val == "":
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = val
+    except OSError:
+        return
+
+
 def power_bias() -> str:
     """Deprecated shim: ``efficient`` if throttled else ``full``."""
     return "efficient" if encode_throttled() else "full"
@@ -387,6 +423,7 @@ def build_encode_plan(
     output_height selects the historical libx264 preset when not throttled:
     ultrafast above 1080p, veryfast otherwise (matches pre-hw-encode FluxCast).
     """
+    apply_encode_env_file()
     plan = active_power_plan()
     throttled = encode_throttled(plan)
     plan_note = plan.label()
