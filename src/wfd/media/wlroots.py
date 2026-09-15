@@ -298,6 +298,17 @@ class WlrootsMixin:
             if peak_bits < br_bits:
                 peak_bits = br_bits
                 peak = target
+            # Intel HRD CBR/VBR needs bufsize or BRC undershoots badly (~2–3 Mbps
+            # on-device with b/maxrate alone). ~0.5s VBV matches pipe path default.
+            try:
+                vbv_mult = float(
+                    (os.environ.get("FLUXCAST_WFD_VBV_MULTIPLIER", "") or "0.5").strip()
+                    or "0.5"
+                )
+            except ValueError:
+                vbv_mult = 0.5
+            vbv_mult = max(0.25, min(4.0, vbv_mult))
+            buf_bits = max(br_bits // 4, int(peak_bits * vbv_mult))
             params = [
                 "-p", f"b={br_bits}",
                 "-p", f"rc_mode={rc}",
@@ -306,20 +317,28 @@ class WlrootsMixin:
                 "-p", "bf=0",
                 "-p", "profile=constrained_baseline",
                 "-p", f"framerate={self.config.fps}",
+                "-p", f"bufsize={buf_bits}",
             ]
             if rc == "QVBR":
                 qp = (os.environ.get("FLUXCAST_WFD_VAAPI_QP", "") or "18").strip() or "18"
                 params.extend(["-p", f"qp={qp}", "-p", f"maxrate={peak_bits}"])
                 desc = (
-                    f"{rc} qp={qp} b={target} max={peak}, gop={gop}, quality={quality}"
+                    f"{rc} qp={qp} b={target} max={peak} buf={buf_bits}, "
+                    f"gop={gop}, quality={quality}"
                 )
             elif rc in ("VBR", "AVBR"):
                 params.extend(["-p", f"maxrate={peak_bits}"])
-                desc = f"{rc} b={target} max={peak}, gop={gop}, quality={quality}"
+                desc = (
+                    f"{rc} b={target} max={peak} buf={buf_bits}, "
+                    f"gop={gop}, quality={quality}"
+                )
             elif rc == "CBR":
                 # HRD: maxrate == target.
                 params.extend(["-p", f"maxrate={br_bits}"])
-                desc = f"{rc} bitrate={target}, gop={gop}, quality={quality}"
+                desc = (
+                    f"{rc} bitrate={target} buf={buf_bits}, "
+                    f"gop={gop}, quality={quality}"
+                )
             else:
                 desc = f"{rc} bitrate={target}, gop={gop}, quality={quality}"
         return params, desc
