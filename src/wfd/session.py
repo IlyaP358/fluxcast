@@ -7,7 +7,9 @@ from .config import WFDMediaConfig, WFDNotReady
 from .constants import WFD_RTSP_PORT, WFD_UIBC_PORT
 from .dump import report_ts_dump
 from .env import _is_hyprland_session, _is_wayland_session
-from .firewall import _close_wfd_firewall_port, _open_wfd_firewall_port
+from .firewall import (
+    _close_wfd_firewall_port, _open_wfd_firewall_port, _warn_if_ufw_may_block,
+)
 from .p2p.device import _set_p2p_device_name, _set_p2p_go_intent
 from .p2p.nm import (
     _connect_peer, _deactivate_connection, _disconnect_device,
@@ -187,9 +189,16 @@ def start_experimental_backend(args) -> None:
             _wait_for_nm_activation(active_path)
 
         if not getattr(args, "wfd_no_firewall", False):
+            uibc_enabled = getattr(args, "wfd_uibc", False)
             firewall_opened = _open_wfd_firewall_port(rtsp_port)
-            if getattr(args, "wfd_uibc", False):
+            if uibc_enabled:
                 uibc_firewall_opened = _open_wfd_firewall_port(WFD_UIBC_PORT)
+
+            # One hint per session, covering every port opened above.
+            ufw_ports = [(rtsp_port, "RTSP")]
+            if uibc_enabled:
+                ufw_ports.append((WFD_UIBC_PORT, "UIBC"))
+            _warn_if_ufw_may_block(ufw_ports)
 
         # Active probe for newer TVs (Samsung 2024++, some LGs)
         # It runs in a background thread to not block the main loop.
