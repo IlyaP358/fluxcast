@@ -281,17 +281,23 @@ class WlrootsMixin:
             ]
             desc = f"{rc} qp={qp}, gop={gop}, quality={quality}"
         else:
-            # Target bitrate: prefer stream/config bitrate; VAAPI_BITRATE is the
-            # peak cap when QVBR (matches pipe ffmpeg -b:v / -maxrate split).
+            # Target bitrate: stream/config bitrate; VAAPI_BITRATE is the peak
+            # cap for QVBR/VBR (matches pipe ffmpeg -b:v / -maxrate split).
+            # Always set maxrate — without it, busy scenes can exceed a 20 MHz
+            # Miracast P2P budget (~12 Mbps reliable peak).
             target = (os.environ.get("FLUXCAST_WFD_BITRATE", "") or "").strip()
             if not target:
-                target = meta.get("effective_bitrate") or self.config.bitrate or "12M"
+                target = meta.get("effective_bitrate") or self.config.bitrate or "10M"
             peak = (os.environ.get("FLUXCAST_WFD_VAAPI_BITRATE", "") or "").strip()
             if not peak:
                 peak = target
             # AVOption name is ``b`` (bits/s), not ``bitrate``. Set before
             # rc_mode so CBR validation sees a target.
             br_bits = _bitrate_to_kbits(target) * 1000
+            peak_bits = _bitrate_to_kbits(peak) * 1000
+            if peak_bits < br_bits:
+                peak_bits = br_bits
+                peak = target
             params = [
                 "-p", f"b={br_bits}",
                 "-p", f"rc_mode={rc}",
@@ -301,16 +307,19 @@ class WlrootsMixin:
                 "-p", "profile=constrained_baseline",
                 "-p", f"framerate={self.config.fps}",
             ]
-            # QVBR keeps a QP quality floor; pass maxrate when distinct from b.
             if rc == "QVBR":
                 qp = (os.environ.get("FLUXCAST_WFD_VAAPI_QP", "") or "18").strip() or "18"
-                params.extend(["-p", f"qp={qp}"])
-                if peak and peak != target:
-                    peak_bits = _bitrate_to_kbits(peak) * 1000
-                    params.extend(["-p", f"maxrate={peak_bits}"])
+                params.extend(["-p", f"qp={qp}", "-p", f"maxrate={peak_bits}"])
                 desc = (
                     f"{rc} qp={qp} b={target} max={peak}, gop={gop}, quality={quality}"
                 )
+            elif rc in ("VBR", "AVBR"):
+                params.extend(["-p", f"maxrate={peak_bits}"])
+                desc = f"{rc} b={target} max={peak}, gop={gop}, quality={quality}"
+            elif rc == "CBR":
+                # HRD: maxrate == target.
+                params.extend(["-p", f"maxrate={br_bits}"])
+                desc = f"{rc} bitrate={target}, gop={gop}, quality={quality}"
             else:
                 desc = f"{rc} bitrate={target}, gop={gop}, quality={quality}"
         return params, desc
