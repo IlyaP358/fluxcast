@@ -233,6 +233,38 @@ def vaapi_quality_for_bias(bias: Optional[str] = None) -> str:
     return vaapi_quality_for_plan(throttled=(bias == "efficient"))
 
 
+def _vaapi_rc_mode(*, default: str = "CBR") -> str:
+    """Rate control for pipe-path ffmpeg h264_vaapi.
+
+    Honors ``FLUXCAST_WFD_VAAPI_RC`` (CQP / CBR / VBR / …) the same way the
+    DMA-BUF wf-recorder path does. When unset, ``default`` applies — pipe
+    historically used CBR (bare ``-b:v`` could land on AVBR and undershoot).
+    """
+    rc = (os.environ.get("FLUXCAST_WFD_VAAPI_RC", "") or "").strip().upper()
+    if rc in ("CQP", "CBR", "VBR", "AVBR", "QVBR", "ICQ"):
+        return rc
+    return default
+
+
+def _vaapi_qp() -> str:
+    qp = (os.environ.get("FLUXCAST_WFD_VAAPI_QP", "") or "18").strip() or "18"
+    try:
+        return str(max(1, min(51, int(qp))))
+    except ValueError:
+        return "18"
+
+
+def _vaapi_gop(gop: int) -> int:
+    """Prefer ``FLUXCAST_WFD_VAAPI_GOP`` (movie preset = 60) over caller default."""
+    raw = (os.environ.get("FLUXCAST_WFD_VAAPI_GOP", "") or "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return max(1, int(gop))
+
+
 def _level_to_idc(level: str) -> str:
     """Convert FluxCast levels like '3.1' / '4.0' to VAAPI level_idc '31' / '40'.
 
@@ -388,28 +420,56 @@ def build_encode_plan(
             _async_i = str(max(1, min(4, int(_async))))
         except ValueError:
             _async_i = "2"
+        rc = _vaapi_rc_mode(default="CBR")
+        gop_i = _vaapi_gop(gop)
+        video_args = [
+            "-c:v", "h264_vaapi",
+            "-profile:v", _map_h264_profile(h264_profile),
+            "-level", level_idc,
+            "-bf", "0",
+            "-g", str(gop_i),
+            "-keyint_min", str(gop_i),
+            "-r", str(fps),
+            "-rc_mode", rc,
+        ]
+        if rc == "CQP":
+            # Sharp/static: pure QP. Note: Intel ignores -maxrate in CQP, so
+            # busy scenes can spike 30–40 Mbps — fine on wide P2P, harsh on
+            # 20 MHz / ~72 Mbps Miracast links (use QVBR there).
+            qp = _vaapi_qp()
+            video_args += ["-qp", qp]
+            rc_note = f"CQP qp={qp} gop={gop_i}"
+        elif rc == "QVBR":
+            # Quality-defined VBR: keep qp as quality floor and honor maxrate.
+            # Prefer FLUXCAST_WFD_VAAPI_BITRATE as the peak cap when set.
+            qp = _vaapi_qp()
+            cap = (os.environ.get("FLUXCAST_WFD_VAAPI_BITRATE", "") or "").strip() or bitrate
+            video_args += [
+                "-qp", qp,
+                "-b:v", bitrate,
+                "-maxrate", cap,
+                "-bufsize", bufsize,
+            ]
+            rc_note = f"QVBR qp={qp} b={bitrate} max={cap} gop={gop_i}"
+        else:
+            # Explicit bitrate mode: bare -b:v can land on AVBR and undershoot
+            # badly on static desktops (few hundred kb/s vs multi-Mbps target).
+            video_args += [
+                "-b:v", bitrate,
+                "-maxrate", bitrate,
+                "-bufsize", bufsize,
+            ]
+            rc_note = f"{rc} {bitrate} gop={gop_i}"
+        video_args += [
+            "-quality", quality,
+            "-async_depth", _async_i,
+        ]
         return EncodePlan(
             name="vaapi",
             pre_input=["-vaapi_device", device],
             vf=["-vf", vf],
-            video_args=[
-                "-c:v", "h264_vaapi",
-                "-profile:v", _map_h264_profile(h264_profile),
-                "-level", level_idc,
-                "-bf", "0",
-                "-g", str(gop),
-                "-keyint_min", str(gop),
-                "-r", str(fps),
-                # Explicit CBR: bare -b:v can land on AVBR and undershoot badly
-                # on static desktops (few hundred kb/s vs multi-Mbps target).
-                "-rc_mode", "CBR",
-                "-b:v", bitrate,
-                "-maxrate", bitrate,
-                "-bufsize", bufsize,
-                "-quality", quality,
-                "-async_depth", _async_i,
-            ],
-            note=f"h264_vaapi on {device} ({plan_note})",
+            video_args=video_args,
+            note=f"h264_vaapi on {device} ({plan_note}; {rc_note})",
         )
 
     if choice == "qsv":
