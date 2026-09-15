@@ -1,7 +1,10 @@
+import os
 import re
 import shutil
 import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 from ..config import WFDNotReady
@@ -57,7 +60,91 @@ def _scan_and_select(interface: Optional[str], selector: Optional[str],
     assert last_error is not None
     raise last_error
 
+def _phy_supports_p2p_go(phy: str) -> bool:
+    if not shutil.which("iw"):
+        return False
+    try:
+        result = _run(["iw", "phy", phy, "info"], timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    in_modes = False
+    for line in result.stdout.splitlines():
+        if "Supported interface modes:" in line:
+            in_modes = True
+            continue
+        if not in_modes:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("*"):
+            if stripped[1:].strip() == "P2P-GO":
+                return True
+            continue
+        break
+    return False
+
+
+def _iface_phy(iface: str) -> Optional[str]:
+    link = Path(f"/sys/class/net/{iface}/phy80211")
+    try:
+        return Path(os.readlink(link)).name
+    except OSError:
+        return None
+
+
+def _nm_iface_in_use(iface: str) -> bool:
+    if not shutil.which("nmcli"):
+        return False
+    try:
+        result = _run(
+            ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device"],
+            timeout=3.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    for line in result.stdout.splitlines():
+        parts = line.split(":")
+        if len(parts) < 4:
+            continue
+        dev, typ, state, conn = parts[0], parts[1], parts[2], ":".join(parts[3:])
+        if dev != iface or typ != "wifi":
+            continue
+        if conn and conn != "--":
+            return True
+        if state.startswith("connected") or state in (
+            "connecting", "preparing", "configuring", "ip-config", "ip-check",
+            "secondaries", "activated",
+        ):
+            return True
+    return False
+
+
 def _default_wifi_interface() -> Optional[str]:
+    """Pick a managed Wi-Fi iface for P2P.
+
+    Prefer P2P-GO-capable radios that are not already carrying an active
+    NetworkManager connection (e.g. USB dongle idle while the laptop STA
+    stays on the AP). Falls back to the first managed iface from ``iw dev``.
+
+    Override with ``FLUXCAST_WFD_INTERFACE`` / ``--wfd-interface``.
+    """
+    prefer = (os.environ.get("FLUXCAST_WFD_INTERFACE") or "").strip()
+    if prefer and prefer.lower() not in ("auto", "default"):
+        return prefer
+
+    # Optional external resolver (omarchy-miracast list_p2p_radios.py).
+    helper = (os.environ.get("FLUXCAST_LIST_P2P_RADIOS") or "").strip()
+    if helper and Path(helper).is_file():
+        try:
+            result = _run(
+                [sys.executable, helper, "--resolve", "--prefer", "auto"],
+                timeout=4.0,
+            )
+            iface = (result.stdout or "").strip().splitlines()
+            if iface and iface[0]:
+                return iface[0]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
     if not shutil.which("iw"):
         return None
 
@@ -66,14 +153,28 @@ def _default_wifi_interface() -> Optional[str]:
     except (OSError, subprocess.TimeoutExpired):
         return None
 
+    managed: list[str] = []
     current_iface = None
     for line in result.stdout.splitlines():
         stripped = line.strip()
         if stripped.startswith("Interface "):
             current_iface = stripped.split(maxsplit=1)[1]
         elif stripped == "type managed" and current_iface:
-            return current_iface
-    return None
+            if not current_iface.startswith("p2p-"):
+                managed.append(current_iface)
+            current_iface = None
+
+    if not managed:
+        return None
+
+    scored: list[tuple] = []
+    for iface in managed:
+        phy = _iface_phy(iface)
+        go = _phy_supports_p2p_go(phy) if phy else False
+        busy = _nm_iface_in_use(iface)
+        scored.append((1 if go else 0, 0 if busy else 1, iface))
+    scored.sort(reverse=True)
+    return scored[0][2]
 
 def _parse_peer_name(details: str) -> str:
     for line in details.splitlines():
