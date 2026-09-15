@@ -26,6 +26,39 @@ from ..net import _ffmpeg_sender_args
 
 
 class WlrootsMixin:
+    @staticmethod
+    def _enlarge_pipe_fd(fd: int, size: int | None = None) -> int:
+        """Raise Linux pipe capacity (both ends). Default 8 MiB for raw NV12 nut.
+
+        The wf-recorder → ffmpeg raw pipe used to stay at the kernel default
+        (64 KiB). One brief VAAPI pause filled it, wf-recorder's buffer pool
+        exploded (``bufs_size`` 5→16), and video RTP died while audio continued.
+        H264→muxer was already 1 MiB; enlarge the raw pipe to match real frame
+        pressure. Honors ``FLUXCAST_WFD_RAW_PIPE_BYTES``; falls back if
+        ``fs.pipe-max-size`` is lower.
+        """
+        import fcntl
+
+        if size is None:
+            raw = (os.environ.get("FLUXCAST_WFD_RAW_PIPE_BYTES", "") or "").strip()
+            if raw.isdigit():
+                size = max(65536, int(raw))
+            else:
+                size = 8 << 20
+        try:
+            fcntl.fcntl(fd, fcntl.F_SETPIPE_SZ, size)
+            return size
+        except OSError:
+            for candidate in (1 << 20, 512 * 1024, 256 * 1024):
+                if candidate >= size:
+                    continue
+                try:
+                    fcntl.fcntl(fd, fcntl.F_SETPIPE_SZ, candidate)
+                    return candidate
+                except OSError:
+                    continue
+        return 0
+
     def _emit_capture_encode(
         self,
         *,
@@ -792,6 +825,14 @@ class WlrootsMixin:
             os.close(ar_fd)
             os.close(aw_fd)
             raise WFDNotReady("wf-recorder did not expose stdout.")
+
+        raw_pipe = self._enlarge_pipe_fd(wf_proc.stdout.fileno())
+        if raw_pipe:
+            print(
+                f"[FluxCast WFD Media] raw wf→ffmpeg pipe_sz={raw_pipe}B "
+                f"(default was 65536)",
+                flush=True,
+            )
 
         ffmpeg_proc = subprocess.Popen(
             ffmpeg_cmd,
