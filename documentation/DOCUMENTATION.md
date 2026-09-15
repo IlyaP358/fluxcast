@@ -268,6 +268,9 @@ and protocol selection remain controlled by the tray and cannot be set here.
 - **LPCM-only sinks** (many cheap Miracast dongles advertise `LPCM` and no `AAC`):
   - FluxCast negotiates WFD LPCM and muxes MPEG-TS with `stream_type=0x83`
     (custom `WFDLPCMMuxer`; GStreamer/ffmpeg cannot emit that type).
+  - Works on **both** capture paths: DMA-BUF `wf-recorder` H.264 → muxer, and
+    **pipe** raw NV12 → ffmpeg annex-B H.264 → muxer (when
+    `FLUXCAST_WFD_CAPTURE_ENCODE_PREF=vaapi` / `cpu` and `prefer_lpcm`).
   - Desktop audio should be routed to a dedicated null sink whose `.monitor`
     is passed as `--wfd-audio-device`; capture uses `pw-cat --target` with
     `media.role=Abstract` (not `Video` — stream-restore remapped that onto the
@@ -278,7 +281,7 @@ and protocol selection remain controlled by the tray and cannot be set here.
     short debounce FluxCast auto-rebinds desktop capture (keeps RTSP up).
   - Unit coverage: `tests/test_wfd_lpcm_mux.py` (AU framing, AOSP-style PIDs);
     `tests/test_lpcm_audio_capture.py` (pw-cat/parec argv + Abstract role +
-    S16LE→BE); `tests/test_vaapi_rc.py` (CQP vs CBR `-p` order);
+    S16LE→BE + pipe LPCM); `tests/test_vaapi_rc.py` (CQP vs CBR `-p` order);
     `tests/test_icc_integration.py` (PROTO=icc, `-D`/`-r` vs `config.fps`).
 - `--wfd-rtsp-port`
   - RTSP port in WFD source IE (usually does not need changes).
@@ -356,7 +359,10 @@ historical software encode pipeline (`libx264` over a raw pipe).
 | `FLUXCAST_WFD_VAAPI_QP` | `18` | Constant QP when `RC=CQP`. Lower is sharper / larger. |
 | `FLUXCAST_WFD_VAAPI_BITRATE` | desktop plan / `12M` | Target for CBR/VBR (AVOption `b=` in bits/s). Ignored for CQP. |
 | `FLUXCAST_WFD_VAAPI_GOP` | stream fps | GOP length in frames (default ≈ 1s). Shorter recovers faster after drops; longer is more efficient for film. |
-| `FLUXCAST_WFD_VAAPI_QUALITY` | `4` | VAAPI speed/quality tradeoff (lower = slower/better). |
+| `FLUXCAST_WFD_VAAPI_QUALITY` | `5` throttled / `4` otherwise | VAAPI speed/quality tradeoff (1–8; **lower** = slower/better). Override anytime with this env (Omarchy defaults to `5`). |
+| `FLUXCAST_WFD_VBV_MULTIPLIER` | `0.5` | CBR `-bufsize` as a fraction of bitrate (~seconds of VBV). Values ≪0.5 correlated with pipe buffer-pool / TX stalls; `2.0` adds lag. |
+| `FLUXCAST_WFD_VAAPI_PIPE_LOW_LATENCY` | unset | When `1`/`true`, pipe ffmpeg uses `nobuffer`/`low_delay` and may shrink `thread_queue_size`. Leave unset for production; stack with tiny VBV caused lockups in A/B. |
+| `FLUXCAST_WFD_INTERFACE` | auto | Managed Wi‑Fi iface for P2P. Unset/`auto` prefers P2P-GO-capable ifaces that are not already NM-connected (e.g. idle USB vs STA). |
 | `FLUXCAST_WFD_WF_RECORDER_DAMAGE` | unset | Set to `1` / `true` / `yes` / `on` to omit `wf-recorder -D` (damage-aware capture). Default keeps `-D` for historical continuous capture. LPCM honors this the same as DMA paths. |
 | `FLUXCAST_WFD_WF_RECORDER_BIN` | unset | Absolute path to a `wf-recorder` binary. When set (and usable), preferred over `PATH`. Opt-in for a local [PR #347](https://github.com/ammen99/wf-recorder/pull/347) ICC build — **not** probed automatically. |
 | `FLUXCAST_WFD_WF_RECORDER_PROTO` | unset / `auto` | `icc` requires an ICC-capable binary (`--toplevel` / `ext-copy-capture`). In FluxCast alone, a non-ICC binary with `PROTO=icc` yields no recorder; Omarchy `miracast-ctl` fail-softs to PATH instead. `wlr` / unset / `auto` accept any usable binary (default stock `PATH`). |
