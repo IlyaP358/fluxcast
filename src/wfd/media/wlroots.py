@@ -59,6 +59,80 @@ class WlrootsMixin:
                     continue
         return 0
 
+    def _start_ffmpeg_io_watchdog(
+        self,
+        ffmpeg_proc: subprocess.Popen,
+        *,
+        stall_seconds: float = 4.0,
+        poll_seconds: float = 1.0,
+    ) -> None:
+        """Rebind capture if ffmpeg IO freezes while the process stays alive.
+
+        Catches VAAPI pipe wedges faster than waiting for bufs_size / TX stalls.
+        Disabled with FLUXCAST_WFD_FFMPEG_IO_WATCHDOG=0.
+        """
+        flag = (os.environ.get("FLUXCAST_WFD_FFMPEG_IO_WATCHDOG") or "1").strip().lower()
+        if flag in ("0", "false", "no", "off"):
+            return
+        pid = getattr(ffmpeg_proc, "pid", None)
+        if not pid:
+            return
+
+        def _io_counters(p: int) -> tuple[int, int] | None:
+            try:
+                data = {}
+                with open(f"/proc/{p}/io", encoding="utf-8") as fh:
+                    for line in fh:
+                        if ":" not in line:
+                            continue
+                        k, v = line.split(":", 1)
+                        data[k.strip()] = int(v.strip())
+                return data.get("rchar", 0), data.get("wchar", 0)
+            except (OSError, ValueError):
+                return None
+
+        def _run() -> None:
+            last = _io_counters(pid)
+            flat_for = 0.0
+            while ffmpeg_proc.poll() is None:
+                time.sleep(poll_seconds)
+                if getattr(self, "restarting", False):
+                    flat_for = 0.0
+                    last = _io_counters(pid)
+                    continue
+                cur = _io_counters(pid)
+                if cur is None or last is None:
+                    last = cur
+                    flat_for = 0.0
+                    continue
+                if cur[0] == last[0] and cur[1] == last[1]:
+                    flat_for += poll_seconds
+                else:
+                    flat_for = 0.0
+                    last = cur
+                if flat_for >= stall_seconds:
+                    print(
+                        "[FluxCast WFD Media] ffmpeg IO watchdog: "
+                        f"rchar/wchar flat for {flat_for:.0f}s "
+                        f"(pid={pid}); rebinding desktop capture",
+                        flush=True,
+                    )
+                    try:
+                        self.restart_video()
+                    except Exception as exc:  # noqa: BLE001
+                        print(
+                            "[FluxCast WFD Media] ffmpeg IO watchdog "
+                            f"rebind failed: {exc}",
+                            flush=True,
+                        )
+                    return
+
+        threading.Thread(
+            target=_run,
+            name="ffmpeg-io-watchdog",
+            daemon=True,
+        ).start()
+
     def _emit_capture_encode(
         self,
         *,
@@ -86,11 +160,29 @@ class WlrootsMixin:
             raise WFDNotReady("wf-recorder backend requires a selected monitor.")
 
         preference = capture_encode_preference()
-        attempts = capture_encode_attempts(preference)
+        # Mid-session rebind may lock to pipe VAAPI/CPU so a hang does not
+        # silently fall through the full engine chain.
+        engine_lock = getattr(self, "_restart_engine_lock", None)
+        if engine_lock in ("vaapi", "pipe"):
+            attempts = ["vaapi"]
+            print(
+                "[FluxCast WFD Media] Mid-session rebind locked to GPU · VAAPI "
+                "(pipe); skipping engine fallback chain",
+                flush=True,
+            )
+        elif engine_lock == "cpu":
+            attempts = ["cpu"]
+            print(
+                "[FluxCast WFD Media] Mid-session rebind locked to CPU "
+                "(libx264); skipping engine fallback chain",
+                flush=True,
+            )
+        else:
+            attempts = capture_encode_attempts(preference)
         last_exc: Exception | None = None
 
         for index, attempt in enumerate(attempts):
-            fallback = index > 0
+            fallback = index > 0 and engine_lock is None
             try:
                 if attempt == "dmabuf":
                     if not prefer_wf_recorder_vaapi_dmabuf(monitor):
@@ -227,7 +319,10 @@ class WlrootsMixin:
         """Restart desktop capture after DTS/pool spikes (debounced)."""
         now = time.monotonic()
         last = float(getattr(self, "_last_impairment_rebind", 0.0) or 0.0)
-        if now - last < 20.0:
+        # Pipe + continuous -D storms need faster recovery than generic DTS.
+        pipe_fast = reason in ("buffer-pool", "bufs-size-storm")
+        debounce = 8.0 if pipe_fast else 20.0
+        if now - last < debounce:
             return
         if getattr(self, "restarting", False):
             return
@@ -248,8 +343,11 @@ class WlrootsMixin:
         def _run() -> None:
             if proc.stderr is None:
                 return
+            import re as _re
+
             pool_hits = 0
             window_start = time.monotonic()
+            bufs_vals: list[tuple[float, int]] = []
             try:
                 for raw in iter(proc.stderr.readline, b""):
                     try:
@@ -262,6 +360,7 @@ class WlrootsMixin:
                     if now - window_start > 5.0:
                         pool_hits = 0
                         window_start = now
+                        bufs_vals = [v for v in bufs_vals if now - v[0] <= 5.0]
                     low = line.lower()
                     if "non monotonically" in low or "non-monotonically" in low:
                         self._maybe_rebind_for_impairment("dts")
@@ -269,6 +368,28 @@ class WlrootsMixin:
                         pool_hits += 1
                         if pool_hits >= 2:
                             self._maybe_rebind_for_impairment("buffer-pool")
+                    else:
+                        m = _re.search(r"bufs_size:\s*(\d+)", line)
+                        if m:
+                            n = int(m.group(1))
+                            bufs_vals.append((now, n))
+                            # Keep ~2s of samples for climb detection.
+                            recent = [v for v in bufs_vals if now - v[0] <= 2.0]
+                            bufs_vals = recent
+                            peak = max(v for _, v in recent) if recent else n
+                            start = recent[0][1] if recent else n
+                            storm = peak >= 14 or (peak - start) >= 6
+                            if storm:
+                                _append_latency_log(
+                                    getattr(self.config, "latency_log_path", None),
+                                    "bufs_size_storm",
+                                    peak=peak,
+                                    start=start,
+                                    samples=len(recent),
+                                    label=label,
+                                )
+                                # One strong storm is enough on continuous -D.
+                                self._maybe_rebind_for_impairment("bufs-size-storm")
             except Exception:
                 pass
             finally:
@@ -280,6 +401,15 @@ class WlrootsMixin:
         threading.Thread(
             target=_run, name=f"fluxcast-{label}-stderr", daemon=True
         ).start()
+
+    def _wf_vaapi_h264_profile(self) -> str:
+        """wf-recorder ``-p profile=`` matching negotiated WFD profile (CHP→high)."""
+        from ..hw_encode import _map_h264_profile
+
+        mapped = _map_h264_profile(getattr(self.config, "h264_profile", None) or "baseline")
+        if mapped in ("high", "main", "constrained_baseline"):
+            return mapped
+        return "constrained_baseline"
 
     def _vaapi_rc_wf_params(self, meta: dict) -> tuple[list[str], str]:
         """Build wf-recorder ``-p`` rate-control args for h264_vaapi.
@@ -308,6 +438,9 @@ class WlrootsMixin:
         except ValueError:
             async_depth = "2"
 
+        # Match M4 WFD profile: CHP → high, CBP → constrained_baseline.
+        profile = self._wf_vaapi_h264_profile()
+
         if rc == "CQP":
             qp = (os.environ.get("FLUXCAST_WFD_VAAPI_QP", "") or "18").strip() or "18"
             i_qfactor = (os.environ.get("FLUXCAST_WFD_VAAPI_I_QFACTOR", "") or "").strip()
@@ -318,13 +451,14 @@ class WlrootsMixin:
                 "-p", f"quality={quality}",
                 "-p", f"async_depth={async_depth}",
                 "-p", "bf=0",
-                "-p", "profile=constrained_baseline",
+                "-p", f"profile={profile}",
                 "-p", f"framerate={self.config.fps}",
             ]
             if i_qfactor:
                 params.extend(["-p", f"i_qfactor={i_qfactor}"])
             desc = (
-                f"{rc} qp={qp}, gop={gop}, quality={quality}, async={async_depth}"
+                f"{rc} qp={qp}, gop={gop}, quality={quality}, async={async_depth}, "
+                f"profile={profile}"
                 + (f", i_qfactor={i_qfactor}" if i_qfactor else "")
             )
         else:
@@ -363,7 +497,7 @@ class WlrootsMixin:
                 "-p", f"quality={quality}",
                 "-p", f"async_depth={async_depth}",
                 "-p", "bf=0",
-                "-p", "profile=constrained_baseline",
+                "-p", f"profile={profile}",
                 "-p", f"framerate={self.config.fps}",
                 "-p", f"bufsize={buf_bits}",
             ]
@@ -372,23 +506,29 @@ class WlrootsMixin:
                 params.extend(["-p", f"qp={qp}", "-p", f"maxrate={peak_bits}"])
                 desc = (
                     f"{rc} qp={qp} b={target} max={peak} buf={buf_bits}, "
-                    f"gop={gop}, quality={quality}, async={async_depth}"
+                    f"gop={gop}, quality={quality}, async={async_depth}, "
+                    f"profile={profile}"
                 )
             elif rc in ("VBR", "AVBR"):
                 params.extend(["-p", f"maxrate={peak_bits}"])
                 desc = (
                     f"{rc} b={target} max={peak} buf={buf_bits}, "
-                    f"gop={gop}, quality={quality}, async={async_depth}"
+                    f"gop={gop}, quality={quality}, async={async_depth}, "
+                    f"profile={profile}"
                 )
             elif rc == "CBR":
                 # HRD: maxrate == target.
                 params.extend(["-p", f"maxrate={br_bits}"])
                 desc = (
                     f"{rc} bitrate={target} buf={buf_bits}, "
-                    f"gop={gop}, quality={quality}, async={async_depth}"
+                    f"gop={gop}, quality={quality}, async={async_depth}, "
+                    f"profile={profile}"
                 )
             else:
-                desc = f"{rc} bitrate={target}, gop={gop}, quality={quality}"
+                desc = (
+                    f"{rc} bitrate={target}, gop={gop}, quality={quality}, "
+                    f"profile={profile}"
+                )
         return params, desc
 
     def _start_wf_recorder_lpcm(self, wf_recorder: str, monitor) -> None:
@@ -551,7 +691,7 @@ class WlrootsMixin:
         Encode flags:
         - scale_vaapi → NV12 with out_range=tv (limited).
         - Stock DMA: omit ``-r``; ICC: ``-r`` via ``_wf_capture_rate_args``.
-        - ``bf=0`` + constrained_baseline for Miracast bitstreams.
+        - ``bf=0`` + profile from negotiated WFD (CHP→high, else CBP).
         """
         meta = self._desktop_bitrate_plan(monitor)
         audio_monitor = self.config.audio_device or _detect_audio_monitor()
@@ -847,6 +987,7 @@ class WlrootsMixin:
         os.close(w_fd)
         self._watch_sender_stderr(wf_proc, "wf-recorder-pipe-lpcm")
         self._watch_sender_stderr(ffmpeg_proc, "ffmpeg-pipe-lpcm")
+        self._start_ffmpeg_io_watchdog(ffmpeg_proc)
 
         aud_cmd = self._lpcm_audio_capture_cmd(audio_monitor)
         aud_proc = subprocess.Popen(
@@ -1044,12 +1185,23 @@ class WlrootsMixin:
             wf_proc.kill()
             raise WFDNotReady("wf-recorder did not expose stdout.")
 
+        # Match LPCM path: enlarge wf stdout so a brief VAAPI pause does not
+        # fill the default 64 KiB pipe and storm the buffer pool.
+        raw_sz = self._enlarge_pipe_fd(wf_proc.stdout.fileno())
+        if raw_sz:
+            print(
+                f"[FluxCast WFD Media] raw wf→ffmpeg pipe_sz={raw_sz}B "
+                "(AAC/RTP relay path)",
+                flush=True,
+            )
+
         # Relay wf→ffmpeg so we can timestamp first captured nut bytes without
         # a large ffmpeg demux backlog owning the pipe.
         r_fd, w_fd = os.pipe()
         try:
-            fcntl.fcntl(r_fd, fcntl.F_SETPIPE_SZ, 1 << 20)
-            fcntl.fcntl(w_fd, fcntl.F_SETPIPE_SZ, 1 << 20)
+            # Prefer 8 MiB like LPCM; fall back via _enlarge_pipe_fd helpers.
+            self._enlarge_pipe_fd(r_fd)
+            self._enlarge_pipe_fd(w_fd)
         except OSError:
             pass
 
@@ -1057,6 +1209,7 @@ class WlrootsMixin:
             ffmpeg_cmd, stdin=r_fd, stderr=subprocess.PIPE, pass_fds=(r_fd,)
         )
         os.close(r_fd)
+        self._start_ffmpeg_io_watchdog(ffmpeg_proc)
 
         first_nut = {"t": None}
 

@@ -443,20 +443,55 @@ def build_encode_plan(
             vf = "hwupload"
         else:
             vf = "format=nv12,hwupload"
-        # higher -quality = faster/worse (ffmpeg h264_vaapi). Keep async_depth
-        # at 2 — dropping to 1 reduces parallelism and can raise system power.
+        # higher -quality = faster/worse (ffmpeg h264_vaapi).
         #
         # Do NOT use -low_power here: Intel's LP entrypoint only supports CQP,
         # and CQP+low_power measured ~2.5× ffmpeg CPU vs normal CBR VAAPI on
         # this hardware. Throttled plan = faster quality + trimmed bitrate.
         quality = vaapi_quality_for_plan(throttled=throttled)
-        # Pipe-path latency: async_depth 1 reduces parallelism but cuts encoder
-        # queuing. Override with FLUXCAST_WFD_VAAPI_ASYNC_DEPTH (default 2).
-        _async = (os.environ.get("FLUXCAST_WFD_VAAPI_ASYNC_DEPTH", "") or "2").strip() or "2"
+        # Pipe path (raw NV12 → hwupload): quality=1 + async≥2 hung on-device
+        # every ~20–60s (bufs_size storm → audio-only). Default async=1 and
+        # clamp quality≥4 unless FLUXCAST_WFD_VAAPI_PIPE_UNSAFE=1.
+        pipe_mode = capture_encode_mode() == "pipe" or capture_encode_preference() in (
+            "vaapi",
+            "cpu",
+        )
+        _async_default = "1" if pipe_mode else "2"
+        _async = (
+            os.environ.get("FLUXCAST_WFD_VAAPI_ASYNC_DEPTH", "") or _async_default
+        ).strip() or _async_default
         try:
             _async_i = str(max(1, min(4, int(_async))))
         except ValueError:
-            _async_i = "2"
+            _async_i = _async_default
+        unsafe = (os.environ.get("FLUXCAST_WFD_VAAPI_PIPE_UNSAFE") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if pipe_mode and not unsafe:
+            try:
+                q_i = int(quality)
+            except ValueError:
+                q_i = 4
+            # quality=1 hung the pipe on-device; allow 3+ for sharper CBR.
+            if q_i < 3:
+                print(
+                    f"[FluxCast WFD Media] Clamping pipe VAAPI quality {quality}→3 "
+                    "(quality<3 hung the encode pipe; set "
+                    "FLUXCAST_WFD_VAAPI_PIPE_UNSAFE=1 to override)",
+                    flush=True,
+                )
+                quality = "3"
+            if int(_async_i) > 1:
+                print(
+                    f"[FluxCast WFD Media] Clamping pipe VAAPI async_depth "
+                    f"{_async_i}→1 (async>1 hangs the encode pipe; set "
+                    "FLUXCAST_WFD_VAAPI_PIPE_UNSAFE=1 to override)",
+                    flush=True,
+                )
+                _async_i = "1"
         rc = _vaapi_rc_mode(default="CBR")
         gop_i = _vaapi_gop(gop)
         video_args = [
@@ -506,7 +541,12 @@ def build_encode_plan(
             pre_input=["-vaapi_device", device],
             vf=["-vf", vf],
             video_args=video_args,
-            note=f"h264_vaapi on {device} ({plan_note}; {rc_note})",
+            note=(
+                f"h264_vaapi on {device} ({plan_note}; {rc_note}; "
+                f"quality={quality} async={_async_i}"
+                + ("; pipe" if pipe_mode else "")
+                + ")"
+            ),
         )
 
     if choice == "qsv":

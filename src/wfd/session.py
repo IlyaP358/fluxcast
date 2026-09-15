@@ -197,6 +197,13 @@ def start_experimental_backend(args) -> None:
         while True:
             if restart_capture.is_set():
                 restart_capture.clear()
+                if getattr(rtsp, "any_media_restarting", lambda: False)():
+                    print(
+                        "[FluxCast WFD] SIGUSR1 coalesced "
+                        "(capture restart already in flight)"
+                    )
+                    time.sleep(0.25)
+                    continue
                 try:
                     n = rtsp.restart_active_media()
                     print(f"[FluxCast WFD] Capture restart finished ({n} pipeline(s)).")

@@ -43,13 +43,31 @@ def _parse_sink_video_format(value: str) -> Optional[WFDVideoFormat]:
         return None
 
 def _choose_profile(profile_hex: str) -> str:
+    """Pick WFD H.264 profile byte for M4 from the sink advertisement.
+
+    Miracast ``wfd_video_formats`` profile field is a bitmask:
+      ``0x01`` — Constrained Baseline (CBP)
+      ``0x02`` — Constrained High (CHP)
+
+    Prefer CHP when the sink offers it (better CABAC / compression at the
+    same bitrate). Fall back to CBP for CBP-only sinks or unparseable values.
+    """
+    try:
+        value = int((profile_hex or "01").strip(), 16)
+    except ValueError:
+        return "01"
+    if value & 0x02:
+        return "02"
     return "01"
 
+
 def _encoder_h264_profile(sink_format: Optional[WFDVideoFormat]) -> str:
-    """x264/ffmpeg profile name for the profile _choose_profile advertises """
+    """ffmpeg/x264 profile name matching the WFD profile M4 will advertise."""
     if sink_format is None:
         return "baseline"
-    return "high" if _choose_profile(sink_format.profile) == "02" else "baseline"
+    chosen = _choose_profile(sink_format.profile)
+    # CHP → high (still -bf 0 for low-latency Miracast). CBP → baseline.
+    return "high" if chosen == "02" else "baseline"
 
 def _max_wfd_level(level_hex: str) -> Optional[int]:
     try:

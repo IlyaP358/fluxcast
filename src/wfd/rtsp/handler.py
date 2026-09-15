@@ -55,6 +55,10 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         # Probes where PIDs are alive but iface TX bytes barely increase.
         self._stagnant_tx_streak = 0
         self._last_interval_tx: Optional[int] = None
+        # LPCM muxer counters — video vs audio (audio must not mask video death).
+        self._last_video_frames: Optional[int] = None
+        self._last_audio_frames: Optional[int] = None
+        self._video_stall_streak = 0
 
         if hasattr(self.server, "parent_server"):
             self.server.parent_server.has_connected_client = True  # type: ignore[attr-defined]
@@ -632,18 +636,65 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                     sender_path_latency_ms=sender_path_latency_ms,
                 )
             # Stagnant TX: PIDs alive, iface TX < 4 KiB/probe for N probes.
-            # LPCM activity (frames/audio counters) resets the streak.
-            # Limits: 12 probes with LPCM (~60s), else 6 (~30s).
+            # LPCM keeps sending audio while video is wedged (VAAPI pipe hang).
+            # Never treat audio-only progress as healthy — track video separately.
+            # Limits: 12 probes with LPCM (~60s), else 6 (~30s) for iface TX.
             lpcm = getattr(media, "_lpcm_muxer", None)
-            lpcm_activity = 0
+            video_frames = 0
+            audio_frames = 0
             if lpcm is not None:
-                lpcm_activity = int(getattr(lpcm, "frames_sent", 0)) + int(
-                    getattr(lpcm, "audio_frames_sent", 0)
+                video_frames = int(getattr(lpcm, "frames_sent", 0) or 0)
+                audio_frames = int(getattr(lpcm, "audio_frames_sent", 0) or 0)
+            prev_video = self._last_video_frames
+            prev_audio = self._last_audio_frames
+            self._last_video_frames = video_frames
+            self._last_audio_frames = audio_frames
+            video_delta = (
+                (video_frames - prev_video) if prev_video is not None else None
+            )
+            audio_delta = (
+                (audio_frames - prev_audio) if prev_audio is not None else None
+            )
+            if video_delta is not None and audio_delta is not None:
+                if video_delta <= 0 and audio_delta > 0:
+                    self._video_stall_streak += 1
+                elif video_delta > 0:
+                    self._video_stall_streak = 0
+            if video_delta is not None and video_delta > 0:
+                self._stagnant_tx_streak = 0
+
+            video_stall_limit = 2
+            if self._video_stall_streak >= video_stall_limit:
+                print(
+                    "[FluxCast WFD Media] VIDEO_STALL "
+                    f"(video_delta={video_delta}, audio_delta={audio_delta}, "
+                    f"streak={self._video_stall_streak}); rebinding desktop capture",
+                    flush=True,
                 )
-                prev_lpcm = getattr(self, "_last_lpcm_activity", None)
-                self._last_lpcm_activity = lpcm_activity
-                if prev_lpcm is not None and lpcm_activity > prev_lpcm:
+                _append_latency_log(
+                    self.media_config.latency_log_path,
+                    "video_stall",
+                    video_frames=video_frames,
+                    audio_frames=audio_frames,
+                    video_delta=video_delta,
+                    audio_delta=audio_delta,
+                    streak=self._video_stall_streak,
+                )
+                try:
+                    media.restart_video()
                     self._stagnant_tx_streak = 0
+                    self._video_stall_streak = 0
+                    self._last_interval_tx = None
+                    self._last_video_frames = None
+                    self._last_audio_frames = None
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        "[FluxCast WFD Media] Capture rebind after "
+                        f"VIDEO_STALL failed: {exc}"
+                    )
+                self._schedule_probe(2.0)
+                return
+
             if current is not None and self._last_interval_tx is not None:
                 interval = max(0, current - self._last_interval_tx)
                 if interval < 4 * 1024:
@@ -659,8 +710,10 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                     try:
                         media.restart_video()
                         self._stagnant_tx_streak = 0
+                        self._video_stall_streak = 0
                         self._last_interval_tx = None
-                        self._last_lpcm_activity = None
+                        self._last_video_frames = None
+                        self._last_audio_frames = None
                     except Exception as exc:  # noqa: BLE001
                         print(
                             "[FluxCast WFD Media] Capture rebind after "
@@ -673,14 +726,24 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             print(
                 f"[FluxCast WFD Media] Sender health: "
                 f"{', '.join(states)}; {media.tx_summary()}"
+                + (
+                    f"; video_frames={video_frames} audio_frames={audio_frames}"
+                    if lpcm is not None
+                    else ""
+                )
             )
             _append_latency_log(
                 self.media_config.latency_log_path,
                 "sender_health",
                 processes=states,
                 tx_summary=media.tx_summary(),
+                video_frames=video_frames if lpcm is not None else None,
+                audio_frames=audio_frames if lpcm is not None else None,
+                video_delta=video_delta,
+                audio_delta=audio_delta,
+                video_stall_streak=self._video_stall_streak,
             )
-            self._schedule_probe(5.0)
+            self._schedule_probe(2.0 if self._video_stall_streak > 0 else 5.0)
             return
 
         detail = ", ".join(states) if states else "no sender process"
