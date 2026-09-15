@@ -1,6 +1,7 @@
 import subprocess
+from typing import Sequence
 
-from diagnostics import _firewalld_active
+from diagnostics import _firewalld_active, _ufw_enabled
 
 from .proc import _run
 
@@ -22,6 +23,41 @@ def _print_firewall_manual_hint(port: int, reason: str) -> None:
         "  or pass --wfd-no-firewall if you manage the firewall yourself."
     )
 
+def _warn_if_ufw_may_block(ports: Sequence[tuple[int, str]]) -> None:
+    """Say something before the session hangs on a ufw host.
+
+    FluxCast cannot open the port itself here: ufw has no Polkit integration
+    to prompt through the way firewalld does, so this would mean shelling out
+    to sudo mid-session to edit the user's firewall. Printing the command is
+    the honest limit (#98).
+
+    Takes every port the session listens on, and is called once with all of
+    them. Living inside _open_wfd_firewall_port meant it printed once per
+    call, so --wfd-uibc produced a second copy that described 7239 as the
+    port the sink's RTSP connection arrives on. Each port now says what it
+    is instead.
+
+    Deliberately file-only - no subprocess. The firewall probe runs on the
+    connect path, and a blocking call here was already a problem once (#114).
+    """
+    # With firewalld running we open the ports ourselves; ufw is not in play.
+    if _firewalld_active():
+        return
+    if _ufw_enabled() is not True:
+        return
+    if not ports:
+        return
+
+    allow = "\n".join(f"    sudo ufw allow {port}/tcp    # {label}"
+                      for port, label in ports)
+    listens_on = "the port" if len(ports) == 1 else "the ports"
+    print(
+        "[FluxCast WFD] ufw is enabled. If the sink never opens its RTSP "
+        f"connection, allow {listens_on} FluxCast listens on:\n"
+        f"{allow}\n"
+        "  or pass --wfd-no-firewall to silence this."
+    )
+
 def _open_wfd_firewall_port(port: int) -> bool:
     """
     Runtime-only (no ``--permanent``): cleared on reload/reboot, and removed on
@@ -29,6 +65,8 @@ def _open_wfd_firewall_port(port: int) -> bool:
     port the user already had open is left untouched.
     """
     # None ("couldn't ask systemd") is treated like inactive: nothing to open.
+    # The ufw hint for this case is printed once per session by the caller,
+    # not here - see _warn_if_ufw_may_block.
     if not _firewalld_active():
         return False
 

@@ -87,6 +87,75 @@ class FfmpegProgressArgsTest(unittest.TestCase):
         self.assertIn("-stats", args)
 
 
+class UfwSessionHintTest(unittest.TestCase):
+    """On a ufw host the firewalld path opens nothing and used to print
+    nothing, so the user got a session that waits for an RTSP connection the
+    firewall is dropping, with no clue why (#98).
+    """
+
+    def _hint_output(self, ufw_enabled, ports=None, firewalld=False):
+        if ports is None:
+            ports = [(wfd.WFD_RTSP_PORT, "RTSP")]
+        buf = io.StringIO()
+        with (
+            patch_all("_firewalld_active", return_value=firewalld),
+            patch_all("_ufw_enabled", return_value=ufw_enabled),
+            contextlib.redirect_stdout(buf),
+        ):
+            wfd._warn_if_ufw_may_block(ports)
+        return buf.getvalue()
+
+    def test_enabled_ufw_prints_the_port_and_command(self):
+        out = self._hint_output(True)
+        self.assertIn(str(wfd.WFD_RTSP_PORT), out)
+        self.assertIn(f"ufw allow {wfd.WFD_RTSP_PORT}/tcp", out)
+
+    def test_disabled_ufw_stays_quiet(self):
+        self.assertEqual(self._hint_output(False), "")
+
+    def test_unknown_ufw_state_stays_quiet(self):
+        # Guessing out loud on a host we could not read is just noise.
+        self.assertEqual(self._hint_output(None), "")
+
+    def test_firewalld_host_stays_quiet(self):
+        # There the ports get opened for real; ufw is not in the picture.
+        self.assertEqual(self._hint_output(True, firewalld=True), "")
+
+    def test_uibc_port_is_named_as_uibc_not_rtsp(self):
+        """The hint used to be printed by _open_wfd_firewall_port, so
+        --wfd-uibc produced a second copy of it, and that copy read "if the
+        sink never opens its RTSP connection, allow port 7239/tcp" - which is
+        not what 7239 is. One hint, each port labelled.
+        """
+        out = self._hint_output(True, ports=[(wfd.WFD_RTSP_PORT, "RTSP"),
+                                             (wfd.WFD_UIBC_PORT, "UIBC")])
+        self.assertEqual(out.count("ufw is enabled"), 1)
+        self.assertIn(f"ufw allow {wfd.WFD_RTSP_PORT}/tcp    # RTSP", out)
+        self.assertIn(f"ufw allow {wfd.WFD_UIBC_PORT}/tcp    # UIBC", out)
+
+    def test_opening_a_port_prints_no_hint_of_its_own(self):
+        # The per-port call is what made it print twice.
+        buf = io.StringIO()
+        with (
+            patch_all("_firewalld_active", return_value=False),
+            patch_all("_ufw_enabled", return_value=True),
+            contextlib.redirect_stdout(buf),
+        ):
+            opened = wfd._open_wfd_firewall_port(wfd.WFD_RTSP_PORT)
+        self.assertFalse(opened)  # never claims to have opened anything
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_hint_runs_no_subprocess(self):
+        # The connect path must not block on a firewall probe (#114).
+        with (
+            patch_all("_firewalld_active", return_value=False),
+            patch_all("_ufw_enabled", return_value=True),
+            patch_all("_run", side_effect=AssertionError("no subprocess here")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            wfd._warn_if_ufw_may_block([(wfd.WFD_RTSP_PORT, "RTSP")])
+
+
 class FirewallPortTest(unittest.TestCase):
     def test_existing_port_skips_privileged_add(self):
         calls = []
