@@ -281,12 +281,17 @@ class WlrootsMixin:
             ]
             desc = f"{rc} qp={qp}, gop={gop}, quality={quality}"
         else:
-            br = (os.environ.get("FLUXCAST_WFD_VAAPI_BITRATE", "") or "").strip()
-            if not br:
-                br = meta.get("effective_bitrate") or self.config.bitrate or "12M"
+            # Target bitrate: prefer stream/config bitrate; VAAPI_BITRATE is the
+            # peak cap when QVBR (matches pipe ffmpeg -b:v / -maxrate split).
+            target = (os.environ.get("FLUXCAST_WFD_BITRATE", "") or "").strip()
+            if not target:
+                target = meta.get("effective_bitrate") or self.config.bitrate or "12M"
+            peak = (os.environ.get("FLUXCAST_WFD_VAAPI_BITRATE", "") or "").strip()
+            if not peak:
+                peak = target
             # AVOption name is ``b`` (bits/s), not ``bitrate``. Set before
             # rc_mode so CBR validation sees a target.
-            br_bits = _bitrate_to_kbits(br) * 1000
+            br_bits = _bitrate_to_kbits(target) * 1000
             params = [
                 "-p", f"b={br_bits}",
                 "-p", f"rc_mode={rc}",
@@ -296,13 +301,18 @@ class WlrootsMixin:
                 "-p", "profile=constrained_baseline",
                 "-p", f"framerate={self.config.fps}",
             ]
-            # QVBR keeps a QP quality floor while honoring bitrate/maxrate.
+            # QVBR keeps a QP quality floor; pass maxrate when distinct from b.
             if rc == "QVBR":
                 qp = (os.environ.get("FLUXCAST_WFD_VAAPI_QP", "") or "18").strip() or "18"
                 params.extend(["-p", f"qp={qp}"])
-                desc = f"{rc} qp={qp} bitrate={br}, gop={gop}, quality={quality}"
+                if peak and peak != target:
+                    peak_bits = _bitrate_to_kbits(peak) * 1000
+                    params.extend(["-p", f"maxrate={peak_bits}"])
+                desc = (
+                    f"{rc} qp={qp} b={target} max={peak}, gop={gop}, quality={quality}"
+                )
             else:
-                desc = f"{rc} bitrate={br}, gop={gop}, quality={quality}"
+                desc = f"{rc} bitrate={target}, gop={gop}, quality={quality}"
         return params, desc
 
     def _start_wf_recorder_lpcm(self, wf_recorder: str, monitor) -> None:
