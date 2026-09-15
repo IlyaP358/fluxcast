@@ -206,6 +206,116 @@ class LpcmAudioCaptureCmdTest(unittest.TestCase):
             )
 
 
+class PipeLpcmAudioCaptureCmdTest(unittest.TestCase):
+    """RENDER ENGINE vaapi/cpu + LPCM-only sink → annex-B pipe + WFDLPCMMuxer."""
+
+    def tearDown(self):
+        for key in (
+            "FLUXCAST_WFD_VAAPI_PIPE_LOW_LATENCY",
+            "FLUXCAST_WFD_THREAD_QUEUE_SIZE",
+            "FLUXCAST_WFD_VBV_MULTIPLIER",
+            "FLUXCAST_WFD_VAAPI_QUALITY",
+        ):
+            os.environ.pop(key, None)
+
+    def test_pipe_lpcm_uses_annexb_ffmpeg_and_pw_cat(self):
+        from wfd.hw_encode import EncodePlan
+        from wfd.media.wlroots import WlrootsMixin
+
+        captured = {"cmds": [], "muxer": None}
+
+        def fake_popen(cmd, *args, **kwargs):
+            captured["cmds"].append(list(cmd))
+            return _FakeProc(cmd, *args, **kwargs)
+
+        class Harness(WlrootsMixin):
+            def __init__(self):
+                self.config = SimpleNamespace(
+                    monitor=SimpleNamespace(name="HEADLESS-2", width=1920, height=1080, scale=1),
+                    output_resolution="1920x1080",
+                    audio_device="miracast.monitor",
+                    no_audio=False,
+                    bitrate="12M",
+                    fps=30,
+                    h264_profile="baseline",
+                    ffmpeg_stats=False,
+                    source_port=19002,
+                    dump_ts_path=None,
+                    aosp_pmt_pid=True,
+                    peer_name="",
+                    prefer_lpcm=True,
+                    latency_log_path=None,
+                )
+                self.tv_ip = "10.42.0.159"
+                self.local_ip = "10.42.0.1"
+                self.sink_rtp_port = 42030
+                self.processes = []
+                self._lpcm_muxer = None
+                self._lpcm_video_fd = None
+                self._lpcm_audio_fd = None
+
+        plan = EncodePlan(
+            name="vaapi",
+            pre_input=["-vaapi_device", "/dev/dri/renderD128"],
+            vf=["-vf", "hwupload"],
+            video_args=[
+                "-c:v", "h264_vaapi",
+                "-rc_mode", "CBR",
+                "-b:v", "12M",
+                "-bufsize", "6M",
+                "-quality", "5",
+            ],
+            note="h264_vaapi test",
+        )
+
+        def muxer_factory(*args, **kwargs):
+            m = _FakeMuxer(*args, **kwargs)
+            captured["muxer"] = m
+            return m
+
+        harness = Harness()
+
+        def fake_which(name):
+            if name == "pw-cat":
+                return "/usr/bin/pw-cat"
+            return f"/usr/bin/{name}"
+
+        with mock.patch("wfd.media.wlroots.shutil.which", side_effect=fake_which):
+            with mock.patch("wfd.media.wlroots.subprocess.Popen", side_effect=fake_popen):
+                with mock.patch("wfd.media.wlroots.time.sleep", return_value=None):
+                    with mock.patch(
+                        "wfd.media.wlroots.build_encode_plan",
+                        return_value=plan,
+                    ):
+                        with mock.patch(
+                            "drivers.wfd_lpcm_mux.WFDLPCMMuxer",
+                            side_effect=muxer_factory,
+                        ):
+                            name = harness._start_wf_recorder_raw_pipe_lpcm(
+                                "/usr/bin/wf-recorder",
+                                harness.config.monitor,
+                                encoder_override="vaapi",
+                            )
+
+        self.assertEqual(name, "vaapi")
+        cmds = _media_cmds(captured["cmds"])
+        self.assertEqual(len(cmds), 3)
+        wf_cmd, ff_cmd, aud_cmd = cmds
+        self.assertEqual(wf_cmd[0], "/usr/bin/wf-recorder")
+        self.assertIn("rawvideo", wf_cmd)
+        self.assertTrue(ff_cmd[0] == "ffmpeg" or ff_cmd[0].endswith("/ffmpeg"))
+        self.assertIn("-f", ff_cmd)
+        self.assertIn("h264", ff_cmd)
+        self.assertIn("-an", ff_cmd)
+        self.assertNotIn("aac", ff_cmd)
+        self.assertTrue(any(str(x).startswith("/dev/fd/") for x in ff_cmd))
+        self.assertEqual(aud_cmd[0], "pw-cat")
+        self.assertEqual(aud_cmd[aud_cmd.index("--target") + 1], "miracast.monitor")
+        self.assertIsNotNone(harness._lpcm_muxer)
+        self.assertEqual(len(harness.processes), 3)
+        _vid, aud_pipeline = captured["muxer"].started
+        self.assertIn("format=S16LE", aud_pipeline)
+        self.assertIn("format=S16BE", aud_pipeline)
 
 
 if __name__ == "__main__":
