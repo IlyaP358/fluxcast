@@ -119,8 +119,15 @@ class LpcmIccFlagsTest(unittest.TestCase):
 
         class FakeProc:
             def __init__(self, cmd, *a, **k):
+                import io
+
                 self.cmd = list(cmd)
+                self.args = list(cmd)
                 self.pid = 1
+                self.returncode = 0
+                # Empty stderr so wlroots sender watchers exit; communicate for
+                # power-plan gdbus probes that share the patched Popen.
+                self.stderr = io.BytesIO(b"") if k.get("stderr") is not None else None
 
             def poll(self):
                 return None
@@ -133,6 +140,9 @@ class LpcmIccFlagsTest(unittest.TestCase):
 
             def wait(self, timeout=None):
                 return 0
+
+            def communicate(self, input=None, timeout=None):
+                return ("", "")
 
             def __enter__(self):
                 return self
@@ -169,7 +179,13 @@ class LpcmIccFlagsTest(unittest.TestCase):
                 self._lpcm_audio_fd = None
 
         harness = Harness()
-        with mock.patch("wfd.media.wlroots.shutil.which", return_value="/usr/bin/pw-cat"):
+
+        def fake_which(name):
+            if name == "pw-cat":
+                return "/usr/bin/pw-cat"
+            return f"/usr/bin/{name}"
+
+        with mock.patch("wfd.media.wlroots.shutil.which", side_effect=fake_which):
             with mock.patch("wfd.media.wlroots.subprocess.Popen", side_effect=fake_popen):
                 with mock.patch("wfd.media.wlroots.time.sleep", return_value=None):
                     with mock.patch(
@@ -184,7 +200,11 @@ class LpcmIccFlagsTest(unittest.TestCase):
                                 "/opt/wf-recorder" if icc else "/usr/bin/wf-recorder",
                                 harness.config.monitor,
                             )
-        return captured["cmds"][0]
+        for cmd in captured["cmds"]:
+            base = os.path.basename(cmd[0]) if cmd else ""
+            if "wf-recorder" in base:
+                return cmd
+        raise AssertionError(f"wf-recorder not in cmds: {captured['cmds']!r}")
 
     def test_lpcm_stock_has_d_no_r(self):
         wf = self._run_lpcm(icc=False)

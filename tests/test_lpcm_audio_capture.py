@@ -37,7 +37,7 @@ class _FakeProc:
         import io
 
         self.cmd = list(cmd)
-        self.args = args
+        self.args = list(cmd)  # subprocess.run CompletedProcess expects .args
         self.kwargs = kwargs
         self.pid = 1
         self.returncode = 0
@@ -66,6 +66,19 @@ class _FakeProc:
 
     def __exit__(self, *exc):
         return False
+
+
+def _media_cmds(cmds: list[list[str]]) -> list[list[str]]:
+    """Keep capture/encode Popen argv; drop power-profile probes."""
+    allow = {"wf-recorder", "ffmpeg", "pw-cat", "parec"}
+    keep = []
+    for cmd in cmds:
+        if not cmd:
+            continue
+        base = os.path.basename(cmd[0])
+        if base in allow or base.endswith("ffmpeg") or base.endswith("wf-recorder"):
+            keep.append(cmd)
+    return keep
 
 
 class LpcmAudioCaptureCmdTest(unittest.TestCase):
@@ -138,7 +151,7 @@ class LpcmAudioCaptureCmdTest(unittest.TestCase):
 
     def test_prefers_pw_cat_target_not_ffmpeg_pulse(self):
         harness, captured = self._run_lpcm(which_map={"pw-cat": "/usr/bin/pw-cat"})
-        cmds = captured["cmds"]
+        cmds = _media_cmds(captured["cmds"])
         self.assertEqual(len(cmds), 2)
         wf_cmd, aud_cmd = cmds
         self.assertEqual(wf_cmd[0], "/usr/bin/wf-recorder")
@@ -163,7 +176,7 @@ class LpcmAudioCaptureCmdTest(unittest.TestCase):
 
     def test_falls_back_to_parec_when_pw_cat_missing(self):
         _harness, captured = self._run_lpcm(which_map={"pw-cat": None})
-        aud_cmd = captured["cmds"][1]
+        aud_cmd = _media_cmds(captured["cmds"])[1]
         self.assertEqual(aud_cmd[0], "parec")
         self.assertIn("--device=miracast.monitor", aud_cmd)
         self.assertIn("--client-name=fluxcast-wfd-capture", aud_cmd)
@@ -179,7 +192,7 @@ class LpcmAudioCaptureCmdTest(unittest.TestCase):
             which_map={"pw-cat": "/usr/bin/pw-cat"},
             audio_device="miracast",
         )
-        aud_cmd = captured["cmds"][1]
+        aud_cmd = _media_cmds(captured["cmds"])[1]
         self.assertEqual(aud_cmd[aud_cmd.index("--target") + 1], "miracast.monitor")
         self.assertIn("media.name=miracast.monitor", aud_cmd)
 
@@ -191,6 +204,8 @@ class LpcmAudioCaptureCmdTest(unittest.TestCase):
                 which_map={"pw-cat": "/usr/bin/pw-cat"},
                 audio_device="alsa_input.pci-0000_00_1f.3.analog-stereo",
             )
+
+
 
 
 if __name__ == "__main__":
