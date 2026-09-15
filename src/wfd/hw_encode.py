@@ -212,7 +212,15 @@ def vaapi_quality_for_plan(*, throttled: Optional[bool] = None) -> str:
 
     Throttled used to force ``7`` (very blocky on Miracast TVs). GPU encode is
     cheap enough that ``5`` still saves work without looking like a slideshow.
+
+    Override with ``FLUXCAST_WFD_VAAPI_QUALITY`` (1–8) for A/B tests.
     """
+    env_q = (os.environ.get("FLUXCAST_WFD_VAAPI_QUALITY", "") or "").strip()
+    if env_q:
+        try:
+            return str(max(1, min(8, int(env_q))))
+        except ValueError:
+            pass
     if throttled is None:
         throttled = encode_throttled()
     return "5" if throttled else "4"
