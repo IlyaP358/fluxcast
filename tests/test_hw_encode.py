@@ -275,10 +275,26 @@ def _fake_power_plans(names, active):
 
 
 class BuildEncodePlanTest(unittest.TestCase):
+    def setUp(self):
+        # Ambient Miracast sessions often export CQP; keep pipe defaults deterministic.
+        for key in (
+            "FLUXCAST_WFD_VAAPI_RC",
+            "FLUXCAST_WFD_VAAPI_QP",
+            "FLUXCAST_WFD_VAAPI_GOP",
+            "FLUXCAST_WFD_VAAPI_QUALITY",
+            "FLUXCAST_WFD_VAAPI_ASYNC_DEPTH",
+        ):
+            os.environ.pop(key, None)
+
     def tearDown(self):
         os.environ.pop("FLUXCAST_WFD_ENCODER", None)
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
         os.environ.pop("FLUXCAST_WFD_POWER_PLAN", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_RC", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_QP", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_GOP", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_QUALITY", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_ASYNC_DEPTH", None)
 
     def _with_plans(self, names, active, on_mains=True):
         return mock.patch.multiple(
@@ -409,12 +425,28 @@ class LevelToIdcTest(unittest.TestCase):
 class VaapiQsvPlanShapeTest(unittest.TestCase):
     """GPU plan argv shape — only reached when encoder is explicitly opted in."""
 
+    def setUp(self):
+        # Ambient Miracast sessions often export CQP/quality; keep defaults deterministic.
+        for key in (
+            "FLUXCAST_WFD_VAAPI_RC",
+            "FLUXCAST_WFD_VAAPI_QP",
+            "FLUXCAST_WFD_VAAPI_GOP",
+            "FLUXCAST_WFD_VAAPI_QUALITY",
+            "FLUXCAST_WFD_VAAPI_ASYNC_DEPTH",
+        ):
+            os.environ.pop(key, None)
+
     def tearDown(self):
         os.environ.pop("FLUXCAST_WFD_ENCODER", None)
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
         os.environ.pop("FLUXCAST_WFD_POWER_PLAN", None)
         os.environ.pop("FLUXCAST_WFD_VAAPI_DEVICE", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_RC", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_QP", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_GOP", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_QUALITY", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_ASYNC_DEPTH", None)
 
     def _with_plans(self, names, active, on_mains=True):
         return mock.patch.multiple(
@@ -484,10 +516,68 @@ class VaapiQsvPlanShapeTest(unittest.TestCase):
         self.assertEqual(plan.video_args[plan.video_args.index("-quality") + 1], "5")
         self.assertEqual(plan.video_args[plan.video_args.index("-async_depth") + 1], "2")
         self.assertEqual(plan.video_args[plan.video_args.index("-b:v") + 1], "3M")
+        self.assertEqual(plan.video_args[plan.video_args.index("-rc_mode") + 1], "CBR")
         self.assertNotIn("-low_power", plan.video_args)
-        self.assertNotIn("CQP", plan.video_args)
+        self.assertNotIn("-qp", plan.video_args)
         self.assertIn("power_plan_1 (power-saver)", plan.note)
         self.assertNotIn("efficient power bias", plan.note)
+
+    def test_vaapi_pipe_honors_cqp_movie_preset_env(self):
+        """Pipe path must honor FLUXCAST_WFD_VAAPI_RC=CQP (movie/desktop presets)."""
+        os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
+        os.environ["FLUXCAST_WFD_POWER_PLAN"] = "performance"
+        os.environ["FLUXCAST_WFD_VAAPI_RC"] = "CQP"
+        os.environ["FLUXCAST_WFD_VAAPI_QP"] = "18"
+        os.environ["FLUXCAST_WFD_VAAPI_GOP"] = "60"
+        os.environ["FLUXCAST_WFD_VAAPI_QUALITY"] = "5"
+        with self._with_plans(["performance"], "performance"):
+            with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
+                with mock.patch("os.path.exists", return_value=True):
+                    plan = hw_encode.build_encode_plan(
+                        h264_profile="baseline",
+                        level="4.0",
+                        fps=30,
+                        gop=30,
+                        bitrate="12M",
+                        bufsize="6M",
+                        vf_scale=None,
+                        input_pix_fmt="nv12",
+                    )
+        self.assertEqual(plan.name, "vaapi")
+        self.assertEqual(plan.video_args[plan.video_args.index("-rc_mode") + 1], "CQP")
+        self.assertEqual(plan.video_args[plan.video_args.index("-qp") + 1], "18")
+        self.assertEqual(plan.video_args[plan.video_args.index("-g") + 1], "60")
+        self.assertEqual(plan.video_args[plan.video_args.index("-quality") + 1], "5")
+        self.assertNotIn("-b:v", plan.video_args)
+        self.assertIn("CQP qp=18", plan.note)
+
+    def test_vaapi_pipe_qvbr_caps_peak_bitrate(self):
+        """QVBR keeps qp and honors maxrate (Intel ignores maxrate in pure CQP)."""
+        os.environ["FLUXCAST_WFD_ENCODER"] = "vaapi"
+        os.environ["FLUXCAST_WFD_POWER_PLAN"] = "performance"
+        os.environ["FLUXCAST_WFD_VAAPI_RC"] = "QVBR"
+        os.environ["FLUXCAST_WFD_VAAPI_QP"] = "18"
+        os.environ["FLUXCAST_WFD_VAAPI_GOP"] = "30"
+        os.environ["FLUXCAST_WFD_VAAPI_BITRATE"] = "16M"
+        os.environ["FLUXCAST_WFD_VAAPI_QUALITY"] = "5"
+        with self._with_plans(["performance"], "performance"):
+            with mock.patch.object(hw_encode, "_ffmpeg_has_encoder", return_value=True):
+                with mock.patch("os.path.exists", return_value=True):
+                    plan = hw_encode.build_encode_plan(
+                        h264_profile="baseline",
+                        level="4.0",
+                        fps=30,
+                        gop=30,
+                        bitrate="12M",
+                        bufsize="6M",
+                        vf_scale=None,
+                        input_pix_fmt="nv12",
+                    )
+        self.assertEqual(plan.video_args[plan.video_args.index("-rc_mode") + 1], "QVBR")
+        self.assertEqual(plan.video_args[plan.video_args.index("-qp") + 1], "18")
+        self.assertEqual(plan.video_args[plan.video_args.index("-b:v") + 1], "12M")
+        self.assertEqual(plan.video_args[plan.video_args.index("-maxrate") + 1], "16M")
+        self.assertIn("QVBR qp=18", plan.note)
 
     def test_qsv_plan_uses_init_hw_device(self):
         os.environ["FLUXCAST_WFD_ENCODER"] = "qsv"

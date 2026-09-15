@@ -296,7 +296,13 @@ class WlrootsMixin:
                 "-p", "profile=constrained_baseline",
                 "-p", f"framerate={self.config.fps}",
             ]
-            desc = f"{rc} bitrate={br}, gop={gop}, quality={quality}"
+            # QVBR keeps a QP quality floor while honoring bitrate/maxrate.
+            if rc == "QVBR":
+                qp = (os.environ.get("FLUXCAST_WFD_VAAPI_QP", "") or "18").strip() or "18"
+                params.extend(["-p", f"qp={qp}"])
+                desc = f"{rc} qp={qp} bitrate={br}, gop={gop}, quality={quality}"
+            else:
+                desc = f"{rc} bitrate={br}, gop={gop}, quality={quality}"
         return params, desc
 
     def _start_wf_recorder_lpcm(self, wf_recorder: str, monitor) -> None:
