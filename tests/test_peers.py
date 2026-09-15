@@ -91,6 +91,74 @@ class PrintScanCapabilityTest(unittest.TestCase):
         self.assertIn("not advertising Wi-Fi Display", out)
 
 
+
+class NmP2PDevicePathTest(unittest.TestCase):
+    """NetworkManager P2P discovery, including the IWD virtual path."""
+
+    DEVICE_PATH = "/org/freedesktop/NetworkManager/Devices/9"
+
+    def _lookup(self, requested, iface, device_type):
+        result = mock.Mock(
+            returncode=0,
+            stdout=f"(['{self.DEVICE_PATH}'],)",
+            stderr="",
+        )
+
+        def fake_get_string(path, interface, prop):
+            if prop == "Interface":
+                return iface
+            return ""
+
+        def fake_get_property(path, interface, prop):
+            if prop == "DeviceType":
+                return device_type
+            return ""
+
+        output = io.StringIO()
+
+        with mock.patch.object(
+            nm, "_gdbus_call", return_value=result
+        ), mock.patch.object(
+            nm, "_nm_get_string", side_effect=fake_get_string
+        ), mock.patch.object(
+            nm, "_nm_get_property", side_effect=fake_get_property
+        ), contextlib.redirect_stdout(output):
+            found = nm._nm_p2p_device_path(requested)
+
+        return found, output.getvalue()
+
+    def test_normal_networkmanager_p2p_device(self):
+        found, output = self._lookup(
+            "wlan0",
+            "p2p-wlan0-0",
+            "(<uint32 30>,)",
+        )
+
+        self.assertEqual(found, self.DEVICE_PATH)
+        self.assertEqual(output, "")
+
+    def test_iwd_virtual_p2p_device(self):
+        found, output = self._lookup(
+            "wlan0",
+            "/net/connman/iwd/0",
+            "(<uint32 30>,)",
+        )
+
+        self.assertEqual(found, self.DEVICE_PATH)
+        self.assertIn("--wfd-interface", output)
+        self.assertIn("does not map directly", output)
+
+    def test_failed_device_type_read_falls_back_to_name(self):
+        found, output = self._lookup(
+            "wlan0",
+            "p2p-wlan0-0",
+            "",
+        )
+
+        self.assertEqual(found, self.DEVICE_PATH)
+        self.assertEqual(output, "")
+
+
 class NmScanCapabilityTest(unittest.TestCase):
     """_nm_scan must decide capability from the parsed IE bytes, not from the
     raw gdbus string, which is truthy even for a peer with no WFD data.

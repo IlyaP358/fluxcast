@@ -8,6 +8,7 @@ from ..ie import (
 )
 from .dbus import (
     NM_ACTIVE_STATE_NAMES, NM_DEVICE_REASON_NAMES, NM_DEVICE_STATE_NAMES,
+    NM_DEVICE_TYPE_WIFI_P2P,
     _gdbus_call, _nm_get_property, _nm_get_string, _object_paths,
     _variant_byte_array, _variant_uint, _variant_uint_tuple, _wfd_source_ie,
 )
@@ -83,14 +84,62 @@ def _nm_p2p_device_path(interface: Optional[str] = None) -> Optional[str]:
         raise WFDNotReady((result.stderr or result.stdout).strip())
 
     requested = interface or ""
+
     for path in _object_paths(result.stdout):
-        iface = _nm_get_string(path, "org.freedesktop.NetworkManager.Device", "Interface")
-        if not iface or "p2p" not in iface.lower():
+        iface = _nm_get_string(
+            path,
+            "org.freedesktop.NetworkManager.Device",
+            "Interface",
+        )
+
+        device_type = _variant_uint(
+            _nm_get_property(
+                path,
+                "org.freedesktop.NetworkManager.Device",
+                "DeviceType",
+            )
+        )
+
+        # Prefer NetworkManager's actual device classification.
+        # If DeviceType cannot be read, preserve the previous
+        # interface-name heuristic as a compatibility fallback.
+        if device_type is not None:
+            if device_type != NM_DEVICE_TYPE_WIFI_P2P:
+                continue
+        elif not iface or "p2p" not in iface.lower():
             continue
-        if requested and requested not in iface:
-            continue
+
+        if requested and requested not in (iface or ""):
+            is_iwd_virtual = bool(
+                iface
+                and iface.startswith("/net/connman/iwd/")
+            )
+
+            if not is_iwd_virtual:
+                continue
+
+            # With IWD, NetworkManager exposes a virtual P2P device such
+            # as /net/connman/iwd/0 rather than a p2p-wlan0-* interface.
+            # Do not silently pretend that --wfd-interface matched it.
+            print(
+                "[FluxCast WFD] "
+                f"--wfd-interface={requested!r} does not map directly "
+                f"to IWD's virtual P2P device {iface!r}; "
+                "using the NetworkManager/IWD P2P device."
+            )
+
         return path
+
     return None
+
+def _nm_p2p_uses_iwd(path: str) -> bool:
+    iface = _nm_get_string(
+        path,
+        "org.freedesktop.NetworkManager.Device",
+        "Interface",
+    )
+    return bool(iface and iface.startswith("/net/connman/iwd/"))
+
 
 def _nm_start_find(path: str, timeout: int) -> None:
     result = _gdbus_call([

@@ -11,7 +11,7 @@ from .firewall import _close_wfd_firewall_port, _open_wfd_firewall_port
 from .p2p.device import _set_p2p_device_name, _set_p2p_go_intent
 from .p2p.nm import (
     _connect_peer, _deactivate_connection, _disconnect_device,
-    _nm_p2p_device_path, _wait_for_nm_activation,
+    _nm_p2p_device_path, _nm_p2p_uses_iwd, _wait_for_nm_activation,
 )
 from .p2p.peers import _scan_and_select
 from .p2p.wpas import connect_via_wpa_supplicant, release_wpa_supplicant_connection
@@ -70,13 +70,38 @@ def start_experimental_backend(args) -> None:
                 from capture import prompt_monitor
                 monitor = prompt_monitor()
 
-    _set_p2p_device_name(args.wfd_interface)
+    backend_probe_path = _nm_p2p_device_path(args.wfd_interface)
+    if not backend_probe_path:
+        raise WFDNotReady(
+            "NetworkManager did not expose a Wi-Fi P2P device before scanning."
+        )
+
+    using_iwd = _nm_p2p_uses_iwd(backend_probe_path)
+
+    if using_iwd:
+        print(
+            "[FluxCast WFD] NetworkManager is using IWD; "
+            "P2P device naming and GO intent stay under "
+            "NetworkManager/IWD control."
+        )
+    else:
+        _set_p2p_device_name(args.wfd_interface)
+
     peer = _scan_and_select(
-        args.wfd_interface, getattr(args, "wfd_peer", None), args.wfd_timeout
+        args.wfd_interface,
+        getattr(args, "wfd_peer", None),
+        args.wfd_timeout,
     )
+
+    # Refresh the device after scanning. The scan may retry for tens of
+    # seconds, so the path used for the actual connection should be fresh.
     device_path = _nm_p2p_device_path(args.wfd_interface)
     if not device_path:
-        raise WFDNotReady("NetworkManager P2P device disappeared before connection.")
+        raise WFDNotReady(
+            "NetworkManager P2P device disappeared before connection."
+        )
+
+    using_iwd = _nm_p2p_uses_iwd(device_path)
 
     if getattr(args, "wfd_dry_run", False):
         _connect_peer(
@@ -148,14 +173,17 @@ def start_experimental_backend(args) -> None:
         else:
             # Lower our GO intent before negotiation so the TV becomes the group
             # owner; most Miracast sinks only start the RTSP session in that role.
-            previous_go_intent = _set_p2p_go_intent(
-                args.wfd_interface, getattr(args, "wfd_go_intent", 0)
-            )
+            if not using_iwd:
+                previous_go_intent = _set_p2p_go_intent(
+                    args.wfd_interface, getattr(args, "wfd_go_intent", 0)
+                )
+
             active_path = _connect_peer(
                 device_path,
                 peer,
                 rtsp_port=rtsp_port,
             )
+
             _wait_for_nm_activation(active_path)
 
         if not getattr(args, "wfd_no_firewall", False):
