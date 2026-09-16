@@ -34,19 +34,29 @@ def supported_modes(sink_format: Optional[WFDVideoFormat]) -> list[dict]:
         if max_level is not None and _wfd_level_for_mode(mode) > max_level:
             continue
         out.append(_mode_dict(mode))
-    # Stable UI order: resolution asc, then fps asc.
-    out.sort(key=lambda m: (m["height"], m["width"], m["fps"]))
+    # Stable UI order: progressive first, then by resolution / fps.
+    out.sort(
+        key=lambda m: (
+            1 if m.get("interlaced") else 0,
+            m["height"],
+            m["width"],
+            m["fps"],
+        )
+    )
     return out
 
 
 def _mode_dict(mode: WFDCEAMode) -> dict:
+    label = f"{mode.width}x{mode.height}{'i' if mode.interlaced else ''}@{mode.fps}"
     return {
         "id": mode.name,
-        "label": f"{mode.width}x{mode.height}@{mode.fps}",
+        "label": label,
         "width": mode.width,
         "height": mode.height,
         "fps": mode.fps,
         "resolution": f"{mode.width}x{mode.height}",
+        "interlaced": bool(mode.interlaced),
+        "negotiable": not bool(mode.interlaced),
     }
 
 

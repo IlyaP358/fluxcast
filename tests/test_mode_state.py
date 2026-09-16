@@ -10,11 +10,17 @@ from unittest import mock  # noqa: E402
 
 from wfd.config import WFDCEAMode, WFDVideoFormat  # noqa: E402
 from wfd.constants import (  # noqa: E402
+    WFD_CEA_480I60,
+    WFD_CEA_480P60,
+    WFD_CEA_640P60,
     WFD_CEA_720P30,
+    WFD_CEA_1080I60,
     WFD_CEA_1080P30,
     WFD_VESA_1200P30,
 )
 from wfd import mode_state  # noqa: E402
+from wfd.modes import _choose_cea_mode  # noqa: E402
+from wfd.config import WFDMediaConfig  # noqa: E402
 
 
 def _sink(cea_mask: int, vesa_mask: int = 0, level: str = "08") -> WFDVideoFormat:
@@ -38,6 +44,35 @@ class SupportedModesTest(unittest.TestCase):
         sink = _sink(WFD_CEA_720P30 | WFD_CEA_1080P30)
         ids = [m["id"] for m in mode_state.supported_modes(sink)]
         self.assertEqual(ids, ["1280x720p30", "1920x1080p30"])
+
+    def test_lists_sd_and_interlaced_when_advertised(self):
+        # level 0x10 (LEVEL_42) so 1080i60 is not filtered by encoder level.
+        sink = _sink(
+            WFD_CEA_640P60
+            | WFD_CEA_480P60
+            | WFD_CEA_480I60
+            | WFD_CEA_1080P30
+            | WFD_CEA_1080I60,
+            level="10",
+        )
+        modes = {m["id"]: m for m in mode_state.supported_modes(sink)}
+        self.assertIn("720x480p60", modes)
+        self.assertIn("720x480i60", modes)
+        self.assertIn("1920x1080i60", modes)
+        self.assertTrue(modes["720x480i60"]["interlaced"])
+        self.assertFalse(modes["720x480i60"]["negotiable"])
+        self.assertTrue(modes["720x480p60"]["negotiable"])
+        # Progressive before interlaced in UI order.
+        ids = [m["id"] for m in mode_state.supported_modes(sink)]
+        self.assertLess(ids.index("1920x1080p30"), ids.index("1920x1080i60"))
+
+    def test_choose_never_selects_interlaced(self):
+        # Sink only advertises interlaced HD + progressive SD — must pick progressive.
+        sink = _sink(WFD_CEA_480I60 | WFD_CEA_1080I60 | WFD_CEA_480P60)
+        cfg = WFDMediaConfig(monitor=None, output_resolution="1920x1080", fps=30)
+        mode = _choose_cea_mode(cfg, sink)
+        self.assertFalse(mode.interlaced)
+        self.assertEqual(mode.name, "720x480p60")
 
     def test_stable_sort_by_height_width_fps(self):
         sink = _sink(WFD_CEA_720P30 | WFD_CEA_1080P30)
