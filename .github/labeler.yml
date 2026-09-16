@@ -1,0 +1,30 @@
+translations:
+  - changed-files:
+      - any-glob-to-any-file: 'src/i18n/**'
+packaging:
+  - changed-files:
+      - any-glob-to-any-file: ['debian/**', 'meta/**']
+ci:
+  - changed-files:
+      - any-glob-to-any-file: '.github/**'
+wfd:
+  - changed-files:
+      - any-glob-to-any-file: 'src/wfd/**'
+dlna:
+  - changed-files:
+      - any-glob-to-any-file: 'src/dlna/**'
+cast:
+  - changed-files:
+      - any-glob-to-any-file: 'src/cast/**'
+capture:
+  - changed-files:
+      - any-glob-to-any-file: ['src/capture/**', 'src/drivers/**']
+tray:
+  - changed-files:
+      - any-glob-to-any-file: 'src/ui/**'
+tests:
+  - changed-files:
+      - any-glob-to-any-file: 'tests/**'
+documentation:
+  - changed-files:
+      - any-glob-to-any-file: ['**/*.md', 'documentation/**']
