@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from .outputs import monitor_scale
@@ -189,10 +190,16 @@ def capture_encode_preference() -> str:
 
 
 def capture_encode_attempts(preference: Optional[str] = None) -> list[str]:
-    """Ordered RENDER METHOD attempts ending at CPU for GPU prefs."""
+    """Ordered RENDER METHOD attempts ending at CPU for GPU prefs.
+
+    GPU + DMA-BUF (``dmabuf``) falls back to GPU pipe then CPU. Skip the DMA
+    attempt when VAAPI DMA-BUF is not usable (e.g. NVIDIA-only hosts).
+    """
     pref = preference or capture_encode_preference()
     if pref == "dmabuf":
-        return ["dmabuf", "vaapi", "cpu"]
+        if prefer_wf_recorder_vaapi_dmabuf(preference="dmabuf"):
+            return ["dmabuf", "vaapi", "cpu"]
+        return ["vaapi", "cpu"]
     if pref == "vaapi":
         return ["vaapi", "cpu"]
     return ["cpu"]
@@ -200,7 +207,7 @@ def capture_encode_attempts(preference: Optional[str] = None) -> list[str]:
 
 
 
-def prefer_wf_recorder_vaapi_dmabuf(monitor=None) -> bool:
+def prefer_wf_recorder_vaapi_dmabuf(monitor=None, preference: Optional[str] = None) -> bool:
     """True when capture should try wf-recorder -c h264_vaapi (DMA-BUF).
 
     Scaled outputs are allowed: whole-output screencopy still yields physical
@@ -211,8 +218,11 @@ def prefer_wf_recorder_vaapi_dmabuf(monitor=None) -> bool:
     Escape hatches:
     - RENDER METHOD ``vaapi`` / ``cpu`` (or ``FLUXCAST_WFD_CAPTURE_ENCODE=pipe``)
     - ``FLUXCAST_WFD_DMABUF_ALLOW_SCALED=0`` — pipe only when scale != 1
+
+    ``preference`` overrides env when the caller already knows the RENDER ENGINE
+    pill (e.g. capture_encode_attempts(\"dmabuf\")).
     """
-    pref = capture_encode_preference()
+    pref = (preference or capture_encode_preference() or "").strip().lower()
     if pref in ("vaapi", "cpu"):
         return False
     if pref != "dmabuf":
@@ -377,6 +387,17 @@ def apply_bitrate_bias(bitrate_text: str, bias: str) -> str:
     return apply_bitrate_plan(bitrate_text, throttled=(bias == "efficient"))
 
 
+def _nvenc_usable() -> bool:
+    """True when ffmpeg has h264_nvenc and an NVIDIA device/driver is present."""
+    if not _ffmpeg_has_encoder("h264_nvenc"):
+        return False
+    if Path("/dev/nvidia0").exists():
+        return True
+    if Path("/proc/driver/nvidia/version").is_file():
+        return True
+    return False
+
+
 def probe_encoder(prefer: str = "libx264") -> str:
     prefer = (prefer or "libx264").strip().lower()
     if prefer in ("libx264", "x264", "software", "sw"):
@@ -384,13 +405,17 @@ def probe_encoder(prefer: str = "libx264") -> str:
     if prefer == "vaapi":
         # Same device check as auto — missing render node must not select VAAPI.
         return "vaapi" if _vaapi_usable() else "libx264"
+    if prefer == "nvenc":
+        return "nvenc" if _nvenc_usable() else "libx264"
     if prefer == "qsv":
         return "qsv" if _ffmpeg_has_encoder("h264_qsv") else "libx264"
     if prefer != "auto":
         return "libx264"
-    # Explicit auto only: VAAPI, then QSV, then software.
+    # Explicit auto: VAAPI (Intel/AMD Mesa) → NVENC → QSV → software.
     if _vaapi_usable():
         return "vaapi"
+    if _nvenc_usable():
+        return "nvenc"
     if _ffmpeg_has_encoder("h264_qsv"):
         return "qsv"
     return "libx264"
@@ -574,6 +599,29 @@ def build_encode_plan(
                 "-preset", preset,
             ],
             note=f"h264_qsv ({plan_note})",
+        )
+
+    if choice == "nvenc":
+        # Pipe path: software format + NVENC (no CUDA filter required).
+        preset = "p1" if throttled else "p4"
+        return EncodePlan(
+            name="nvenc",
+            pre_input=[],
+            vf=["-vf", vf_scale] if vf_scale else ["-vf", "format=yuv420p"],
+            video_args=[
+                "-c:v", "h264_nvenc",
+                "-preset", preset,
+                "-tune", "ll",
+                "-bf", "0",
+                "-g", str(gop),
+                "-keyint_min", str(gop),
+                "-r", str(fps),
+                "-rc", "cbr",
+                "-b:v", bitrate,
+                "-maxrate", bitrate,
+                "-bufsize", bufsize,
+            ],
+            note=f"h264_nvenc ({plan_note}; preset={preset})",
         )
 
     # Software path — same shape as the historical FluxCast argv.
