@@ -12,7 +12,7 @@ from wfd.ie import (  # noqa: E402
     WFD_DEVICE_TYPE_PRIMARY_SINK, WFD_DEVICE_TYPE_SOURCE, WFDPeer,
     _parse_wfd_ies_device_type, _wfd_capability_from_hex, _wfd_ie_device_info,
 )
-from wfd.p2p import nm, peers  # noqa: E402
+from wfd.p2p import dbus, nm, peers  # noqa: E402
 
 
 def _gdbus_bytes(*values):
@@ -315,6 +315,98 @@ class WfdDeviceTypeParsingTest(unittest.TestCase):
                          (True, WFD_DEVICE_TYPE_PRIMARY_SINK))
         self.assertEqual(_wfd_capability_from_hex("nonsense"), (None, None))
         self.assertEqual(_wfd_capability_from_hex(""), (None, None))
+
+
+class PeerBlockerTest(unittest.TestCase):
+    """#136 picked a peer that already owned a group and only paired by PIN,
+    waited 35 seconds for a bare timeout, and had a working TV in the same
+    list (#137).
+    """
+
+    # The two devices from #136's scan, with the numbers from its log.
+    TLSC = "device_name=TLSC.D9B.6/.7\ngroup_capab=0x89\nconfig_methods=0x0008\n"
+    WEBOS = "device_name=[LG] webOS TV\ngroup_capab=0x00\nconfig_methods=0x1188\n"
+
+    def test_group_owner_and_pin_only_peer(self):
+        self.assertEqual(peers._parse_peer_blockers(self.TLSC), (True, False))
+
+    def test_reachable_peer(self):
+        self.assertEqual(peers._parse_peer_blockers(self.WEBOS), (False, True))
+
+    def test_absent_fields_are_unknown_not_false(self):
+        self.assertEqual(peers._parse_peer_blockers("device_name=printer\n"), (None, None))
+
+    def test_both_blockers_are_named(self):
+        out = _capture(peers.print_scan, [
+            WFDPeer(address="AA:BB:CC:DD:EE:FF", wfd_capable=True,
+                    wfd_device_type=WFD_DEVICE_TYPE_PRIMARY_SINK,
+                    is_group_owner=True, offers_push_button=False),
+        ])
+        self.assertIn("cannot join an existing group", out)
+        self.assertIn("pairs by PIN only", out)
+
+    def test_unknown_blockers_say_nothing(self):
+        out = _capture(peers.print_scan, [
+            WFDPeer(address="AA:BB:CC:DD:EE:FF", wfd_capable=True,
+                    wfd_device_type=WFD_DEVICE_TYPE_PRIMARY_SINK),
+        ])
+        self.assertNotIn("group", out)
+        self.assertNotIn("PIN", out)
+
+
+class WpasPeerCapabilitiesTest(unittest.TestCase):
+    """#104's policy restricts wpa_supplicant to admin groups, so on the
+    default path a denial has to stay silent rather than prompt (#114).
+    """
+
+    def _read(self, responses, running=True):
+        calls = []
+
+        def fake_call(args, timeout=None, privileged=False):
+            calls.append((args, privileged))
+            for needle, stdout in responses.items():
+                if needle in args:
+                    return mock.Mock(returncode=0, stdout=stdout, stderr="")
+            return mock.Mock(returncode=1, stdout="", stderr="AccessDenied")
+
+        with mock.patch.object(dbus, "_wpas_running", return_value=running), \
+             mock.patch.object(dbus, "_gdbus_call", side_effect=fake_call):
+            return dbus._wpas_peer_capabilities(), calls
+
+    def test_absent_supplicant_is_never_activated(self):
+        # wpa_supplicant is D-Bus activatable; a scan must not start it.
+        found, calls = self._read({}, running=False)
+        self.assertEqual((found, calls), ({}, []))
+
+    def test_a_timeout_does_not_abort_the_scan(self):
+        with mock.patch.object(dbus, "_wpas_running", return_value=True), \
+             mock.patch.object(dbus, "_gdbus_call", side_effect=WFDNotReady("timed out")):
+            self.assertEqual(dbus._wpas_peer_capabilities(), {})
+
+    def test_never_escalates(self):
+        _, calls = self._read({})
+        self.assertTrue(calls)
+        self.assertFalse(any(privileged for _, privileged in calls))
+
+    def test_denied_read_is_empty_not_an_error(self):
+        found, _ = self._read({})
+        self.assertEqual(found, {})
+
+    def test_reads_capabilities_keyed_by_bare_mac(self):
+        found, _ = self._read({
+            "Interfaces": "(<['/fi/w1/wpa_supplicant1/Interfaces/0']>,)",
+            "Peers": "(<[objectpath '/fi/w1/wpa_supplicant1/Interfaces/0/Peers/aabbccddeeff']>,)",
+            "groupcapability": "(<byte 0x89>,)",
+            "config_method": "(<uint16 8>,)",
+        })
+        self.assertEqual(found, {"aabbccddeeff": (True, False)})
+
+    def test_byte_properties_are_read_as_hex(self):
+        # _variant_uint reads <byte 0x89> back as 89 rather than 137, which
+        # would clear bit 0 and hide exactly the case this detects.
+        self.assertEqual(dbus._variant_number("(<byte 0x89>,)"), 0x89)
+        self.assertEqual(dbus._variant_number("(<uint16 4488>,)"), 4488)
+        self.assertIsNone(dbus._variant_number(""))
 
 
 if __name__ == "__main__":

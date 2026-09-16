@@ -11,6 +11,7 @@ from .dbus import (
     NM_DEVICE_TYPE_WIFI_P2P,
     _gdbus_call, _nm_get_property, _nm_get_string, _object_paths,
     _variant_byte_array, _variant_uint, _variant_uint_tuple, _wfd_source_ie,
+    _wpas_peer_capabilities,
 )
 
 
@@ -175,6 +176,9 @@ def _nm_scan(interface: Optional[str], timeout: int) -> list[WFDPeer]:
     finally:
         _nm_stop_find(path)
 
+    # Different service, different objects, matched by MAC. Read once.
+    capabilities = _wpas_peer_capabilities()
+
     peers = []
     for peer_path in _object_paths(peers_raw):
         name = _nm_get_string(peer_path, "org.freedesktop.NetworkManager.WifiP2PPeer", "Name")
@@ -210,8 +214,12 @@ def _nm_scan(interface: Optional[str], timeout: int) -> list[WFDPeer]:
             ]
             if part
         )
+        resolved = address or peer_path.rsplit("/", 1)[-1]
+        is_group_owner, offers_push_button = capabilities.get(
+            resolved.lower().replace(":", ""), (None, None)
+        )
         peers.append(WFDPeer(
-            address=address or peer_path.rsplit("/", 1)[-1],
+            address=resolved,
             name=name,
             details=details,
             path=peer_path,
@@ -219,6 +227,8 @@ def _nm_scan(interface: Optional[str], timeout: int) -> list[WFDPeer]:
             rtsp_port=sink_rtsp_port,
             wfd_capable=wfd_capable,
             wfd_device_type=wfd_device_type,
+            is_group_owner=is_group_owner,
+            offers_push_button=offers_push_button,
         ))
     return peers
 

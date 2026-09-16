@@ -11,6 +11,7 @@ from ..ie import (
     _wfd_ie_device_info, _wfd_ie_device_name,
 )
 from ..proc import _run
+from .dbus import P2P_GROUP_OWNER, WPS_PUSH_BUTTON
 from .nm import _nm_scan
 
 
@@ -95,6 +96,23 @@ def _parse_peer_capability(details: str) -> tuple[Optional[bool], Optional[int]]
                 return _wfd_capability_from_hex(stripped.partition("=")[2])
     return False, None
 
+def _parse_peer_blockers(details: str) -> tuple[Optional[bool], Optional[bool]]:
+    """(is_group_owner, offers_push_button) from `wpa_cli p2p_peer` output."""
+    found: dict[str, int] = {}
+    for line in details.splitlines():
+        field, _, value = line.strip().partition("=")
+        if field in ("group_capab", "config_methods") and value:
+            try:
+                found[field] = int(value, 16 if value.lower().startswith("0x") else 10)
+            except ValueError:
+                pass
+    group = found.get("group_capab")
+    methods = found.get("config_methods")
+    return (
+        None if group is None else bool(group & P2P_GROUP_OWNER),
+        None if methods is None else bool(methods & WPS_PUSH_BUTTON),
+    )
+
 def _parse_peer_name(details: str) -> str:
     for line in details.splitlines():
         stripped = line.strip()
@@ -159,6 +177,7 @@ def active_scan(interface: Optional[str] = None, timeout: int = 8) -> list[WFDPe
         except (OSError, subprocess.TimeoutExpired):
             pass
         wfd_capable, wfd_device_type = _parse_peer_capability(details)
+        is_group_owner, offers_push_button = _parse_peer_blockers(details)
         peers.append(WFDPeer(
             address=address,
             name=_parse_peer_name(details),
@@ -166,6 +185,8 @@ def active_scan(interface: Optional[str] = None, timeout: int = 8) -> list[WFDPe
             source="wpa_cli",
             wfd_capable=wfd_capable,
             wfd_device_type=wfd_device_type,
+            is_group_owner=is_group_owner,
+            offers_push_button=offers_push_button,
         ))
 
     return peers
@@ -199,3 +220,11 @@ def print_scan(peers: list[WFDPeer]) -> None:
             else:
                 print("      not advertising Wi-Fi Display; if this is a TV, "
                       "put it into Screen Share mode first")
+
+        # Either of these makes the connection impossible; unsaid, the user
+        # spends 35 seconds on it and gets a bare timeout (#136, #137).
+        if peer.is_group_owner:
+            print("      already running its own group; FluxCast can start a "
+                  "new one but cannot join an existing group")
+        if peer.offers_push_button is False:
+            print("      pairs by PIN only; FluxCast connects by push button")
