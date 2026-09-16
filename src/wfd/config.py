@@ -48,6 +48,10 @@ class WFDCEAMode:
     height: int
     fps: int
     table: str = "cea"  # "cea" or "vesa"
+    # Classic WFD CEA table includes interlaced timings (480i/576i/1080i).
+    # We list them in supported_modes for UI/fingerprint, but never negotiate
+    # them in M4 — capture is progressive.
+    interlaced: bool = False
 
     @property
     def resolution(self) -> str:

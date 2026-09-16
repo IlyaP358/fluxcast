@@ -2,27 +2,101 @@ from typing import Optional
 
 from .config import WFDCEAMode, WFDMediaConfig, WFDVideoFormat
 from .constants import (
-    WFD_CEA_640P60, WFD_CEA_720P30, WFD_CEA_720P60,
-    WFD_CEA_1080P30, WFD_CEA_1080P60,
-    WFD_VESA_1200P30, WFD_VESA_1200P60,
-    WFD_LEVEL_31, WFD_LEVEL_32, WFD_LEVEL_40,
-    WFD_LEVEL_42, WFD_LEVEL_50, WFD_LEVEL_51,
+    WFD_CEA_640P60,
+    WFD_CEA_480P60,
+    WFD_CEA_480I60,
+    WFD_CEA_576P50,
+    WFD_CEA_576I50,
+    WFD_CEA_720P30,
+    WFD_CEA_720P60,
+    WFD_CEA_1080P30,
+    WFD_CEA_1080P60,
+    WFD_CEA_1080I60,
+    WFD_CEA_720P25,
+    WFD_CEA_720P50,
+    WFD_CEA_1080P25,
+    WFD_CEA_1080P50,
+    WFD_CEA_1080I50,
+    WFD_CEA_720P24,
+    WFD_CEA_1080P24,
+    WFD_VESA_1200P30,
+    WFD_VESA_1200P60,
+    WFD_LEVEL_31,
+    WFD_LEVEL_32,
+    WFD_LEVEL_40,
+    WFD_LEVEL_42,
+    WFD_LEVEL_50,
+    WFD_LEVEL_51,
 )
 from .encoding import _parse_resolution
 
 
+def _cea_native(index: int) -> str:
+    """WFD ``native`` byte for CEA table row ``index``: ``(index << 3) | 0``."""
+    return f"{(index << 3) & 0xFF:02x}"
+
+
+def _cea_mode(
+    name: str,
+    bit: int,
+    index: int,
+    width: int,
+    height: int,
+    fps: int,
+    *,
+    interlaced: bool = False,
+) -> WFDCEAMode:
+    return WFDCEAMode(
+        name,
+        bit,
+        _cea_native(index),
+        width,
+        height,
+        fps,
+        table="cea",
+        interlaced=interlaced,
+    )
+
+
+# Classic WFD CEA table (bits 0–16). Interlaced entries are listed for
+# capability / UI but never selected in M4 (see ``_choose_cea_mode``).
 WFD_CEA_MODES: dict[int, WFDCEAMode] = {
-    WFD_CEA_640P60:  WFDCEAMode("640x480p60",    WFD_CEA_640P60,  "00", 640,  480, 60),
-    WFD_CEA_720P30:  WFDCEAMode("1280x720p30",   WFD_CEA_720P30,  "28", 1280, 720, 30),
-    WFD_CEA_720P60:  WFDCEAMode("1280x720p60",   WFD_CEA_720P60,  "30", 1280, 720, 60),
-    WFD_CEA_1080P30: WFDCEAMode("1920x1080p30",  WFD_CEA_1080P30, "38", 1920, 1080, 30),
-    WFD_CEA_1080P60: WFDCEAMode("1920x1080p60",  WFD_CEA_1080P60, "40", 1920, 1080, 60),
+    WFD_CEA_640P60: _cea_mode("640x480p60", WFD_CEA_640P60, 0, 640, 480, 60),
+    WFD_CEA_480P60: _cea_mode("720x480p60", WFD_CEA_480P60, 1, 720, 480, 60),
+    WFD_CEA_480I60: _cea_mode(
+        "720x480i60", WFD_CEA_480I60, 2, 720, 480, 60, interlaced=True
+    ),
+    WFD_CEA_576P50: _cea_mode("720x576p50", WFD_CEA_576P50, 3, 720, 576, 50),
+    WFD_CEA_576I50: _cea_mode(
+        "720x576i50", WFD_CEA_576I50, 4, 720, 576, 50, interlaced=True
+    ),
+    WFD_CEA_720P30: _cea_mode("1280x720p30", WFD_CEA_720P30, 5, 1280, 720, 30),
+    WFD_CEA_720P60: _cea_mode("1280x720p60", WFD_CEA_720P60, 6, 1280, 720, 60),
+    WFD_CEA_1080P30: _cea_mode("1920x1080p30", WFD_CEA_1080P30, 7, 1920, 1080, 30),
+    WFD_CEA_1080P60: _cea_mode("1920x1080p60", WFD_CEA_1080P60, 8, 1920, 1080, 60),
+    WFD_CEA_1080I60: _cea_mode(
+        "1920x1080i60", WFD_CEA_1080I60, 9, 1920, 1080, 60, interlaced=True
+    ),
+    WFD_CEA_720P25: _cea_mode("1280x720p25", WFD_CEA_720P25, 10, 1280, 720, 25),
+    WFD_CEA_720P50: _cea_mode("1280x720p50", WFD_CEA_720P50, 11, 1280, 720, 50),
+    WFD_CEA_1080P25: _cea_mode("1920x1080p25", WFD_CEA_1080P25, 12, 1920, 1080, 25),
+    WFD_CEA_1080P50: _cea_mode("1920x1080p50", WFD_CEA_1080P50, 13, 1920, 1080, 50),
+    WFD_CEA_1080I50: _cea_mode(
+        "1920x1080i50", WFD_CEA_1080I50, 14, 1920, 1080, 50, interlaced=True
+    ),
+    WFD_CEA_720P24: _cea_mode("1280x720p24", WFD_CEA_720P24, 15, 1280, 720, 24),
+    WFD_CEA_1080P24: _cea_mode("1920x1080p24", WFD_CEA_1080P24, 16, 1920, 1080, 24),
 }
 
 WFD_VESA_MODES: dict[int, WFDCEAMode] = {
-    WFD_VESA_1200P30: WFDCEAMode("1920x1200p30", WFD_VESA_1200P30, "00", 1920, 1200, 30, table="vesa"),
-    WFD_VESA_1200P60: WFDCEAMode("1920x1200p60", WFD_VESA_1200P60, "00", 1920, 1200, 60, table="vesa"),
+    WFD_VESA_1200P30: WFDCEAMode(
+        "1920x1200p30", WFD_VESA_1200P30, "00", 1920, 1200, 30, table="vesa"
+    ),
+    WFD_VESA_1200P60: WFDCEAMode(
+        "1920x1200p60", WFD_VESA_1200P60, "00", 1920, 1200, 60, table="vesa"
+    ),
 }
+
 
 def _parse_sink_video_format(value: str) -> Optional[WFDVideoFormat]:
     first_codec = value.split(",", 1)[0]
@@ -41,6 +115,7 @@ def _parse_sink_video_format(value: str) -> Optional[WFDVideoFormat]:
         )
     except ValueError:
         return None
+
 
 def _choose_profile(profile_hex: str) -> str:
     """Pick WFD H.264 profile byte for M4 from the sink advertisement.
@@ -69,6 +144,7 @@ def _encoder_h264_profile(sink_format: Optional[WFDVideoFormat]) -> str:
     # CHP → high (still -bf 0 for low-latency Miracast). CBP → baseline.
     return "high" if chosen == "02" else "baseline"
 
+
 def _max_wfd_level(level_hex: str) -> Optional[int]:
     try:
         value = int(level_hex, 16)
@@ -81,10 +157,15 @@ def _max_wfd_level(level_hex: str) -> Optional[int]:
         highest <<= 1
     return highest
 
+
 def _wfd_level_for_mode(mode: WFDCEAMode) -> int:
+    pixels = mode.width * mode.height
+    if pixels <= 720 * 576:
+        return WFD_LEVEL_31 if mode.fps <= 30 else WFD_LEVEL_32
     if mode.width <= 1280 and mode.height <= 720:
         return WFD_LEVEL_31 if mode.fps <= 30 else WFD_LEVEL_32
     return WFD_LEVEL_40 if mode.fps <= 30 else WFD_LEVEL_42
+
 
 def _desired_resolution(config: WFDMediaConfig) -> Optional[tuple[int, int]]:
     resolution = _parse_resolution(config.output_resolution)
@@ -95,7 +176,52 @@ def _desired_resolution(config: WFDMediaConfig) -> Optional[tuple[int, int]]:
         return monitor.width, monitor.height
     return None
 
+
 _mode_force_warned = False
+
+
+def _mode_supported(
+    mode: WFDCEAMode,
+    *,
+    cea_supported: int,
+    vesa_supported: int,
+    max_level: Optional[int],
+    allow_interlaced: bool,
+) -> bool:
+    if mode.interlaced and not allow_interlaced:
+        return False
+    if mode.table == "vesa":
+        if not (vesa_supported & mode.bit):
+            return False
+    else:
+        if not (cea_supported & mode.bit):
+            return False
+    if max_level is not None and _wfd_level_for_mode(mode) > max_level:
+        return False
+    return True
+
+
+def _score_mode(
+    mode: WFDCEAMode,
+    *,
+    resolution: Optional[tuple[int, int]],
+    fps: int,
+) -> tuple:
+    """Higher is better. Prefer matching size/rate; never prefer interlaced here."""
+    want_w, want_h = resolution if resolution else (1920, 1080)
+    # Prefer not upscaling beyond source when possible.
+    size_pen = abs(mode.width - want_w) + abs(mode.height - want_h)
+    if mode.width > want_w + 16 or mode.height > want_h + 16:
+        size_pen += 5000
+    fps_pen = abs(mode.fps - fps)
+    # Mild preference for progressive HD over SD when sizes are similar.
+    hd_bonus = 0
+    if mode.height >= 720:
+        hd_bonus = 100
+    if mode.height >= 1080:
+        hd_bonus = 200
+    return (-size_pen, -fps_pen, hd_bonus, mode.width * mode.height, mode.fps)
+
 
 def _choose_cea_mode(
     config: WFDMediaConfig,
@@ -107,49 +233,85 @@ def _choose_cea_mode(
     vesa_supported = sink_format.vesa_mask if sink_format else 0
     max_level = _max_wfd_level(sink_format.level) if sink_format else WFD_LEVEL_42
     resolution = _desired_resolution(config)
-    wants_720 = resolution is None or (resolution[0] <= 1280 and resolution[1] <= 720)
-    wants_1200 = resolution is not None and resolution[0] >= 1920 and resolution[1] > 1080
-    wants_60 = config.fps > 30
-    wants_480 = resolution is not None and resolution[0] <= 640 and resolution[1] <= 480
+    fps = int(config.fps or 30)
 
     all_modes = {**WFD_CEA_MODES, **WFD_VESA_MODES}
 
-    def supports(bit: int) -> bool:
-        mode = all_modes[bit]
-        if mode.table == "vesa":
-            if not (vesa_supported & bit):
-                return False
-        else:
-            if not (cea_supported & bit):
-                return False
-        return max_level is None or _wfd_level_for_mode(mode) <= max_level
+    def supports(mode: WFDCEAMode, *, allow_interlaced: bool = False) -> bool:
+        return _mode_supported(
+            mode,
+            cea_supported=cea_supported,
+            vesa_supported=vesa_supported,
+            max_level=max_level,
+            allow_interlaced=allow_interlaced,
+        )
 
-    # Build preference order: if monitor is 1200p, prefer VESA 1200p modes first
+    # Prefer a hand-ordered shortlist when the request matches common buckets,
+    # then fall back to scoring every progressive mode the sink allows.
+    wants_1200 = resolution is not None and resolution[0] >= 1920 and resolution[1] > 1080
+    wants_480 = resolution is not None and resolution[0] <= 720 and resolution[1] <= 480
+    wants_576 = resolution is not None and resolution[1] == 576
+    wants_720 = resolution is not None and resolution[0] <= 1280 and resolution[1] <= 720
+    wants_24 = 22 <= fps <= 26
+    wants_25_50 = fps in (25, 50) or (not wants_24 and 48 <= fps <= 52)
+    wants_60 = fps > 30 and not wants_25_50 and not wants_24
+
+    preferred: list[int] = []
     if wants_1200:
         preferred = (
-            [WFD_VESA_1200P60, WFD_VESA_1200P30,
-             WFD_CEA_1080P60, WFD_CEA_1080P30, WFD_CEA_720P60, WFD_CEA_720P30]
-            if wants_60 else [
-                WFD_VESA_1200P30, WFD_VESA_1200P60,
-                WFD_CEA_1080P30, WFD_CEA_1080P60,
-                WFD_CEA_720P30, WFD_CEA_720P60,
-            ]
+            [WFD_VESA_1200P60, WFD_VESA_1200P30, WFD_CEA_1080P60, WFD_CEA_1080P30]
+            if wants_60
+            else [WFD_VESA_1200P30, WFD_VESA_1200P60, WFD_CEA_1080P30, WFD_CEA_1080P60]
         )
+    elif wants_576 or wants_25_50:
+        preferred = [
+            WFD_CEA_1080P50,
+            WFD_CEA_720P50,
+            WFD_CEA_1080P25,
+            WFD_CEA_720P25,
+            WFD_CEA_576P50,
+            WFD_CEA_1080P30,
+            WFD_CEA_720P30,
+        ]
+    elif wants_24:
+        preferred = [
+            WFD_CEA_1080P24,
+            WFD_CEA_720P24,
+            WFD_CEA_1080P30,
+            WFD_CEA_720P30,
+        ]
     elif wants_480:
         preferred = (
-            [WFD_CEA_640P60, WFD_CEA_720P60, WFD_CEA_720P30]
-            if wants_60 else [WFD_CEA_640P60, WFD_CEA_720P30, WFD_CEA_720P60]
+            [WFD_CEA_480P60, WFD_CEA_640P60, WFD_CEA_720P60, WFD_CEA_720P30]
+            if wants_60
+            else [WFD_CEA_480P60, WFD_CEA_640P60, WFD_CEA_720P30, WFD_CEA_720P60]
         )
     elif wants_720:
         preferred = (
-            [WFD_CEA_720P60, WFD_CEA_720P30]
-            if wants_60 else [WFD_CEA_720P30, WFD_CEA_720P60]
+            [WFD_CEA_720P60, WFD_CEA_720P50, WFD_CEA_720P30, WFD_CEA_720P25, WFD_CEA_720P24]
+            if wants_60
+            else [
+                WFD_CEA_720P30,
+                WFD_CEA_720P25,
+                WFD_CEA_720P24,
+                WFD_CEA_720P60,
+                WFD_CEA_720P50,
+            ]
         )
     else:
         preferred = (
-            [WFD_CEA_1080P60, WFD_CEA_1080P30, WFD_CEA_720P60, WFD_CEA_720P30]
-            if wants_60 else [
+            [
+                WFD_CEA_1080P60,
+                WFD_CEA_1080P50,
                 WFD_CEA_1080P30,
+                WFD_CEA_720P60,
+                WFD_CEA_720P30,
+            ]
+            if wants_60
+            else [
+                WFD_CEA_1080P30,
+                WFD_CEA_1080P25,
+                WFD_CEA_1080P24,
                 WFD_CEA_720P30,
                 WFD_CEA_1080P60,
                 WFD_CEA_720P60,
@@ -157,40 +319,41 @@ def _choose_cea_mode(
         )
 
     for bit in preferred:
-        if supports(bit):
-            return all_modes[bit]
+        mode = all_modes.get(bit)
+        if mode is not None and supports(mode):
+            return mode
 
-    # Fallback: try any supported mode
-    for bit in (
-        WFD_CEA_720P30, WFD_CEA_1080P30, WFD_CEA_720P60, WFD_CEA_1080P60,
-    ):
-        if supports(bit):
-            return all_modes[bit]
+    progressive = [
+        m
+        for m in all_modes.values()
+        if supports(m)
+    ]
+    if progressive:
+        progressive.sort(
+            key=lambda m: _score_mode(m, resolution=resolution, fps=fps),
+            reverse=True,
+        )
+        return progressive[0]
 
     # Nothing advertised — force the best mode for the source monitor.
-    # Modern sinks (Samsung tablets etc.) accept modes beyond what they
-    # advertise; Windows Miracast does the same.
+    # Modern sinks often accept modes beyond what they advertise.
     if wants_1200:
         forced = (
-            [WFD_VESA_1200P60, WFD_VESA_1200P30,
-             WFD_CEA_1080P60, WFD_CEA_1080P30]
-            if wants_60 else [
-                WFD_VESA_1200P30, WFD_VESA_1200P60,
-                WFD_CEA_1080P30, WFD_CEA_1080P60,
-            ]
+            [WFD_VESA_1200P60, WFD_VESA_1200P30, WFD_CEA_1080P60, WFD_CEA_1080P30]
+            if wants_60
+            else [WFD_VESA_1200P30, WFD_VESA_1200P60, WFD_CEA_1080P30, WFD_CEA_1080P60]
         )
     elif wants_720:
         forced = (
             [WFD_CEA_720P60, WFD_CEA_720P30]
-            if wants_60 else [WFD_CEA_720P30, WFD_CEA_720P60]
+            if wants_60
+            else [WFD_CEA_720P30, WFD_CEA_720P60]
         )
     else:
         forced = (
             [WFD_CEA_1080P60, WFD_CEA_1080P30, WFD_CEA_720P60, WFD_CEA_720P30]
-            if wants_60 else [
-                WFD_CEA_1080P30, WFD_CEA_1080P60,
-                WFD_CEA_720P30, WFD_CEA_720P60,
-            ]
+            if wants_60
+            else [WFD_CEA_1080P30, WFD_CEA_1080P60, WFD_CEA_720P30, WFD_CEA_720P60]
         )
     mode = all_modes[forced[0]]
     global _mode_force_warned
@@ -201,6 +364,7 @@ def _choose_cea_mode(
             f"{mode.name}; forcing it (most sinks accept it)."
         )
     return mode
+
 
 def _selected_video_format(
     config: WFDMediaConfig,
@@ -227,6 +391,7 @@ def _selected_video_format(
         f"{mode.native} 00 {profile} {level} {cea_mask:08x} "
         f"{vesa_mask:08x} 00000000 00 0000 0000 00 none none"
     )
+
 
 def _h264_level_for_mode(config: WFDMediaConfig) -> str:
     resolution = _parse_resolution(config.output_resolution) or (1920, 1080)

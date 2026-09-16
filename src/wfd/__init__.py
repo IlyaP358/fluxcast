@@ -16,7 +16,40 @@ from diagnostics import print_report, run_diagnostics
 from capture.portal_capture import PortalCaptureError, PortalCaptureSession, close_portal_capture, start_portal_capture
 
  
-from .constants import WFD_RTSP_PORT, WFD_UIBC_PORT, _DEVICE_NAME, WFD_CEA_640P60, WFD_CEA_720P30, WFD_CEA_720P60, WFD_CEA_1080P30, WFD_CEA_1080P60, WFD_VESA_1200P30, WFD_VESA_1200P60, WFD_LEVEL_31, WFD_LEVEL_32, WFD_LEVEL_40, WFD_LEVEL_42, WFD_LEVEL_50, WFD_LEVEL_51, WFD_AUDIO_AAC, WFD_AUDIO_LPCM_48K, NM_DEST, NM_PATH
+from .constants import (  # noqa: F401
+    WFD_RTSP_PORT,
+    WFD_UIBC_PORT,
+    _DEVICE_NAME,
+    WFD_CEA_640P60,
+    WFD_CEA_480P60,
+    WFD_CEA_480I60,
+    WFD_CEA_576P50,
+    WFD_CEA_576I50,
+    WFD_CEA_720P30,
+    WFD_CEA_720P60,
+    WFD_CEA_1080P30,
+    WFD_CEA_1080P60,
+    WFD_CEA_1080I60,
+    WFD_CEA_720P25,
+    WFD_CEA_720P50,
+    WFD_CEA_1080P25,
+    WFD_CEA_1080P50,
+    WFD_CEA_1080I50,
+    WFD_CEA_720P24,
+    WFD_CEA_1080P24,
+    WFD_VESA_1200P30,
+    WFD_VESA_1200P60,
+    WFD_LEVEL_31,
+    WFD_LEVEL_32,
+    WFD_LEVEL_40,
+    WFD_LEVEL_42,
+    WFD_LEVEL_50,
+    WFD_LEVEL_51,
+    WFD_AUDIO_AAC,
+    WFD_AUDIO_LPCM_48K,
+    NM_DEST,
+    NM_PATH,
+)
 
 
 from .ie import _wfd_ie_device_info, _wfd_ie_device_name, WFDPeer, _parse_gdbus_byte_array, _parse_wfd_ies_rtsp_port, _parse_wfd_ies_device_type, _wfd_capability, WFD_DEVICE_TYPE_SOURCE
