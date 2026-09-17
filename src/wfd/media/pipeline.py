@@ -282,7 +282,7 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
             # - Default: if we were on DMA-BUF, lock to VAAPI *pipe* for the rest
             #   of this RTSP session (re-creating DMA after VIDEO_STALL left air
             #   TX flat / TV dark).
-            # - FLUXCAST_WFD_DMABUF_STICKY=1 (Smart View QVBR): keep trying DMA
+            # - FLUXCAST_WFD_DMABUF_STICKY=1 or pref=dmabuf: keep trying DMA
             #   across intentional SIGUSR1 encode.env rebinds — otherwise the
             #   first link-watch TX≈0 grace restart permanently abandons DMA.
             stay = (_os_env.environ.get("FLUXCAST_WFD_PIPE_STAY_VAAPI") or "1").strip().lower()
