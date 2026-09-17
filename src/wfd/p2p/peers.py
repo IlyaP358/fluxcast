@@ -210,10 +210,38 @@ def _parse_peer_name(details: str) -> str:
             return stripped.partition("=")[2]
     return ""
 
+def _dedicated_usb_ctrl(iface: Optional[str]) -> Optional[str]:
+    """Ctrl dir for FluxCast's dedicated USB wpa_supplicant, if running."""
+    for path in ("/tmp/fluxcast-usb-wpa", "/tmp/wpa-usb-p2p"):
+        if iface and Path(path, iface).exists():
+            return path
+        if Path(path).is_dir() and any(Path(path).iterdir()):
+            # Prefer explicit iface socket when present.
+            if iface is None or Path(path, iface).exists() or Path(path).joinpath("wpa.pid").exists():
+                return path
+    return None
+
+
 def _wpa_cli(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
-    """Run wpa_cli; retry under sudo when the ctrl iface is root-only."""
+    """Run wpa_cli; retry under sudo when the ctrl iface is root-only.
+
+    If a dedicated USB wpa_supplicant ctrl dir is present, use it so scans
+    hit the USB-only P2P device instead of NetworkManager's shared one.
+    """
+    iface = None
+    if "-i" in args:
+        try:
+            iface = args[args.index("-i") + 1]
+        except (ValueError, IndexError):
+            iface = None
+    ctrl = _dedicated_usb_ctrl(iface)
+    base = ["wpa_cli"]
+    if ctrl:
+        base.extend(["-p", ctrl])
+    base.extend(args)
+
     try:
-        result = _run(["wpa_cli", *args], timeout=timeout)
+        result = _run(base, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         raise
     if result.returncode == 0:
@@ -223,7 +251,7 @@ def _wpa_cli(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProce
         return result
     if not shutil.which("sudo"):
         return result
-    return _run(["sudo", "wpa_cli", *args], timeout=timeout)
+    return _run(["sudo", *base], timeout=timeout)
 
 
 def _wpa_cli_scan(interface: Optional[str] = None, timeout: int = 15) -> list[WFDPeer]:

@@ -170,12 +170,26 @@ def start_experimental_backend(args) -> None:
             # Bypasses NetworkManager's AddAndActivateConnection2 entirely -
             # see wpas.py's module docstring for why. connect_via_wpa_supplicant
             # handles GO-intent lowering internally, so it isn't done here.
-            wpas_data_iface = connect_via_wpa_supplicant(
-                args.wfd_interface, peer.address,
-                go_intent=getattr(args, "wfd_go_intent", 0),
-                rtsp_port=rtsp_port,
-                p2p_channel=getattr(args, "wfd_p2p_channel", None),
-            )
+            # USB dongles that share NM's wpa with another STA (e.g. AX201)
+            # must use a dedicated wpa_supplicant or groups form on the wrong phy.
+            from .p2p.usb_dedicated import _is_usb_wifi, connect_usb_dedicated
+            if args.wfd_interface and _is_usb_wifi(args.wfd_interface):
+                # Default go_intent=0 (prefer sink as GO). Do not force 15 —
+                # USB SoftMAC often never completes GO Neg Response when we
+                # insist on being GO.
+                wpas_data_iface = connect_usb_dedicated(
+                    args.wfd_interface,
+                    peer.address,
+                    go_intent=getattr(args, "wfd_go_intent", 0),
+                    rtsp_port=rtsp_port,
+                )
+            else:
+                wpas_data_iface = connect_via_wpa_supplicant(
+                    args.wfd_interface, peer.address,
+                    go_intent=getattr(args, "wfd_go_intent", 0),
+                    rtsp_port=rtsp_port,
+                    p2p_channel=getattr(args, "wfd_p2p_channel", None),
+                )
         else:
             # Lower our GO intent before negotiation so the TV becomes the group
             # owner; most Miracast sinks only start the RTSP session in that role.
@@ -261,12 +275,19 @@ def start_experimental_backend(args) -> None:
             _cleanup_step("connection deactivate",
                           lambda: _deactivate_connection(active_path))
         if wpas_data_iface:
-            _cleanup_step(
-                "wpa_supplicant connection release",
-                lambda: release_wpa_supplicant_connection(
-                    args.wfd_interface, wpas_data_iface
-                ),
-            )
+            from .p2p.usb_dedicated import _is_usb_wifi, release_usb_dedicated
+            if args.wfd_interface and _is_usb_wifi(args.wfd_interface):
+                _cleanup_step(
+                    "USB dedicated P2P release",
+                    lambda: release_usb_dedicated(args.wfd_interface),
+                )
+            else:
+                _cleanup_step(
+                    "wpa_supplicant connection release",
+                    lambda: release_wpa_supplicant_connection(
+                        args.wfd_interface, wpas_data_iface
+                    ),
+                )
         _cleanup_step("P2P device disconnect", lambda: _disconnect_device(device_path))
         if previous_go_intent is not None:
             _cleanup_step(
