@@ -503,15 +503,16 @@ class WlrootsMixin:
             if peak_bits < br_bits:
                 peak_bits = br_bits
                 peak = target
-            # Intel HRD CBR/VBR needs bufsize or BRC undershoots badly (~2–3 Mbps
-            # on-device with b/maxrate alone). ~0.5s VBV matches pipe path default.
+            # Intel HRD needs bufsize or BRC undershoots (~2–3 Mbps). QVBR
+            # needs a larger VBV than CBR or it sits at ~3 Mbps despite b=.
             try:
+                default_vbv = "2.0" if rc == "QVBR" else "0.5"
                 vbv_mult = float(
-                    (os.environ.get("FLUXCAST_WFD_VBV_MULTIPLIER", "") or "0.5").strip()
-                    or "0.5"
+                    (os.environ.get("FLUXCAST_WFD_VBV_MULTIPLIER", "") or default_vbv).strip()
+                    or default_vbv
                 )
             except ValueError:
-                vbv_mult = 0.5
+                vbv_mult = 2.0 if rc == "QVBR" else 0.5
             vbv_mult = max(0.25, min(4.0, vbv_mult))
             buf_bits = max(br_bits // 4, int(peak_bits * vbv_mult))
             params = [
@@ -526,12 +527,26 @@ class WlrootsMixin:
                 "-p", f"bufsize={buf_bits}",
             ]
             if rc == "QVBR":
-                qp = (os.environ.get("FLUXCAST_WFD_VAAPI_QP", "") or "18").strip() or "18"
-                params.extend(["-p", f"qp={qp}", "-p", f"maxrate={peak_bits}"])
+                # Fixed qp= makes Intel QVBR treat quality as already met and
+                # ignore b=/maxrate (~3 Mbps air). Use Samsung qmin/qmax bounds
+                # so bitrate drives; qp env is only a soft mid hint via qfactor skip.
+                qmin = (os.environ.get("FLUXCAST_WFD_VAAPI_QMIN", "") or "").strip()
+                qmax = (os.environ.get("FLUXCAST_WFD_VAAPI_QMAX", "") or "").strip()
+                if not qmin:
+                    qmin = (os.environ.get("FLUXCAST_WFD_ENCODE_QP_MIN", "") or "15").strip() or "15"
+                if not qmax:
+                    qmax = (os.environ.get("FLUXCAST_WFD_ENCODE_QP_MAX", "") or "44").strip() or "44"
+                params.extend(
+                    [
+                        "-p", f"qmin={qmin}",
+                        "-p", f"qmax={qmax}",
+                        "-p", f"maxrate={peak_bits}",
+                    ]
+                )
                 desc = (
-                    f"{rc} qp={qp} b={target} max={peak} buf={buf_bits}, "
-                    f"gop={gop}, quality={quality}, async={async_depth}, "
-                    f"profile={profile}"
+                    f"{rc} b={target} max={peak} qmin={qmin} qmax={qmax} "
+                    f"buf={buf_bits}, gop={gop}, quality={quality}, "
+                    f"async={async_depth}, profile={profile}"
                 )
             elif rc in ("VBR", "AVBR"):
                 params.extend(["-p", f"maxrate={peak_bits}"])
