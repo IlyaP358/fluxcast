@@ -536,17 +536,20 @@ class WlrootsMixin:
                     qmin = (os.environ.get("FLUXCAST_WFD_ENCODE_QP_MIN", "") or "15").strip() or "15"
                 if not qmax:
                     qmax = (os.environ.get("FLUXCAST_WFD_ENCODE_QP_MAX", "") or "44").strip() or "44"
+                # ~70% minrate floor so Intel QVBR cannot sit at ~3 Mbps.
+                min_bits = max(br_bits // 4, (br_bits * 7) // 10)
                 params.extend(
                     [
                         "-p", f"qmin={qmin}",
                         "-p", f"qmax={qmax}",
                         "-p", f"maxrate={peak_bits}",
+                        "-p", f"minrate={min_bits}",
                     ]
                 )
                 desc = (
-                    f"{rc} b={target} max={peak} qmin={qmin} qmax={qmax} "
-                    f"buf={buf_bits}, gop={gop}, quality={quality}, "
-                    f"async={async_depth}, profile={profile}"
+                    f"{rc} b={target} max={peak} min≈{min_bits} "
+                    f"qmin={qmin} qmax={qmax} buf={buf_bits}, gop={gop}, "
+                    f"quality={quality}, async={async_depth}, profile={profile}"
                 )
             elif rc in ("VBR", "AVBR"):
                 params.extend(["-p", f"maxrate={peak_bits}"])
