@@ -41,7 +41,7 @@ def _select_peer(peers: list[WFDPeer], selector: Optional[str]) -> WFDPeer:
     raise WFDNotReady(f"No peer matched selector: {selector}")
 
 def _scan_and_select(interface: Optional[str], selector: Optional[str],
-                     timeout: int, attempts: int = 3) -> WFDPeer:
+                     timeout: int, attempts: int = 6) -> WFDPeer:
     """Scans and resolves peer. If no selector, does one scan and opens prompt.
     With selector, retries non-deterministic scans
     until resolved or raises original error.
@@ -203,7 +203,7 @@ def _parse_peer_name(details: str) -> str:
             return stripped.partition("=")[2]
     return ""
 
-def active_scan(interface: Optional[str] = None, timeout: int = 8) -> list[WFDPeer]:
+def active_scan(interface: Optional[str] = None, timeout: int = 15) -> list[WFDPeer]:
     """Run an active Wi-Fi Direct peer scan.
     """
     try:
