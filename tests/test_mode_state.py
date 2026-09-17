@@ -149,11 +149,13 @@ class ModeStateEdgeCaseTest(unittest.TestCase):
         ids = [m["id"] for m in mode_state.supported_modes(sink)]
         self.assertIn("1920x1200p30", ids)
 
-    def test_filters_modes_above_sink_level(self):
-        # level 0x01 => max WFD_LEVEL_31; 1080p30 needs LEVEL_40 and must drop.
-        sink = _sink(WFD_CEA_720P30 | WFD_CEA_1080P30, level="01")
+    def test_cea_bits_not_gated_by_short_level_bitmap(self):
+        # Realtek-class sinks often omit higher level bits while still setting
+        # the CEA mode bit — trust CEA (Smart View negotiates 1080p60 this way).
+        sink = _sink(WFD_CEA_720P30 | WFD_CEA_1080P30 | WFD_CEA_1080P60, level="08")
         ids = [m["id"] for m in mode_state.supported_modes(sink)]
-        self.assertEqual(ids, ["1280x720p30"])
+        self.assertIn("1920x1080p60", ids)
+        self.assertIn("1280x720p30", ids)
 
     def test_write_oserror_is_swallowed(self):
         os.environ["FLUXCAST_WFD_MODE_STATE"] = "/proc/does-not-allow-writes/modes.json"

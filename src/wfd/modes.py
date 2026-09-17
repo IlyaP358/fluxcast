@@ -189,6 +189,15 @@ def _mode_supported(
     max_level: Optional[int],
     allow_interlaced: bool,
 ) -> bool:
+    """Whether a mode is negotiable from sink CEA/VESA masks.
+
+    ``max_level`` is accepted for API compatibility but **not** used as a hard
+    gate: cheap sinks (e.g. Realtek 8192CU) often set CEA bits for 1080p60
+    while advertising an H.264 level bitmap that omits 4.2. Smart View still
+    selects 1080p60 from the CEA mask; we follow that. M4 still announces the
+    level required by the chosen mode via ``_wfd_level_for_mode``.
+    """
+    del max_level  # CEA/VESA bits are authoritative for mode presence.
     if mode.interlaced and not allow_interlaced:
         return False
     if mode.table == "vesa":
@@ -197,8 +206,6 @@ def _mode_supported(
     else:
         if not (cea_supported & mode.bit):
             return False
-    if max_level is not None and _wfd_level_for_mode(mode) > max_level:
-        return False
     return True
 
 

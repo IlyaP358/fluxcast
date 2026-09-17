@@ -11,7 +11,7 @@ import os
 from typing import Optional
 
 from .config import WFDCEAMode, WFDVideoFormat
-from .modes import WFD_CEA_MODES, WFD_VESA_MODES, _max_wfd_level, _wfd_level_for_mode
+from .modes import WFD_CEA_MODES, WFD_VESA_MODES
 
 
 def _mode_state_path() -> str:
@@ -19,10 +19,12 @@ def _mode_state_path() -> str:
 
 
 def supported_modes(sink_format: Optional[WFDVideoFormat]) -> list[dict]:
-    """Return FluxCast-known modes the sink's CEA/VESA masks allow."""
+    """Return FluxCast-known modes the sink's CEA/VESA masks allow.
+
+    H.264 level bitmap is not used as a hard filter — see ``_mode_supported``.
+    """
     if sink_format is None:
         return []
-    max_level = _max_wfd_level(sink_format.level)
     out: list[dict] = []
     for bit, mode in {**WFD_CEA_MODES, **WFD_VESA_MODES}.items():
         if mode.table == "vesa":
@@ -31,8 +33,6 @@ def supported_modes(sink_format: Optional[WFDVideoFormat]) -> list[dict]:
         else:
             if not (sink_format.cea_mask & bit):
                 continue
-        if max_level is not None and _wfd_level_for_mode(mode) > max_level:
-            continue
         out.append(_mode_dict(mode))
     # Stable UI order: progressive first, then by resolution / fps.
     out.sort(
