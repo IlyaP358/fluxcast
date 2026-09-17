@@ -33,6 +33,7 @@ from .peers import _default_wifi_interface
 from .wpas_ip import (
     configure_ip, get_p2p_role, mark_managed, mark_unmanaged, release_ip_config,
 )
+WPA_DEST = "fi.w1.wpa_supplicant1"
 WPA_IFACE = "fi.w1.wpa_supplicant1.Interface"
 WPA_P2P_IFACE = "fi.w1.wpa_supplicant1.Interface.P2PDevice"
 
