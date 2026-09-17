@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 from .config import WFDCEAMode, WFDMediaConfig, WFDVideoFormat
@@ -223,6 +224,28 @@ def _score_mode(
     return (-size_pen, -fps_pen, hd_bonus, mode.width * mode.height, mode.fps)
 
 
+def _mode_policy() -> str:
+    """RTSP mode pick policy.
+
+    ``best_advertised`` (default): highest progressive sink mode by pixel-rate
+    (width×height×fps). ``match_settings``: honor ``--fps`` / ``--output-res``.
+    """
+    raw = (os.environ.get("FLUXCAST_WFD_MODE_POLICY") or "best_advertised").strip().lower()
+    if raw in ("match_settings", "settings", "prefer_settings", "preferred"):
+        return "match_settings"
+    return "best_advertised"
+
+
+def _best_advertised_mode(modes: list[WFDCEAMode]) -> Optional[WFDCEAMode]:
+    """Pick the richest progressive mode (pixel-rate, then pixels, then fps)."""
+    if not modes:
+        return None
+    return max(
+        modes,
+        key=lambda m: (m.width * m.height * m.fps, m.width * m.height, m.fps),
+    )
+
+
 def _choose_cea_mode(
     config: WFDMediaConfig,
     sink_format: Optional[WFDVideoFormat],
@@ -246,8 +269,16 @@ def _choose_cea_mode(
             allow_interlaced=allow_interlaced,
         )
 
-    # Prefer a hand-ordered shortlist when the request matches common buckets,
-    # then fall back to scoring every progressive mode the sink allows.
+    progressive = [m for m in all_modes.values() if supports(m)]
+
+    # Default: negotiate the best progressive mode the sink advertised.
+    # Capture/encode then follow that mode (see RTSP handler _start_media).
+    if sink_format is not None and _mode_policy() == "best_advertised":
+        best = _best_advertised_mode(progressive)
+        if best is not None:
+            return best
+
+    # match_settings (or unknown sink): prefer buckets near --fps / --output-res.
     wants_1200 = resolution is not None and resolution[0] >= 1920 and resolution[1] > 1080
     wants_480 = resolution is not None and resolution[0] <= 720 and resolution[1] <= 480
     wants_576 = resolution is not None and resolution[1] == 576
@@ -323,11 +354,6 @@ def _choose_cea_mode(
         if mode is not None and supports(mode):
             return mode
 
-    progressive = [
-        m
-        for m in all_modes.values()
-        if supports(m)
-    ]
     if progressive:
         progressive.sort(
             key=lambda m: _score_mode(m, resolution=resolution, fps=fps),

@@ -16,6 +16,7 @@ from wfd.constants import (  # noqa: E402
     WFD_CEA_720P30,
     WFD_CEA_1080I60,
     WFD_CEA_1080P30,
+    WFD_CEA_1080P60,
     WFD_VESA_1200P30,
 )
 from wfd import mode_state  # noqa: E402
@@ -73,6 +74,33 @@ class SupportedModesTest(unittest.TestCase):
         mode = _choose_cea_mode(cfg, sink)
         self.assertFalse(mode.interlaced)
         self.assertEqual(mode.name, "720x480p60")
+
+    def test_best_advertised_prefers_1080p60_over_settings_30(self):
+        # Default policy ignores streamMode/fps preference when sink offers more.
+        sink = _sink(WFD_CEA_720P30 | WFD_CEA_1080P30 | WFD_CEA_1080P60, level="10")
+        cfg = WFDMediaConfig(monitor=None, output_resolution="1920x1080", fps=30)
+        with mock.patch.dict(os.environ, {"FLUXCAST_WFD_MODE_POLICY": "best_advertised"}):
+            mode = _choose_cea_mode(cfg, sink)
+        self.assertEqual(mode.name, "1920x1080p60")
+
+    def test_match_settings_honors_fps_30(self):
+        sink = _sink(WFD_CEA_720P30 | WFD_CEA_1080P30 | WFD_CEA_1080P60, level="10")
+        cfg = WFDMediaConfig(monitor=None, output_resolution="1920x1080", fps=30)
+        with mock.patch.dict(os.environ, {"FLUXCAST_WFD_MODE_POLICY": "match_settings"}):
+            mode = _choose_cea_mode(cfg, sink)
+        self.assertEqual(mode.name, "1920x1080p30")
+
+    def test_best_advertised_pixel_rate_beats_taller_30fps(self):
+        # 1080p60 (~124 Mpix/s) beats 1200p30 (~69 Mpix/s).
+        sink = _sink(
+            WFD_CEA_1080P30 | WFD_CEA_1080P60,
+            vesa_mask=WFD_VESA_1200P30,
+            level="20",
+        )
+        cfg = WFDMediaConfig(monitor=None, output_resolution="1920x1080", fps=30)
+        with mock.patch.dict(os.environ, {"FLUXCAST_WFD_MODE_POLICY": "best_advertised"}):
+            mode = _choose_cea_mode(cfg, sink)
+        self.assertEqual(mode.name, "1920x1080p60")
 
     def test_stable_sort_by_height_width_fps(self):
         sink = _sink(WFD_CEA_720P30 | WFD_CEA_1080P30)
