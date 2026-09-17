@@ -310,15 +310,23 @@ class WlrootsMixin:
         )
         return [] if damage_aware else ["-D"]
 
-    def _wf_capture_rate_args(self, wf_recorder: str) -> list[str]:
+    def _wf_capture_rate_args(
+        self, wf_recorder: str, *, vaapi_dmabuf: bool = False
+    ) -> list[str]:
         """Capture cadence flags for this wf-recorder build.
 
         Stock wlr-screencopy DMA: omit ``-r`` (it appends ``fps=N`` after
         ``scale_vaapi`` and forces VAAPI→software conversion).
 
-        ICC (ext-image-copy-capture): pass ``-r`` as the client request rate
-        (defaults to 60 without it). Only when the binary advertises ICC.
+        VAAPI DMA encode (``vaapi_dmabuf=True``): also omit ``-r``. Encoder
+        BRC still gets ``-p framerate=`` from ``_vaapi_rc_wf_params``. ICC
+        without ``-r`` defaults to 60 Hz client pacing — same target fps
+        without the post-``scale_vaapi`` fps filter tax.
+
+        ICC raw/pipe paths: pass ``-r`` as the client request rate.
         """
+        if vaapi_dmabuf:
+            return []
         if wf_recorder_supports_icc(wf_recorder):
             # -r matches config.fps (encode framerate). Override:
             # FLUXCAST_WFD_ICC_CAPTURE_FPS.
@@ -639,11 +647,12 @@ class WlrootsMixin:
             raise
 
         # Same -D / DAMAGE policy as the DMA paths (_wf_damage_flag).
+        # Omit -r on VAAPI DMA (see _wf_capture_rate_args vaapi_dmabuf=True).
         wf_cmd = [
             wf_recorder,
             "-y",
             *self._wf_damage_flag(),
-            *self._wf_capture_rate_args(wf_recorder),
+            *self._wf_capture_rate_args(wf_recorder, vaapi_dmabuf=True),
             "-o", monitor.name,
             "-c", "h264_vaapi",
             "-d", device,
@@ -728,7 +737,7 @@ class WlrootsMixin:
             wf_recorder,
             "-y",
             *self._wf_damage_flag(),
-            *self._wf_capture_rate_args(wf_recorder),
+            *self._wf_capture_rate_args(wf_recorder, vaapi_dmabuf=True),
             # -b 0 = max b-frames (not bitrate).
             "-o", monitor.name,
             "-c", "h264_vaapi",
