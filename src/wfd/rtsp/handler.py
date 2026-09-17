@@ -117,6 +117,33 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             return WFD_AUDIO_LPCM_48K
         return WFD_AUDIO_AAC
 
+    def _request_idr_frame(self) -> None:
+        """AOSP Converter::requestIDRFrame() analogue — no capture restart.
+
+        ffmpeg/VAAPI has no MediaCodec setParameters path; with GOP≈fps the
+        next sync frame arrives within ~1s. Touch a state file so link-watch
+        can count IDR pressure toward the adaptive ×0.6 loop without us
+        tearing RTP here.
+        """
+        from pathlib import Path
+
+        state = (os.environ.get("XDG_STATE_HOME") or "").strip()
+        if not state:
+            state = str(Path.home() / ".local" / "state")
+        marker = Path(state) / "omarchy-miracast" / "idr-request.stamp"
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(f"{time.time():.3f}\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"[FluxCast WFD RTSP] idr stamp write failed: {exc}")
+        # Optional: if media exposes a force-keyframe hook later, call it here.
+        media = self.media
+        if media is not None and hasattr(media, "request_idr_frame"):
+            try:
+                media.request_idr_frame()  # type: ignore[attr-defined]
+            except Exception as exc:
+                print(f"[FluxCast WFD RTSP] request_idr_frame hook failed: {exc}")
+
     def _send_bytes(self, text: str) -> None:
         with self._write_lock:
             self.wfile.write(text.encode("utf-8"))
@@ -366,10 +393,15 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
 
         if method == "SET_PARAMETER":
             if "wfd_idr_request" in msg.body:
-                # IDR will arrive naturally within the next keyframe interval (~1s).
-                # restart_video() is only meaningful with intra-refresh=true (no IDR
-                # frames); with it removed, restarting kills a healthy pipeline.
-                print("[FluxCast WFD RTSP] Sink requested IDR; next keyframe satisfies it.")
+                # AOSP WifiDisplaySource: requestIDRFrame() only — do NOT tear
+                # down capture. With GOP≈1s (vaapiGop=30 @ 30fps) the next
+                # keyframe satisfies WFD §4.10.5 recovery. Bitrate adaptation
+                # stays on the latency loop (×0.6 / ×1.1), not on every IDR.
+                print(
+                    "[FluxCast WFD RTSP] Sink requested IDR "
+                    "(AOSP-style: next keyframe satisfies; no pipeline restart)"
+                )
+                self._request_idr_frame()
             self._send_response(msg, headers=self._session_header())
             return
 
@@ -655,15 +687,20 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             audio_delta = (
                 (audio_frames - prev_audio) if prev_audio is not None else None
             )
-            if video_delta is not None and audio_delta is not None:
-                if video_delta <= 0 and audio_delta > 0:
+            # Flat video alone is a stall. Requiring audio_delta>0 missed the
+            # common failure where *both* counters freeze (wf-recorder wedged)
+            # and we never rebound until TX≈0 killed the session.
+            if video_delta is not None:
+                if video_delta <= 0:
                     self._video_stall_streak += 1
-                elif video_delta > 0:
+                else:
                     self._video_stall_streak = 0
-            if video_delta is not None and video_delta > 0:
-                self._stagnant_tx_streak = 0
+            # Do NOT clear stagnant_tx on video_delta>0 — after a bad rebind,
+            # frames_sent can advance while P2P air TX stays flat (EBADF / dead
+            # RTP). Air-TX stagnant must remain an independent recovery signal.
 
-            video_stall_limit = 2
+            # Was 2 — too quick to rebind on brief encode hiccups / counter resets.
+            video_stall_limit = 4
             if self._video_stall_streak >= video_stall_limit:
                 print(
                     "[FluxCast WFD Media] VIDEO_STALL "
@@ -698,18 +735,37 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             if current is not None and self._last_interval_tx is not None:
                 interval = max(0, current - self._last_interval_tx)
                 if interval < 4 * 1024:
-                    self._stagnant_tx_streak += 1
+                    # Frames moving + air quiet is the post-rebind RTP death
+                    # mode — escalate faster than pure silence.
+                    bump = 2 if (video_delta is not None and video_delta > 0) else 1
+                    self._stagnant_tx_streak += bump
                 else:
                     self._stagnant_tx_streak = 0
-                stagnant_limit = 12 if lpcm is not None else 6
+                stagnant_limit = 6 if lpcm is not None else 6
                 if self._stagnant_tx_streak >= stagnant_limit:
+                    fails = int(getattr(self, "_stagnant_rebind_fails", 0) or 0) + 1
+                    self._stagnant_rebind_fails = fails
+                    self._stagnant_tx_streak = 0
+                    if fails >= 3:
+                        print(
+                            "[FluxCast WFD Media] RTP TX stagnant after "
+                            f"{fails} rebinds ({interval} B / probe, "
+                            f"video_delta={video_delta}) — giving up",
+                            flush=True,
+                        )
+                        try:
+                            media.stop()
+                        except Exception:
+                            pass
+                        return
                     print(
                         "[FluxCast WFD Media] RTP TX stagnant "
-                        f"({interval} B / probe); rebinding desktop capture"
+                        f"({interval} B / probe, video_delta={video_delta}); "
+                        f"rebinding desktop capture ({fails}/3)",
+                        flush=True,
                     )
                     try:
                         media.restart_video()
-                        self._stagnant_tx_streak = 0
                         self._video_stall_streak = 0
                         self._last_interval_tx = None
                         self._last_video_frames = None

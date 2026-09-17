@@ -141,6 +141,9 @@ class WlrootsMixin:
         preference: str,
         fallback: bool,
     ) -> None:
+        # Remember path so mid-session restart_video can leave a wedged DMA-BUF
+        # session for VAAPI pipe instead of recreating the same freeze.
+        self._last_capture_path = capture_path
         _append_latency_log(
             getattr(self.config, "latency_log_path", None),
             "capture_encode",
@@ -260,16 +263,29 @@ class WlrootsMixin:
         floor_kbits = _quality_floor_kbits(parsed_out[0], parsed_out[1], self.config.fps)
         plan = active_power_plan()
         throttled = encode_throttled(plan)
-        if throttled:
+        # AOSP/Miracast adaptive bitrate (encode.env / congestion-cut) must not
+        # be silently raised back to the 8 Mbps "desktop clarity" floor — that
+        # fought every ×0.6 cut and left artifacts while settings said 3M.
+        honor = (
+            (os.environ.get("FLUXCAST_WFD_HONOR_BITRATE") or "").strip().lower()
+            in ("1", "true", "yes", "on")
+            or (os.environ.get("FLUXCAST_WFD_ENCODE_ENV_FILE") or "").strip() != ""
+        )
+        if throttled or honor:
             effective_kbits = requested_kbits
         else:
             effective_kbits = max(requested_kbits, floor_kbits)
         effective_bitrate = _kbits_to_bitrate_text(effective_kbits)
         effective_bitrate = apply_bitrate_plan(effective_bitrate, throttled=throttled)
-        if effective_kbits > requested_kbits and not throttled:
+        if effective_kbits > requested_kbits and not throttled and not honor:
             print(
                 "[FluxCast WFD Media] Raising bitrate for desktop clarity: "
                 f"{self.config.bitrate} -> {effective_bitrate}"
+            )
+        elif honor and requested_kbits < floor_kbits:
+            print(
+                "[FluxCast WFD Media] Honoring adaptive bitrate "
+                f"{effective_bitrate} (below clarity floor {_kbits_to_bitrate_text(floor_kbits)})"
             )
         return {
             "src_res": src_res,
@@ -592,6 +608,7 @@ class WlrootsMixin:
             self.sink_rtp_port,
             local_ip=self.local_ip,
             local_port=self.config.source_port,
+            bind_iface=self.tx_interface,
         )
 
         # appsink: max-buffers=1 drop=true (drop whole AUs; no intermediate queue).
@@ -887,6 +904,7 @@ class WlrootsMixin:
             self.sink_rtp_port,
             local_ip=self.local_ip,
             local_port=self.config.source_port,
+            bind_iface=self.tx_interface,
         )
         vid_pipeline = (
             f"fdsrc fd={r_fd} do-timestamp=true ! "

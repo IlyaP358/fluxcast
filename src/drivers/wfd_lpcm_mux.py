@@ -419,23 +419,44 @@ class WFDLPCMMuxer:
         dest_port: int,
         local_ip: str | None = None,
         local_port: int | None = None,
+        bind_iface: str | None = None,
     ):
         self._dest   = (dest_ip, dest_port)
+        self._bind_ip = local_ip
+        self._bind_port = int(local_port) if local_port else None
+        self._bind_iface = bind_iface
         self._sock   = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Force RTP onto the P2P iface. Without this, after rebind packets can
+        # leave via STA wifi while Sender health still counts frames_sent —
+        # TV stays dark and p2p tx+ goes flat.
+        if self._bind_iface:
+            try:
+                self._sock.setsockopt(
+                    socket.SOL_SOCKET,
+                    socket.SO_BINDTODEVICE,
+                    self._bind_iface.encode("utf-8") + b"\0",
+                )
+            except OSError as exc:
+                log.warning(
+                    "SO_BINDTODEVICE(%s) failed (need CAP_NET_RAW?): %s",
+                    self._bind_iface,
+                    exc,
+                )
         # WFD RTSP advertises a fixed client_rtp_ports source port; sinks often
         # drop RTP that does not come from that port.
-        if local_port:
+        if self._bind_port:
             try:
-                self._sock.bind((local_ip or "0.0.0.0", int(local_port)))
+                self._sock.bind((self._bind_ip or "0.0.0.0", self._bind_port))
             except OSError as exc:
                 self._sock.close()
                 raise OSError(
-                    f"LPCM muxer could not bind RTP source port {local_port}: {exc}"
+                    f"LPCM muxer could not bind RTP source port {self._bind_port}: {exc}"
                 ) from exc
         self._rtp    = _RTPFramer()
         self._running = False
         self._audio_packer = LPCMAudioPacker()
+        self.udp_send_failures: int = 0
 
         # Continuity counters (mutable lists so helpers can mutate in-place)
         self._cc_pat = [0]
@@ -547,15 +568,61 @@ class WFDLPCMMuxer:
     def _ns_to_90k(self, ns: int) -> int:
         return int(ns * RTP_CLOCK_HZ / 1_000_000_000) & 0x1FFFFFFFF
 
-    def _send(self, ts_packets: list[bytes]) -> None:
+    def _revive_socket(self) -> None:
+        """Recreate the RTP UDP socket after EBADF / close races during rebind."""
+        import errno as _errno
+
+        old = self._sock
+        self._sock = None
+        try:
+            if old is not None:
+                old.close()
+        except OSError:
+            pass
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        iface = getattr(self, "_bind_iface", None)
+        if iface:
+            try:
+                sock.setsockopt(
+                    socket.SOL_SOCKET,
+                    socket.SO_BINDTODEVICE,
+                    iface.encode("utf-8") + b"\0",
+                )
+            except OSError as exc:
+                log.warning("SO_BINDTODEVICE revive(%s) failed: %s", iface, exc)
+        local_port = getattr(self, "_bind_port", None)
+        local_ip = getattr(self, "_bind_ip", None)
+        if local_port:
+            try:
+                sock.bind((local_ip or "0.0.0.0", int(local_port)))
+            except OSError as exc:
+                sock.close()
+                log.error("LPCM muxer socket revive bind failed: %s", exc)
+                return
+        self._sock = sock
+        log.warning("LPCM muxer RTP socket revived after send failure")
+
+    def _send(self, ts_packets: list[bytes]) -> bool:
+        """Send RTP. Returns False if the UDP socket is dead (caller should not
+        count the frame as delivered)."""
         if not ts_packets:
-            return
+            return True
+        if self._sock is None:
+            return False
         raw = b"".join(ts_packets)
+        ok = True
         for pkt in self._rtp.frame(raw):
             try:
                 self._sock.sendto(pkt, self._dest)
             except OSError as e:
                 log.warning("UDP send error: %s", e)
+                ok = False
+                # EBADF: stop() closed under us, or fd recycled mid-rebind.
+                if getattr(e, "errno", None) in (9, 1009):  # EBADF
+                    self._revive_socket()
+                break
+        return ok
 
     def _drain_audio_packets(self) -> list[bytes]:
         """Return TS packets for any complete LPCM access units."""
@@ -663,19 +730,23 @@ class WFDLPCMMuxer:
                         PID_VID, PES_SID_VIDEO, pts_90k,
                         vid_data, self._cc_vid,
                     )
-                    self.frames_sent += 1
                     frame_counter += 1
-                    self._send(ts_out)
+                    if self._send(ts_out):
+                        self.frames_sent += 1
+                    else:
+                        self.udp_send_failures += 1
                 else:
                     # PAT + PMT
                     psi = self._maybe_psi(now, wall_start)
                     if psi:
-                        self._send(psi)
+                        if not self._send(psi):
+                            self.udp_send_failures += 1
 
                 # Drain pending audio
                 aud_out = self._drain_audio_packets()
                 if aud_out:
-                    self._send(aud_out)
+                    if not self._send(aud_out):
+                        self.udp_send_failures += 1
 
         finally:
             gc.enable()
@@ -720,8 +791,19 @@ class WFDLPCMMuxer:
 
         if self._mux_thread:
             self._mux_thread.join(timeout=3.0)
+            if self._mux_thread.is_alive():
+                log.error(
+                    "WFDLPCMMuxer mux thread still alive after join; "
+                    "closing socket to unblock"
+                )
 
-        self._sock.close()
+        sock = self._sock
+        self._sock = None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
         log.info("WFDLPCMMuxer stopped")
 
 

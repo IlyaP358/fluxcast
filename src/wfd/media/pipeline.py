@@ -278,8 +278,12 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
             except Exception as exc:
                 print(f"[FluxCast WFD Media] encode.env reload skipped: {exc}")
 
-            # Mid-session: stay on VAAPI pipe when that is the configured
-            # preference (avoid silent CPU fallback after a transient hang).
+            # Mid-session rebind engine lock:
+            # - If we were on DMA-BUF (or preference is dmabuf), lock to VAAPI
+            #   *pipe* for the rest of this RTSP session. Re-creating DMA-BUF
+            #   after VIDEO_STALL / RTP-stagnant is what left frames advancing
+            #   with P2P air TX flat (TV dark) every ~30s today.
+            # - If preference is already pipe/vaapi, stay there (no CPU fallthrough).
             stay = (_os_env.environ.get("FLUXCAST_WFD_PIPE_STAY_VAAPI") or "1").strip().lower()
             stay_on = stay in ("1", "true", "yes", "on", "")
             try:
@@ -288,12 +292,37 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
                 pref = capture_encode_preference()
             except Exception:
                 pref = ""
-            if stay_on and pref in ("vaapi", "pipe"):
+            last_path = getattr(self, "_last_capture_path", None)
+            if pref == "dmabuf" or last_path == "dmabuf":
+                self._restart_engine_lock = "vaapi"
+                print(
+                    "[FluxCast WFD Media] Mid-session rebind: leaving DMA-BUF "
+                    "for GPU · VAAPI (pipe) after capture impairment",
+                    flush=True,
+                )
+            elif stay_on and pref in ("vaapi", "pipe"):
                 self._restart_engine_lock = "vaapi"
             elif stay_on and pref == "cpu":
                 self._restart_engine_lock = "cpu"
             else:
                 self._restart_engine_lock = None
+
+            # Refresh P2P iface/IP before rebuilding the muxer — a stale
+            # tx_interface / local_ip after GO flap makes RTP leave the wrong NIC.
+            try:
+                if self.local_ip:
+                    self.tx_interface = _interface_for_ip(self.local_ip)
+                    self.tx_baseline = _netdev_tx_bytes(self.tx_interface)
+                    print(
+                        f"[FluxCast WFD Media] RTP bind refresh: "
+                        f"ip={self.local_ip} iface={self.tx_interface}",
+                        flush=True,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[FluxCast WFD Media] RTP bind refresh failed: {exc}",
+                    flush=True,
+                )
 
             self._start_desktop()
             self.remember_capture_geometry()
