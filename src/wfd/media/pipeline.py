@@ -287,7 +287,7 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
             #   first link-watch TX≈0 grace restart permanently abandons DMA.
             stay = (_os_env.environ.get("FLUXCAST_WFD_PIPE_STAY_VAAPI") or "1").strip().lower()
             stay_on = stay in ("1", "true", "yes", "on", "")
-            sticky = (
+            sticky_env = (
                 _os_env.environ.get("FLUXCAST_WFD_DMABUF_STICKY") or ""
             ).strip().lower() in ("1", "true", "yes", "on")
             try:
@@ -297,11 +297,15 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
             except Exception:
                 pref = ""
             last_path = getattr(self, "_last_capture_path", None)
+            # Prefer DMA whenever the RENDER ENGINE pref is dmabuf (QVBR or CQP).
+            # Env STICKY=1 is optional reinforcement; pref alone must not fall
+            # through to pipe on every SIGUSR1 or DMA never sticks.
+            sticky = sticky_env or pref == "dmabuf"
             if sticky and (pref == "dmabuf" or last_path == "dmabuf"):
                 self._restart_engine_lock = None
                 print(
                     "[FluxCast WFD Media] Mid-session rebind: DMA-BUF sticky "
-                    "(FLUXCAST_WFD_DMABUF_STICKY) — retrying DMA",
+                    f"(pref={pref or last_path}) — retrying DMA",
                     flush=True,
                 )
             elif pref == "dmabuf" or last_path == "dmabuf":
