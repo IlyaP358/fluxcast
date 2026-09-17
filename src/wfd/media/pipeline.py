@@ -279,13 +279,17 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
                 print(f"[FluxCast WFD Media] encode.env reload skipped: {exc}")
 
             # Mid-session rebind engine lock:
-            # - If we were on DMA-BUF (or preference is dmabuf), lock to VAAPI
-            #   *pipe* for the rest of this RTSP session. Re-creating DMA-BUF
-            #   after VIDEO_STALL / RTP-stagnant is what left frames advancing
-            #   with P2P air TX flat (TV dark) every ~30s today.
-            # - If preference is already pipe/vaapi, stay there (no CPU fallthrough).
+            # - Default: if we were on DMA-BUF, lock to VAAPI *pipe* for the rest
+            #   of this RTSP session (re-creating DMA after VIDEO_STALL left air
+            #   TX flat / TV dark).
+            # - FLUXCAST_WFD_DMABUF_STICKY=1 (Smart View QVBR): keep trying DMA
+            #   across intentional SIGUSR1 encode.env rebinds — otherwise the
+            #   first link-watch TX≈0 grace restart permanently abandons DMA.
             stay = (_os_env.environ.get("FLUXCAST_WFD_PIPE_STAY_VAAPI") or "1").strip().lower()
             stay_on = stay in ("1", "true", "yes", "on", "")
+            sticky = (
+                _os_env.environ.get("FLUXCAST_WFD_DMABUF_STICKY") or ""
+            ).strip().lower() in ("1", "true", "yes", "on")
             try:
                 from ..hw_encode import capture_encode_preference
 
@@ -293,7 +297,14 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
             except Exception:
                 pref = ""
             last_path = getattr(self, "_last_capture_path", None)
-            if pref == "dmabuf" or last_path == "dmabuf":
+            if sticky and (pref == "dmabuf" or last_path == "dmabuf"):
+                self._restart_engine_lock = None
+                print(
+                    "[FluxCast WFD Media] Mid-session rebind: DMA-BUF sticky "
+                    "(FLUXCAST_WFD_DMABUF_STICKY) — retrying DMA",
+                    flush=True,
+                )
+            elif pref == "dmabuf" or last_path == "dmabuf":
                 self._restart_engine_lock = "vaapi"
                 print(
                     "[FluxCast WFD Media] Mid-session rebind: leaving DMA-BUF "
