@@ -70,6 +70,7 @@ python3 src/main.py --protocol cast
 - `--wfd-interface IFACE`
 - `--wfd-timeout SEC`
 - `--wfd-go-intent 0-15`
+- `--wfd-go-5ghz` USB GO only: keep 5 GHz in the GO channel set (default: 2.4 GHz)
 - `--wfd-p2p-backend nm|wpas` talk to wpa_supplicant directly instead of NetworkManager (default `nm`)
 - `--wfd-p2p-channel 1|6|11` force the P2P group onto this 2.4GHz channel (`wpas` backend only)
 - `--wfd-uibc` enable the input back channel (control the desktop from the sink)
@@ -139,6 +140,7 @@ sections also accept `host`, `port`, `discover-timeout`, `transport`, and
 - `wfd-interface`
 - `wfd-timeout`
 - `wfd-go-intent`
+- `wfd-go-5ghz`
 - `wfd-uibc`
 
 `monitor` preselects the capture output for that mode by its name (as shown by
@@ -202,6 +204,13 @@ and protocol selection remain controlled by the tray and cannot be set here.
     session; raise it only if a specific sink requires a higher intent.
   - Does not claim or require that the TV becomes the group owner or that the
     P2P address range changes.
+- `--wfd-go-5ghz`
+  - USB / secondary-radio GO only. Default USB GO drops 5 GHz from the
+    channel set (`p2p_no_go_freq` plus `p2p_pref_chan`) so GO Negotiation
+    lands on 2.4 GHz without `p2p_connect freq=` (which hops off the peer
+    listen channel and breaks Confirm). This flag keeps 5 GHz in the set.
+  - Ignored on NetworkManager / non-USB ifaces. Equivalent env:
+    `FLUXCAST_WFD_GO_5GHZ=1`.
 - `--wfd-p2p-backend`
   - `nm` (default) brings up the P2P link through NetworkManager.
   - `wpas` talks to wpa_supplicant's own D-Bus interface directly instead,
@@ -363,6 +372,9 @@ historical software encode pipeline (`libx264` over a raw pipe).
 | `FLUXCAST_WFD_VBV_MULTIPLIER` | `0.5` | CBR `-bufsize` as a fraction of bitrate (~seconds of VBV). Values ≪0.5 correlated with pipe buffer-pool / TX stalls; `2.0` adds lag. |
 | `FLUXCAST_WFD_VAAPI_PIPE_LOW_LATENCY` | unset | When `1`/`true`, pipe ffmpeg uses `nobuffer`/`low_delay` and may shrink `thread_queue_size`. Leave unset for production; stack with tiny VBV caused lockups in A/B. |
 | `FLUXCAST_WFD_INTERFACE` | auto | Managed Wi‑Fi iface for P2P. Unset/`auto` prefers P2P-GO-capable ifaces that are not already NM-connected (e.g. idle USB vs STA). |
+| `FLUXCAST_WFD_GO_5GHZ` | unset | USB GO only. `1`/`true`/`yes`/`on` keeps 5 GHz in the GO channel set (same as `--wfd-go-5ghz`). Default USB GO is 2.4 GHz only. |
+| `FLUXCAST_WFD_GO_2GHZ_MHZ` | unset | USB GO only. Integer MHz (2400–2499) to keep as the sole 2.4 GHz GO channel when it is enabled on the phy (e.g. `2462` for channel 11). Still not `p2p_connect freq=`. |
+| `FLUXCAST_USB_WPA` | `wpa_supplicant` on `PATH` | Absolute path to the `wpa_supplicant` binary used for dedicated USB P2P. NetworkManager keeps the system daemon on the primary STA iface. |
 | `FLUXCAST_WFD_WF_RECORDER_DAMAGE` | unset | Set to `1` / `true` / `yes` / `on` to omit `wf-recorder -D` (damage-aware capture). Default keeps `-D` for historical continuous capture. LPCM honors this the same as DMA paths. |
 | `FLUXCAST_WFD_WF_RECORDER_BIN` | unset | Absolute path to a `wf-recorder` binary. When set (and usable), preferred over `PATH`. Opt-in for a local [PR #347](https://github.com/ammen99/wf-recorder/pull/347) ICC build — **not** probed automatically. |
 | `FLUXCAST_WFD_WF_RECORDER_PROTO` | unset / `auto` | `icc` requires an ICC-capable binary (`--toplevel` / `ext-copy-capture`). In FluxCast alone, a non-ICC binary with `PROTO=icc` yields no recorder; Omarchy `miracast-ctl` fail-softs to PATH instead. `wlr` / unset / `auto` accept any usable binary (default stock `PATH`). |

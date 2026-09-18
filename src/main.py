@@ -52,6 +52,7 @@ Wi-Fi Display (Miracast) Options:
     --wfd-interface IFACE    Wi-Fi interface to use, e.g. wlan0
     --wfd-timeout N          Wi-Fi Direct scan timeout in seconds (default: 8)
     --wfd-go-intent 0-15     P2P group-owner intent; 0 lets the TV be the owner (default: 0)
+    --wfd-go-5ghz            USB GO only: keep 5 GHz in the GO channel set (default: 2.4 GHz)
     --wfd-monitor NAME       Deprecated alias for --monitor
 """
 
@@ -190,6 +191,10 @@ def parse_args() -> argparse.Namespace:
                      help="P2P group-owner intent (0-15); 0 forces the TV to be "
                           "the group owner, which most Miracast TVs require to "
                           "start the session (default: 0)")
+    wfd.add_argument("--wfd-go-5ghz", action="store_true", dest="wfd_go_5ghz",
+                     help="USB GO only: keep 5 GHz in the GO channel set. "
+                          "Default is 2.4 GHz only on USB (p2p_no_go_freq). "
+                          "Ignored on non-USB (NetworkManager) ifaces.")
     wfd.add_argument("--wfd-p2p-channel", type=int, default=None, dest="wfd_p2p_channel",
                      help="Force the P2P group onto this channel when we are GO "
                           "(2.4GHz 1|6|11 or non-DFS 5GHz 36|40|44|48|149|153|157|161). "

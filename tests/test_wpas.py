@@ -238,5 +238,37 @@ class WpaSupplicantPropertyPrivilegeTest(unittest.TestCase):
         self._assert_no_escalation(run)
 
 
+class WaitForLeaseTest(unittest.TestCase):
+    """Lease wait must survive root-owned files and MAC dash vs colon."""
+
+    def test_reads_lease_when_mac_uses_dashes(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            lease = Path(tmp) / "leases"
+            lease.write_text("123 aa-bb-cc-dd-ee-ff 192.168.49.9 * *\n")
+            with mock.patch.object(wpas_ip, "_sudo_run", return_value=_completed()):
+                ip = wpas_ip._wait_for_lease(str(lease), "AA:BB:CC:DD:EE:FF", timeout=0.2)
+            self.assertEqual(ip, "192.168.49.9")
+
+    def test_parses_dhcpack_from_log(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            lease = Path(tmp) / "leases"
+            log = Path(tmp) / "dnsmasq.log"
+            lease.write_text("")
+            log.write_text(
+                "dnsmasq-dhcp: DHCPACK(p2p-wlan0-5) 192.168.49.10 46:d2:44:e4:37:2f sink\n"
+            )
+            with mock.patch.object(wpas_ip, "_sudo_run", return_value=_completed()):
+                ip = wpas_ip._wait_for_lease(
+                    str(lease), PEER_MAC, timeout=0.2, dnsmasq_log=str(log)
+                )
+            self.assertEqual(ip, "192.168.49.10")
+
+
 if __name__ == "__main__":
     unittest.main()

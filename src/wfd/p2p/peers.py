@@ -321,8 +321,8 @@ def active_scan(interface: Optional[str] = None, timeout: int = 15) -> list[WFDP
     """Run an active Wi-Fi Direct peer scan.
 
     Prefer NetworkManager StartFind, but if it returns no peers (common on
-    USB mt76x0u where NM's peer list stays empty while wpa_cli still sees
-    sinks), fall through to wpa_cli p2p_find.
+    some USB / secondary radios where NM's peer list stays empty while
+    wpa_cli still sees sinks), fall through to wpa_cli p2p_find.
     """
     nm_error: Optional[WFDNotReady] = None
     try:
