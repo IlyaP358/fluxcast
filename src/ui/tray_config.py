@@ -135,6 +135,7 @@ _MODE_OPTIONS = {
         "wfd-interface": _Option(_text),
         "wfd-timeout": _Option(_positive_int),
         "wfd-go-intent": _Option(_go_intent),
+        "wfd-go-5ghz": _Option(_boolean, is_flag=True),
         "wfd-uibc": _Option(_boolean, is_flag=True),
     },
     "dlna": _DLNA_CAST_OPTIONS,

@@ -210,6 +210,54 @@ def _ffmpeg_encoders() -> Check:
     )
 
 
+def _ffmpeg_encoder_listed(blob: str, name: str) -> bool:
+    """True when `ffmpeg -encoders` lists `name` as its own table row."""
+    return f" {name} " in f" {blob} " or f"\n{name} " in blob or f" {name}\n" in blob
+
+
+def _wfd_hw_encode_hint() -> Check:
+    """Surface optional GPU encode when the default libx264 path is selected.
+
+    Hardware encode is wired into the wlroots/wf-recorder capture path only.
+    """
+    prefer = os.environ.get("FLUXCAST_WFD_ENCODER", "libx264").strip().lower() or "libx264"
+    if prefer not in ("libx264", "x264", "software", "sw"):
+        return Check(
+            "wfd hw encode",
+            STATUS_OK,
+            "GPU encode opted in via FLUXCAST_WFD_ENCODER",
+            f"FLUXCAST_WFD_ENCODER={prefer} (wlroots/wf-recorder path)",
+        )
+
+    ffmpeg = _first_matching_command(["ffmpeg", "/usr/sbin/ffmpeg"])
+    if not ffmpeg:
+        return Check("wfd hw encode", STATUS_SKIP, "ffmpeg is required", "not found")
+
+    try:
+        result = _run([ffmpeg, "-hide_banner", "-encoders"], timeout=5.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return Check("wfd hw encode", STATUS_SKIP, "could not query ffmpeg encoders", str(exc))
+
+    blob = result.stdout + result.stderr
+    available = [
+        name for name in ("h264_vaapi", "h264_qsv") if _ffmpeg_encoder_listed(blob, name)
+    ]
+    if not available:
+        return Check(
+            "wfd hw encode",
+            STATUS_SKIP,
+            "no optional hardware H.264 encoder detected",
+            "default libx264 path is fine",
+        )
+    return Check(
+        "wfd hw encode",
+        STATUS_WARN,
+        "hardware H.264 is available; default encode stays libx264",
+        "set FLUXCAST_WFD_ENCODER=auto (or vaapi/qsv) to try GPU encode on the "
+        f"wlroots/wf-recorder path; detected={', '.join(available)}",
+    )
+
+
 _PORTAL_BACKENDS = [
     "xdg-desktop-portal-hyprland",
     "xdg-desktop-portal-kde",
@@ -847,6 +895,7 @@ def run_diagnostics(skip_firewall: bool = False) -> DiagnosticReport:
         ),
         _python_module_check("dbus_next", "WFD portal capture control plane for KDE/GNOME Wayland"),
         _ffmpeg_encoders(),
+        _wfd_hw_encode_hint(),
         _display_capture_check(),
         _audio_check(),
         _nmcli_check(),

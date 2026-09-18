@@ -370,5 +370,47 @@ class SubnetConflictCheckTest(unittest.TestCase):
         self.assertEqual(check.status, diagnostics.STATUS_WARN)
 
 
+
+class WfdHwEncodeHintTest(unittest.TestCase):
+    def tearDown(self):
+        os.environ.pop("FLUXCAST_WFD_ENCODER", None)
+
+    def test_warns_when_vaapi_available_but_default_is_libx264(self):
+        os.environ.pop("FLUXCAST_WFD_ENCODER", None)
+        encoders = " V..... libx264\n V..... h264_vaapi\n"
+        with mock.patch("diagnostics._first_matching_command", return_value="/usr/bin/ffmpeg"), \
+                mock.patch("diagnostics._run", return_value=_completed(encoders)):
+            check = diagnostics._wfd_hw_encode_hint()
+        self.assertEqual(check.name, "wfd hw encode")
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("FLUXCAST_WFD_ENCODER=auto", check.detail)
+        self.assertIn("wlroots", check.detail)
+
+    def test_ok_when_gpu_encoder_opted_in(self):
+        os.environ["FLUXCAST_WFD_ENCODER"] = "auto"
+        check = diagnostics._wfd_hw_encode_hint()
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+        self.assertIn("auto", check.detail)
+        self.assertIn("wlroots", check.detail)
+
+    def test_substring_noise_does_not_count_as_encoder(self):
+        os.environ.pop("FLUXCAST_WFD_ENCODER", None)
+        # Old "name in blob" matched this; row-shaped matching must not.
+        encoders = "h264_vaapi_helper is not listed\n V..... libx264\n"
+        with mock.patch("diagnostics._first_matching_command", return_value="/usr/bin/ffmpeg"), \
+                mock.patch("diagnostics._run", return_value=_completed(encoders)):
+            check = diagnostics._wfd_hw_encode_hint()
+        self.assertEqual(check.status, diagnostics.STATUS_SKIP)
+
+    def test_skip_when_no_hardware_encoder(self):
+        os.environ.pop("FLUXCAST_WFD_ENCODER", None)
+        encoders = " V..... libx264\n"
+        with mock.patch("diagnostics._first_matching_command", return_value="/usr/bin/ffmpeg"), \
+                mock.patch("diagnostics._run", return_value=_completed(encoders)):
+            check = diagnostics._wfd_hw_encode_hint()
+        self.assertEqual(check.status, diagnostics.STATUS_SKIP)
+
+
+
 if __name__ == "__main__":
     unittest.main()

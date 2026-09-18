@@ -22,6 +22,7 @@ import re
 import shutil
 import subprocess
 import time
+from pathlib import Path
 from typing import Optional
 
 from ..config import WFDNotReady
@@ -105,7 +106,7 @@ def release_ip_config(iface: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
-                timeout: float = 25.0) -> None:
+                timeout: float = 40.0) -> None:
     global _go_dnsmasq_lease_file
     gateway_ip = f"{WFD_P2P_SUBNET}.1"
     print(f"[FluxCast WFD] We are P2P Group Owner; assigning ourselves {gateway_ip}/24 "
@@ -134,10 +135,12 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
         raise WFDNotReady("dnsmasq not found - needed to serve DHCP while we're P2P GO.")
 
     lease_file = f"/tmp/fluxcast-dnsmasq-{iface}.leases"
-    try:
-        os.remove(lease_file)
-    except FileNotFoundError:
-        pass
+    # Previous GO runs start dnsmasq via sudo; the lease file is root-owned.
+    # os.remove then raises PermissionError and aborts after GROUP-STARTED.
+    _sudo_run(["pkill", "-f", f"dnsmasq.*{lease_file}"], timeout=5.0)
+    _sudo_run(["rm", "-f", lease_file], timeout=5.0)
+    _sudo_run(["touch", lease_file], timeout=5.0)
+    _sudo_run(["chmod", "a+rw", lease_file], timeout=5.0)
     _go_dnsmasq_lease_file = lease_file
     dnsmasq_log = f"/tmp/fluxcast-dnsmasq-{iface}.log"
 
@@ -175,17 +178,10 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
         "--no-resolv", "--no-hosts",
     ]
     print(f"[FluxCast WFD] Starting dnsmasq on {iface}...")
-    with open(dnsmasq_log, "wb") as log_fp:
-        # We don't track this via the returned Popen's .pid: depending on
-        # sudoers pty settings, sudo may exec-replace itself (pid stays the
-        # same) or fork-and-monitor (it doesn't), so the pid isn't reliably
-        # dnsmasq's own. release_ip_config matches on the lease-file path
-        # instead (see _stop_go_dnsmasq) - that's also why cleaning up after
-        # a failed run matters: a lingering instance would otherwise
-        # port-conflict with the next one.
-        subprocess.Popen(dnsmasq_cmd, stdout=log_fp, stderr=subprocess.STDOUT)
-
-    peer_ip = _wait_for_lease(lease_file, peer_mac, timeout)
+    log_fp = open(dnsmasq_log, "ab", buffering=0)
+    subprocess.Popen(dnsmasq_cmd, stdout=log_fp, stderr=subprocess.STDOUT, start_new_session=True)
+    print(f"[FluxCast WFD] Waiting up to {timeout:.0f}s for DHCP lease from {peer_mac}...")
+    peer_ip = _wait_for_lease(lease_file, peer_mac, timeout, dnsmasq_log=dnsmasq_log)
     if not peer_ip:
         try:
             with open(dnsmasq_log) as f:
@@ -219,20 +215,37 @@ def _wait_for_link_running(iface: str, timeout: float) -> bool:
     return False
 
 
-def _wait_for_lease(lease_file: str, peer_mac: str, timeout: float) -> Optional[str]:
-    target = peer_mac.lower()
+def _wait_for_lease(
+    lease_file: str,
+    peer_mac: str,
+    timeout: float,
+    dnsmasq_log: Optional[str] = None,
+) -> Optional[str]:
+    target = peer_mac.lower().replace("-", ":")
+    ack_re = re.compile(
+        r"DHCPACK\([^)]*\)\s+(\d+\.\d+\.\d+\.\d+)\s+" + re.escape(target),
+        re.I,
+    )
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        _sudo_run(["chmod", "a+rw", lease_file], timeout=3.0)
         try:
             with open(lease_file) as f:
                 for line in f:
-                    # dnsmasq.leases format: <expiry> <mac> <ip> <hostname> <client-id>
                     parts = line.split()
-                    if len(parts) >= 3 and parts[1].lower() == target:
+                    if len(parts) >= 3 and parts[1].lower().replace("-", ":") == target:
                         return parts[2]
-        except FileNotFoundError:
+        except OSError:
             pass
-        time.sleep(1)
+        if dnsmasq_log:
+            try:
+                log = Path(dnsmasq_log).read_text(errors="replace")
+            except OSError:
+                log = ""
+            m = ack_re.search(log)
+            if m:
+                return m.group(1)
+        time.sleep(0.4)
     return None
 
 
@@ -357,3 +370,11 @@ def mark_unmanaged(iface: str) -> None:
         _sudo_run(["nmcli", "device", "set", iface, "managed", "no"], timeout=5.0)
     except Exception as exc:
         print(f"[FluxCast WFD] Warning: could not mark {iface} unmanaged: {exc}")
+
+
+def mark_managed(iface: str) -> None:
+    """Hand an interface back to NetworkManager after a wpas-session."""
+    try:
+        _sudo_run(["nmcli", "device", "set", iface, "managed", "yes"], timeout=5.0)
+    except Exception as exc:
+        print(f"[FluxCast WFD] Warning: could not mark {iface} managed: {exc}")

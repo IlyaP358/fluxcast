@@ -591,5 +591,134 @@ class StartBackendDiagnosticsTest(unittest.TestCase):
         run.assert_called_once_with(skip_firewall=True)
 
 
+class RtspKeepaliveSessionTest(unittest.TestCase):
+    """M16 keepalives must use a bare Session id (no ;timeout=...)."""
+
+    def test_keepalive_sends_bare_session_header(self):
+        from wfd.rtsp.handler import _WFDRTSPHandler
+
+        handler = mock.Mock()
+        handler._keepalive_active = True
+        handler.media = None
+        handler.session_id = "8630199"
+        handler._rtsp_presentation_uri = mock.Mock(
+            return_value="rtsp://10.42.0.1:7236/wfd1.0/streamid=0"
+        )
+        handler._send_request = mock.Mock()
+        handler._schedule_rtsp_keepalive = mock.Mock()
+
+        _WFDRTSPHandler._send_rtsp_keepalive(handler)
+
+        handler._send_request.assert_called_once()
+        kwargs = handler._send_request.call_args.kwargs
+        self.assertEqual(kwargs["headers"], {"Session": "8630199"})
+        self.assertNotIn("timeout", kwargs["headers"]["Session"])
+        handler._schedule_rtsp_keepalive.assert_called_once_with(20.0)
+
+    def test_keepalive_continues_while_media_restarting(self):
+        from wfd.rtsp.handler import _WFDRTSPHandler
+
+        dead = mock.Mock()
+        dead.poll.return_value = 1  # exited
+        media = SimpleNamespace(restarting=True, processes=[dead])
+
+        handler = mock.Mock()
+        handler._keepalive_active = True
+        handler.media = media
+        handler.session_id = "42"
+        handler._rtsp_presentation_uri = mock.Mock(return_value="rtsp://x/wfd1.0/streamid=0")
+        handler._send_request = mock.Mock()
+        handler._schedule_rtsp_keepalive = mock.Mock()
+
+        _WFDRTSPHandler._send_rtsp_keepalive(handler)
+
+        handler._send_request.assert_called_once()
+        handler._schedule_rtsp_keepalive.assert_called_once_with(20.0)
+
+    def test_keepalive_continues_when_senders_exited_before_rebind(self):
+        """Capture can die before SIGUSR1 sets restarting; M16 must not stop."""
+        from wfd.rtsp.handler import _WFDRTSPHandler
+
+        dead = mock.Mock()
+        dead.poll.return_value = 1  # exited
+        media = SimpleNamespace(restarting=False, processes=[dead])
+
+        handler = mock.Mock()
+        handler._keepalive_active = True
+        handler.media = media
+        handler.session_id = "99"
+        handler._rtsp_presentation_uri = mock.Mock(return_value="rtsp://x/wfd1.0/streamid=0")
+        handler._send_request = mock.Mock()
+        handler._schedule_rtsp_keepalive = mock.Mock()
+
+        _WFDRTSPHandler._send_rtsp_keepalive(handler)
+
+        handler._send_request.assert_called_once()
+        handler._schedule_rtsp_keepalive.assert_called_once_with(20.0)
+
+
+class RtspUnhealthyProbeGraceTest(unittest.TestCase):
+    def _handler(self, *, processes, streak=0):
+        from wfd.rtsp.handler import _WFDRTSPHandler
+
+        media = SimpleNamespace(
+            processes=processes,
+            tx_interface="p2p-wlan0",
+            tx_baseline=0,
+            tx_summary=mock.Mock(return_value="tx+0 KiB"),
+            restart_video=mock.Mock(),
+            capture_geometry_drifted=mock.Mock(return_value=False),
+        )
+        handler = mock.Mock()
+        handler.media = media
+        handler.first_tx_reported = True
+        handler.play_accepted_at = None
+        handler.setup_ms = None
+        handler.media_config = SimpleNamespace(latency_log_path=None)
+        handler._unhealthy_probe_streak = streak
+        handler._UNHEALTHY_PROBE_GRACE = _WFDRTSPHandler._UNHEALTHY_PROBE_GRACE
+        handler._last_interval_tx = None
+        handler._stagnant_tx_streak = 0
+        handler._last_lpcm_activity = None
+        handler._schedule_probe = mock.Mock()
+        return handler, _WFDRTSPHandler
+
+    def test_unhealthy_reschedules_within_grace(self):
+        dead = mock.Mock()
+        dead.poll.return_value = 1
+        dead.pid = 9
+        handler, cls = self._handler(processes=[dead], streak=0)
+        with patch_all("_netdev_tx_bytes", return_value=0):
+            cls._probe_tx(handler)
+        self.assertEqual(handler._unhealthy_probe_streak, 1)
+        handler._schedule_probe.assert_called_once_with(2.0)
+        handler.media.restart_video.assert_not_called()
+
+    def test_unhealthy_rebinds_after_grace(self):
+        """After grace, self-heal via restart_video instead of stopping probes."""
+        from wfd.rtsp.handler import _WFDRTSPHandler
+
+        dead = mock.Mock()
+        dead.poll.return_value = 1
+        dead.pid = 9
+        grace = _WFDRTSPHandler._UNHEALTHY_PROBE_GRACE
+        handler, cls = self._handler(processes=[dead], streak=grace)
+        with patch_all("_netdev_tx_bytes", return_value=0):
+            cls._probe_tx(handler)
+        handler.media.restart_video.assert_called_once()
+        self.assertEqual(handler._unhealthy_probe_streak, 0)
+        handler._schedule_probe.assert_called_once_with(5.0)
+
+    def test_healthy_resets_unhealthy_streak(self):
+        alive = mock.Mock()
+        alive.poll.return_value = None
+        alive.pid = 3
+        handler, cls = self._handler(processes=[alive], streak=3)
+        with patch_all("_netdev_tx_bytes", return_value=10000):
+            cls._probe_tx(handler)
+        self.assertEqual(handler._unhealthy_probe_streak, 0)
+        handler._schedule_probe.assert_called_once_with(5.0)
+
+
 if __name__ == "__main__":
     unittest.main()

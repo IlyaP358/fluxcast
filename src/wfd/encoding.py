@@ -30,21 +30,33 @@ def _letterbox_vf(out_res: str) -> str:
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p")
 
 def _vbv_bufsize(bitrate_text: str, config: WFDMediaConfig) -> str:
+    """Calculate VBV buffer size.
+
+    Default: 0.5× bitrate (~500 ms). Override with ``FLUXCAST_WFD_VBV_MULTIPLIER``
+    (e.g. ``0.25`` ≈ 250 ms — unstable on pipe; ``2.0`` ≈ 2 s — more lag).
+    Large multipliers dominate glass-to-glass lag on the VAAPI pipe path;
+    values below ~0.5 correlated with buffer-pool / TX stalls on pipe+VAAPI.
     """
-    Calculate VBV buffer size.
-    """
+    import os
+
     match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)([kKmMgG]?)\s*", bitrate_text)
     if not match:
         return bitrate_text
-    
+
     amount = float(match.group(1))
     suffix = match.group(2)
-    
-    is_lg = "LG" in config.peer_name.upper()
-    # For LG, use 0.5x bitrate (500ms buffer); for Samsung/others use 2x.
-    # Tighter values cause VBV underflow with ultrafast at high resolutions.
-    multiplier = 0.5 if is_lg else 2.0
-    
+
+    env_mult = (os.environ.get("FLUXCAST_WFD_VBV_MULTIPLIER", "") or "").strip()
+    if env_mult:
+        try:
+            multiplier = max(0.05, float(env_mult))
+        except ValueError:
+            multiplier = 0.5
+    else:
+        # 0.5 validated on hotyeah pipe+LPCM (stable TX, acceptable lag).
+        # LG historically used 0.5; non-LG used 2.0 (extra lag, little gain).
+        multiplier = 0.5
+
     amount *= multiplier
     amount_text = str(int(amount)) if amount.is_integer() else f"{amount:g}"
     return amount_text + suffix

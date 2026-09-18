@@ -7,10 +7,13 @@ from ..config import WFDMediaConfig, WFDNotReady
 from ..env import _is_hyprland_session, _is_wayland_session, _wfd_capture_backend_order
 from ..gst import _gst_wfd_sender_available
 from ..net import _interface_for_ip, _netdev_tx_bytes, _rtp_url
+from ..outputs import monitor_fingerprint
 from .portal import PortalMixin
 from .testpattern import TestPatternMixin
 from .wlroots import WlrootsMixin
 from .x11 import X11Mixin
+
+
 
 
 class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
@@ -32,6 +35,21 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
         self._portal_gst_cmd: Optional[list[str]] = None
         self._portal_pw_fd: Optional[int] = None
         self._lpcm_muxer = None   # WFDLPCMMuxer instance for Microsoft adapter
+        # True while restart_video() is swapping capture/encode processes.
+        # RTSP keepalive/health probes skip hard-fail while this is set.
+        self.restarting: bool = False
+        # Single-flight gate for restart_video (SIGUSR1 + impairment + health).
+        import threading as _threading
+
+        self._restart_lock = _threading.Lock()
+        self._restart_generation = 0
+        # When set (e.g. "vaapi"), mid-session rebind stays on that pipe engine
+        # instead of re-running dmabuf→vaapi→cpu fallback.
+        self._restart_engine_lock: Optional[str] = None
+        # Output geometry when desktop capture last (re)bound. A compositor
+        # reload/reseat can leave senders alive while feeding black frames;
+        # health probes compare live geometry to this fingerprint.
+        self.capture_geometry_fp: Optional[str] = None
 
     def start(self) -> None:
         if self.processes:
@@ -70,6 +88,34 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
             self._start_test_pattern()
         else:
             self._start_desktop()
+        self.remember_capture_geometry()
+
+    def capture_monitor_name(self) -> Optional[str]:
+        mon = self.config.monitor
+        if mon is None:
+            return None
+        name = getattr(mon, "name", None)
+        return str(name) if name else None
+
+    def remember_capture_geometry(self) -> None:
+        """Snapshot output geometry for the captured monitor after bind."""
+        name = self.capture_monitor_name()
+        if not name:
+            return
+        self.capture_geometry_fp = monitor_fingerprint(name)
+
+    def capture_geometry_drifted(self) -> bool:
+        """True when the captured output moved/resized since bind."""
+        if not self.capture_geometry_fp:
+            return False
+        name = self.capture_monitor_name()
+        if not name:
+            return False
+        current = monitor_fingerprint(name)
+        if current is None:
+            # Probe failed or output missing — force rebind to recover.
+            return True
+        return current != self.capture_geometry_fp
 
     def tx_summary(self) -> str:
         current = _netdev_tx_bytes(self.tx_interface)
@@ -91,28 +137,224 @@ class WFDMediaPipeline(TestPatternMixin, PortalMixin, X11Mixin, WlrootsMixin):
         if self._lpcm_muxer is not None:
             self._lpcm_muxer.stop()
             self._lpcm_muxer = None
+        for attr in ("_lpcm_video_fd", "_lpcm_audio_fd"):
+            fd = getattr(self, attr, None)
+            if fd is not None:
+                try:
+                    import os as _os
+
+                    _os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, attr, None)
         close_portal_capture(self.portal_session)
         self.portal_session = None
 
-    def restart_video(self) -> None:
-        if self._portal_gst_cmd is None or self._portal_pw_fd is None:
-            return
-        for proc in self.processes:
-            if proc.poll() is None:
-                proc.terminate()
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=1)
-        self.processes.clear()
-        new_proc = subprocess.Popen(
-            self._portal_gst_cmd,
-            stderr=None,
-            pass_fds=(self._portal_pw_fd,),
+    def _kill_orphan_wf_recorders(self) -> None:
+        """Best-effort: reap capture orphans left after a failed rebind."""
+        import os as _os
+        import signal as _signal
+        import subprocess as _sp
+
+        tracked = {proc.pid for proc in self.processes if proc.pid}
+        mon = self.capture_monitor_name() or ""
+        patterns = (
+            ("wf-recorder", ("/dev/stdout", "-f /dev/stdout", mon)),
+            ("ffmpeg", ("h264_vaapi", "libx264", "pipe:0")),
+            ("pw-cat", ("miracast.monitor", "fluxcast-wfd-capture")),
         )
-        self.processes = [new_proc]
-        print("[FluxCast WFD Media] Pipeline restarted for IDR request.")
+        for proc_name, needles in patterns:
+            try:
+                out = _sp.check_output(["pgrep", "-a", proc_name], text=True)
+            except Exception:
+                continue
+            for line in out.splitlines():
+                parts = line.split(None, 1)
+                if not parts:
+                    continue
+                try:
+                    pid = int(parts[0])
+                except ValueError:
+                    continue
+                if pid in tracked or pid == _os.getpid():
+                    continue
+                cmd = parts[1] if len(parts) > 1 else ""
+                if not any(n and n in cmd for n in needles):
+                    continue
+                try:
+                    _os.kill(pid, _signal.SIGTERM)
+                except ProcessLookupError:
+                    continue
+                try:
+                    _os.waitpid(pid, _os.WNOHANG)
+                except ChildProcessError:
+                    pass
+
+    def restart_video(self) -> None:
+        """Restart capture/encode while leaving the RTSP session intact.
+
+        Portal GStreamer path can respawn from the retained PipeWire fd.
+        Desktop backends (wf-recorder/x11/…) tear down and re-launch the
+        sender so output geometry changes (scale, extend reseat) do not
+        leave a hollow RTSP session with dead capture PIDs.
+
+        Concurrent callers (SIGUSR1, VIDEO_STALL, link-watch, buffer-pool)
+        coalesce on a single-flight lock.
+        """
+        import os as _os_env
+        import time as _time
+
+        if not self._restart_lock.acquire(blocking=False):
+            print(
+                "[FluxCast WFD Media] Capture restart coalesced "
+                "(already in flight)",
+                flush=True,
+            )
+            return
+
+        self.restarting = True
+        self._restart_generation += 1
+        gen = self._restart_generation
+        try:
+            if self._portal_gst_cmd is not None and self._portal_pw_fd is not None:
+                for proc in self.processes:
+                    if proc.poll() is None:
+                        proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=1)
+                self.processes.clear()
+                new_proc = subprocess.Popen(
+                    self._portal_gst_cmd,
+                    stderr=None,
+                    pass_fds=(self._portal_pw_fd,),
+                )
+                self.processes = [new_proc]
+                print("[FluxCast WFD Media] Pipeline restarted for IDR request.")
+                return
+
+            # Desktop / hollow recovery: rebuild even when senders already exited
+            # (pause-capture kills wf-recorder/ffmpeg from outside).
+            for proc in self.processes:
+                if proc.poll() is None:
+                    proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=1)
+            self.processes.clear()
+            if self._lpcm_muxer is not None:
+                self._lpcm_muxer.stop()
+                self._lpcm_muxer = None
+            for attr in ("_lpcm_video_fd", "_lpcm_audio_fd"):
+                fd = getattr(self, attr, None)
+                if fd is not None:
+                    try:
+                        import os as _os
+
+                        _os.close(fd)
+                    except OSError:
+                        pass
+                    setattr(self, attr, None)
+            self._kill_orphan_wf_recorders()
+            close_portal_capture(self.portal_session)
+            self.portal_session = None
+            self._portal_gst_cmd = None
+            self._portal_pw_fd = None
+            # Allow the RTP source port to be rebound (LPCM muxer binds it).
+            _time.sleep(0.75)
+            # Reload encode knobs written by miracast-ctl before SIGUSR1.
+            try:
+                from ..hw_encode import apply_encode_env_file
+
+                apply_encode_env_file()
+
+                br = (_os_env.environ.get("FLUXCAST_WFD_BITRATE") or "").strip()
+                if br:
+                    self.config.bitrate = br
+            except Exception as exc:
+                print(f"[FluxCast WFD Media] encode.env reload skipped: {exc}")
+
+            # Mid-session rebind engine lock:
+            # - Default: if we were on DMA-BUF, lock to VAAPI *pipe* for the rest
+            #   of this RTSP session (re-creating DMA after VIDEO_STALL left air
+            #   TX flat / TV dark).
+            # - FLUXCAST_WFD_DMABUF_STICKY=1 or pref=dmabuf: keep trying DMA
+            #   across intentional SIGUSR1 encode.env rebinds — otherwise the
+            #   first link-watch TX≈0 grace restart permanently abandons DMA.
+            stay = (_os_env.environ.get("FLUXCAST_WFD_PIPE_STAY_VAAPI") or "1").strip().lower()
+            stay_on = stay in ("1", "true", "yes", "on", "")
+            sticky_env = (
+                _os_env.environ.get("FLUXCAST_WFD_DMABUF_STICKY") or ""
+            ).strip().lower() in ("1", "true", "yes", "on")
+            try:
+                from ..hw_encode import capture_encode_preference
+
+                pref = capture_encode_preference()
+            except Exception:
+                pref = ""
+            last_path = getattr(self, "_last_capture_path", None)
+            # Prefer DMA whenever the RENDER ENGINE pref is dmabuf (QVBR or CQP).
+            # Env STICKY=1 is optional reinforcement; pref alone must not fall
+            # through to pipe on every SIGUSR1 or DMA never sticks.
+            sticky = sticky_env or pref == "dmabuf"
+            if sticky and (pref == "dmabuf" or last_path == "dmabuf"):
+                self._restart_engine_lock = None
+                print(
+                    "[FluxCast WFD Media] Mid-session rebind: DMA-BUF sticky "
+                    f"(pref={pref or last_path}) — retrying DMA",
+                    flush=True,
+                )
+            elif pref == "dmabuf" or last_path == "dmabuf":
+                self._restart_engine_lock = "vaapi"
+                print(
+                    "[FluxCast WFD Media] Mid-session rebind: leaving DMA-BUF "
+                    "for GPU · VAAPI (pipe) after capture impairment",
+                    flush=True,
+                )
+            elif stay_on and pref in ("vaapi", "pipe"):
+                self._restart_engine_lock = "vaapi"
+            elif stay_on and pref == "cpu":
+                self._restart_engine_lock = "cpu"
+            else:
+                self._restart_engine_lock = None
+
+            # Refresh P2P iface/IP before rebuilding the muxer — a stale
+            # tx_interface / local_ip after GO flap makes RTP leave the wrong NIC.
+            try:
+                if self.local_ip:
+                    self.tx_interface = _interface_for_ip(self.local_ip)
+                    self.tx_baseline = _netdev_tx_bytes(self.tx_interface)
+                    print(
+                        f"[FluxCast WFD Media] RTP bind refresh: "
+                        f"ip={self.local_ip} iface={self.tx_interface}",
+                        flush=True,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[FluxCast WFD Media] RTP bind refresh failed: {exc}",
+                    flush=True,
+                )
+
+            self._start_desktop()
+            self.remember_capture_geometry()
+            print(
+                f"[FluxCast WFD Media] Desktop capture pipeline restarted "
+                f"(gen={gen}"
+                + (
+                    f", engine_lock={self._restart_engine_lock}"
+                    if self._restart_engine_lock
+                    else ""
+                )
+                + ")."
+            )
+        finally:
+            self._restart_engine_lock = None
+            self.restarting = False
+            self._restart_lock.release()
 
     def _rtp_output(self) -> str:
         return _rtp_url(self.tv_ip, self.sink_rtp_port, self.config.source_port, self.local_ip)

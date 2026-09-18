@@ -1,7 +1,10 @@
+import os
 import re
 import shutil
 import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 from ..config import WFDNotReady
@@ -38,7 +41,7 @@ def _select_peer(peers: list[WFDPeer], selector: Optional[str]) -> WFDPeer:
     raise WFDNotReady(f"No peer matched selector: {selector}")
 
 def _scan_and_select(interface: Optional[str], selector: Optional[str],
-                     timeout: int, attempts: int = 3) -> WFDPeer:
+                     timeout: int, attempts: int = 6) -> WFDPeer:
     """Scans and resolves peer. If no selector, does one scan and opens prompt.
     With selector, retries non-deterministic scans
     until resolved or raises original error.
@@ -53,6 +56,13 @@ def _scan_and_select(interface: Optional[str], selector: Optional[str],
         try:
             return _select_peer(peers, selector)
         except WFDNotReady as exc:
+            # NM often lists other P2P devices while still missing the Miracast
+            # sink that wpa_cli can see — try a dedicated wpa_cli pass once.
+            try:
+                wpa_peers = _wpa_cli_scan(interface=interface, timeout=timeout)
+                return _select_peer(wpa_peers, selector)
+            except WFDNotReady:
+                pass
             last_error = exc
             if attempt < attempts:
                 print(f"[FluxCast WFD] peer '{selector}' not in scan "
@@ -60,7 +70,91 @@ def _scan_and_select(interface: Optional[str], selector: Optional[str],
     assert last_error is not None
     raise last_error
 
+def _phy_supports_p2p_go(phy: str) -> bool:
+    if not shutil.which("iw"):
+        return False
+    try:
+        result = _run(["iw", "phy", phy, "info"], timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    in_modes = False
+    for line in result.stdout.splitlines():
+        if "Supported interface modes:" in line:
+            in_modes = True
+            continue
+        if not in_modes:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("*"):
+            if stripped[1:].strip() == "P2P-GO":
+                return True
+            continue
+        break
+    return False
+
+
+def _iface_phy(iface: str) -> Optional[str]:
+    link = Path(f"/sys/class/net/{iface}/phy80211")
+    try:
+        return Path(os.readlink(link)).name
+    except OSError:
+        return None
+
+
+def _nm_iface_in_use(iface: str) -> bool:
+    if not shutil.which("nmcli"):
+        return False
+    try:
+        result = _run(
+            ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device"],
+            timeout=3.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    for line in result.stdout.splitlines():
+        parts = line.split(":")
+        if len(parts) < 4:
+            continue
+        dev, typ, state, conn = parts[0], parts[1], parts[2], ":".join(parts[3:])
+        if dev != iface or typ != "wifi":
+            continue
+        if conn and conn != "--":
+            return True
+        if state.startswith("connected") or state in (
+            "connecting", "preparing", "configuring", "ip-config", "ip-check",
+            "secondaries", "activated",
+        ):
+            return True
+    return False
+
+
 def _default_wifi_interface() -> Optional[str]:
+    """Pick a managed Wi-Fi iface for P2P.
+
+    Prefer P2P-GO-capable radios that are not already carrying an active
+    NetworkManager connection (e.g. USB dongle idle while the laptop STA
+    stays on the AP). Falls back to the first managed iface from ``iw dev``.
+
+    Override with ``FLUXCAST_WFD_INTERFACE`` / ``--wfd-interface``.
+    """
+    prefer = (os.environ.get("FLUXCAST_WFD_INTERFACE") or "").strip()
+    if prefer and prefer.lower() not in ("auto", "default"):
+        return prefer
+
+    # Optional external resolver (omarchy-miracast list_p2p_radios.py).
+    helper = (os.environ.get("FLUXCAST_LIST_P2P_RADIOS") or "").strip()
+    if helper and Path(helper).is_file():
+        try:
+            result = _run(
+                [sys.executable, helper, "--resolve", "--prefer", "auto"],
+                timeout=4.0,
+            )
+            iface = (result.stdout or "").strip().splitlines()
+            if iface and iface[0]:
+                return iface[0]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
     if not shutil.which("iw"):
         return None
 
@@ -69,14 +163,28 @@ def _default_wifi_interface() -> Optional[str]:
     except (OSError, subprocess.TimeoutExpired):
         return None
 
+    managed: list[str] = []
     current_iface = None
     for line in result.stdout.splitlines():
         stripped = line.strip()
         if stripped.startswith("Interface "):
             current_iface = stripped.split(maxsplit=1)[1]
         elif stripped == "type managed" and current_iface:
-            return current_iface
-    return None
+            if not current_iface.startswith("p2p-"):
+                managed.append(current_iface)
+            current_iface = None
+
+    if not managed:
+        return None
+
+    scored: list[tuple] = []
+    for iface in managed:
+        phy = _iface_phy(iface)
+        go = _phy_supports_p2p_go(phy) if phy else False
+        busy = _nm_iface_in_use(iface)
+        scored.append((1 if go else 0, 0 if busy else 1, iface))
+    scored.sort(reverse=True)
+    return scored[0][2]
 
 def _parse_peer_capability(details: str) -> tuple[Optional[bool], Optional[int]]:
     """Read a peer's WFD device type out of `wpa_cli p2p_peer` output.
@@ -102,14 +210,52 @@ def _parse_peer_name(details: str) -> str:
             return stripped.partition("=")[2]
     return ""
 
-def active_scan(interface: Optional[str] = None, timeout: int = 8) -> list[WFDPeer]:
-    """Run an active Wi-Fi Direct peer scan.
-    """
-    try:
-        return _nm_scan(interface=interface, timeout=timeout)
-    except WFDNotReady as nm_error:
-        print(f"[FluxCast WFD] NetworkManager scan unavailable: {nm_error}")
+def _dedicated_usb_ctrl(iface: Optional[str]) -> Optional[str]:
+    """Ctrl dir for FluxCast's dedicated USB wpa_supplicant, if running."""
+    for path in ("/tmp/fluxcast-usb-wpa", "/tmp/wpa-usb-p2p"):
+        if iface and Path(path, iface).exists():
+            return path
+        if Path(path).is_dir() and any(Path(path).iterdir()):
+            # Prefer explicit iface socket when present.
+            if iface is None or Path(path, iface).exists() or Path(path).joinpath("wpa.pid").exists():
+                return path
+    return None
 
+
+def _wpa_cli(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
+    """Run wpa_cli; retry under sudo when the ctrl iface is root-only.
+
+    If a dedicated USB wpa_supplicant ctrl dir is present, use it so scans
+    hit the USB-only P2P device instead of NetworkManager's shared one.
+    """
+    iface = None
+    if "-i" in args:
+        try:
+            iface = args[args.index("-i") + 1]
+        except (ValueError, IndexError):
+            iface = None
+    ctrl = _dedicated_usb_ctrl(iface)
+    base = ["wpa_cli"]
+    if ctrl:
+        base.extend(["-p", ctrl])
+    base.extend(args)
+
+    try:
+        result = _run(base, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        raise
+    if result.returncode == 0:
+        return result
+    err = (result.stderr or result.stdout or "").strip()
+    if "Permission denied" not in err and "Failed to connect" not in err:
+        return result
+    if not shutil.which("sudo"):
+        return result
+    return _run(["sudo", *base], timeout=timeout)
+
+
+def _wpa_cli_scan(interface: Optional[str] = None, timeout: int = 15) -> list[WFDPeer]:
+    """Discover P2P peers via wpa_cli p2p_find (often sees sinks NM StartFind misses)."""
     if not shutil.which("wpa_cli"):
         raise WFDNotReady("wpa_cli is required for active Wi-Fi Direct scans.")
 
@@ -117,9 +263,9 @@ def active_scan(interface: Optional[str] = None, timeout: int = 8) -> list[WFDPe
     if not iface:
         raise WFDNotReady("Could not detect a managed Wi-Fi interface for wpa_cli.")
 
-    print(f"[FluxCast WFD] Starting Wi-Fi Direct scan on {iface} for {timeout}s...")
+    print(f"[FluxCast WFD] Starting wpa_cli Wi-Fi Direct scan on {iface} for {timeout}s...")
     try:
-        start = _run(["wpa_cli", "-i", iface, "p2p_find", str(timeout)], timeout=5.0)
+        start = _wpa_cli(["-i", iface, "p2p_find", str(timeout)], timeout=5.0)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise WFDNotReady(f"Could not start p2p_find: {exc}") from exc
     if start.returncode != 0:
@@ -135,10 +281,10 @@ def active_scan(interface: Optional[str] = None, timeout: int = 8) -> list[WFDPe
     time.sleep(max(1, timeout))
 
     try:
-        peers_result = _run(["wpa_cli", "-i", iface, "p2p_peers"], timeout=5.0)
+        peers_result = _wpa_cli(["-i", iface, "p2p_peers"], timeout=5.0)
     finally:
         try:
-            _run(["wpa_cli", "-i", iface, "p2p_stop_find"], timeout=3.0)
+            _wpa_cli(["-i", iface, "p2p_stop_find"], timeout=3.0)
         except Exception:
             pass
 
@@ -153,7 +299,7 @@ def active_scan(interface: Optional[str] = None, timeout: int = 8) -> list[WFDPe
 
         details = ""
         try:
-            details_result = _run(["wpa_cli", "-i", iface, "p2p_peer", address], timeout=5.0)
+            details_result = _wpa_cli(["-i", iface, "p2p_peer", address], timeout=5.0)
             if details_result.returncode == 0:
                 details = details_result.stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
@@ -169,6 +315,34 @@ def active_scan(interface: Optional[str] = None, timeout: int = 8) -> list[WFDPe
         ))
 
     return peers
+
+
+def active_scan(interface: Optional[str] = None, timeout: int = 15) -> list[WFDPeer]:
+    """Run an active Wi-Fi Direct peer scan.
+
+    Prefer NetworkManager StartFind, but if it returns no peers (common on
+    some USB / secondary radios where NM's peer list stays empty while
+    wpa_cli still sees sinks), fall through to wpa_cli p2p_find.
+    """
+    nm_error: Optional[WFDNotReady] = None
+    try:
+        peers = _nm_scan(interface=interface, timeout=timeout)
+        if peers:
+            return peers
+        print(
+            "[FluxCast WFD] NetworkManager scan returned no peers; "
+            "trying wpa_cli p2p_find..."
+        )
+    except WFDNotReady as exc:
+        nm_error = exc
+        print(f"[FluxCast WFD] NetworkManager scan unavailable: {exc}")
+
+    try:
+        return _wpa_cli_scan(interface=interface, timeout=timeout)
+    except WFDNotReady as wpa_error:
+        if nm_error is not None:
+            raise nm_error from wpa_error
+        raise
 
 def print_scan(peers: list[WFDPeer]) -> None:
     if not peers:
