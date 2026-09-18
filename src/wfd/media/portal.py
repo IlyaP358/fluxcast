@@ -256,7 +256,7 @@ class PortalMixin:
         if not shutil.which("gst-launch-1.0"):
             raise WFDNotReady("Portal backend requires gst-launch-1.0 (pipewiresrc pipeline).")
         required = (
-            "pipewiresrc", "videoconvert", "videoscale",
+            "pipewiresrc", "videoconvert", "videoscale", "videorate",
             "x264enc", "mpegtsmux", "rtpmp2tpay", "udpsink",
         )
         if not self.config.no_audio:
