@@ -38,6 +38,7 @@ install -Dm644 "$SRCDIR/meta/fluxcast.desktop" -t "$DESTDIR/usr/share/applicatio
 install -Dm644 "$SRCDIR/src/assets/flcast_logo_512x512.png" "$DESTDIR/usr/share/icons/hicolor/512x512/apps/fluxcast.png"
 install -Dm644 "$SRCDIR/meta/zz-dev.fluxcast.wpa-supplicant.conf" -t "$DESTDIR/usr/share/dbus-1/system.d/"
 install -Dm755 "$SRCDIR/meta/fluxcast" "$DESTDIR/usr/bin/fluxcast"
+install -Dm755 "$SRCDIR/meta/fluxcast-askpass" "$DESTDIR/usr/libexec/fluxcast-askpass"
 
 # Restore SELinux context on the installed system files (Fedora/RHEL)
 if [[ -z "$DESTDIR" ]] && command -v restorecon >/dev/null 2>&1; then
@@ -45,6 +46,7 @@ if [[ -z "$DESTDIR" ]] && command -v restorecon >/dev/null 2>&1; then
         /usr/share/applications/fluxcast.desktop \
         /usr/share/icons/hicolor/512x512/apps/fluxcast.png \
         /usr/share/dbus-1/system.d/zz-dev.fluxcast.wpa-supplicant.conf \
+        /usr/libexec/fluxcast-askpass \
         2>/dev/null || true
 fi
 

@@ -13,6 +13,7 @@ from ..ie import (
     WFD_DEVICE_TYPE_SOURCE, WFDPeer, _wfd_capability_from_hex,
     _wfd_ie_device_info, _wfd_ie_device_name,
 )
+from ..privileged import run_privileged
 from ..proc import _run
 from .nm import _nm_scan
 
@@ -251,7 +252,7 @@ def _wpa_cli(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProce
         return result
     if not shutil.which("sudo"):
         return result
-    return _run(["sudo", *base], timeout=timeout)
+    return run_privileged(base, timeout=timeout)
 
 
 def _wpa_cli_scan(interface: Optional[str] = None, timeout: int = 15) -> list[WFDPeer]:

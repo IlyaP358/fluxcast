@@ -20,6 +20,7 @@ from ..modes import (
     _selected_video_format,
 )
 from ..net import _netdev_tx_bytes, _safe_source_port
+from ..p2p.usb_dedicated import mark_p2p_persistent_ok
 from .message import (
     RTSPMessage, _parse_parameters, _parse_rtp_ports,
     _parse_transport_client_ports, _read_rtsp_message, _sink_advertises_uibc,
@@ -536,6 +537,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 self.server.parent_server._register_media(self.media)  # type: ignore[attr-defined]
             self.media.start()
             print("[FluxCast WFD RTSP] PLAY accepted; media stream started.")
+            mark_p2p_persistent_ok(self.media_config.peer_address)
             if self.media_config.uibc and getattr(self, "sink_supports_uibc", False):
                 self._maybe_start_uibc(mode)
                 self._schedule_uibc_enable(1.5)
@@ -687,10 +689,11 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             audio_delta = (
                 (audio_frames - prev_audio) if prev_audio is not None else None
             )
-            # Flat video alone is a stall. Requiring audio_delta>0 missed the
-            # common failure where *both* counters freeze (wf-recorder wedged)
-            # and we never rebound until TX≈0 killed the session.
-            if video_delta is not None:
+            # AAC path has no LPCM frame counters (always 0). Counting that as
+            # VIDEO_STALL rebound capture every ~8s and left the TV black.
+            if lpcm is None:
+                self._video_stall_streak = 0
+            elif video_delta is not None:
                 if video_delta <= 0:
                     self._video_stall_streak += 1
                 else:
@@ -701,6 +704,16 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
 
             # Was 2 — too quick to rebind on brief encode hiccups / counter resets.
             video_stall_limit = 4
+            if getattr(media, "restarting", False):
+                self._video_stall_streak = 0
+            last_rebind = getattr(self, "_last_stall_rebind", 0.0)
+            if (
+                self._video_stall_streak >= video_stall_limit
+                and (time.monotonic() - last_rebind) < 45.0
+            ):
+                # USB 5 GHz air can freeze TX; restarting capture every 8s
+                # leaves the TV on a black frame.
+                self._video_stall_streak = 0
             if self._video_stall_streak >= video_stall_limit:
                 print(
                     "[FluxCast WFD Media] VIDEO_STALL "
@@ -718,6 +731,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                     streak=self._video_stall_streak,
                 )
                 try:
+                    self._last_stall_rebind = time.monotonic()
                     media.restart_video()
                     self._stagnant_tx_streak = 0
                     self._video_stall_streak = 0

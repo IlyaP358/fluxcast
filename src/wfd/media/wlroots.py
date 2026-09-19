@@ -63,7 +63,7 @@ class WlrootsMixin:
         self,
         ffmpeg_proc: subprocess.Popen,
         *,
-        stall_seconds: float = 4.0,
+        stall_seconds: float = 12.0,
         poll_seconds: float = 1.0,
     ) -> None:
         """Rebind capture if ffmpeg IO freezes while the process stays alive.

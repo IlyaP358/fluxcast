@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""Graphical SUDO_ASKPASS helper for FluxCast (sudo -A).
+
+Prints the password on stdout and nothing else. Used when FluxCast stdin is
+not a TTY (tray / panel). sudo's timestamp then covers later sudo -A calls.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import traceback
+import warnings
+from pathlib import Path
+
+warnings.filterwarnings("ignore")
+
+TITLE = "FluxCast"
+PROMPT = "Administrator password for Wi-Fi Direct / Miracast"
+_LOG = Path("/tmp/fluxcast-askpass.log")
+
+
+def _username() -> str:
+    return os.environ.get("USER") or os.environ.get("LOGNAME") or "your-user"
+
+
+def _netdev_hint() -> str:
+    user = _username()
+    return (
+        "To skip this prompt next time, add your user to the netdev group, "
+        "then log out and back in:\n"
+        f"sudo usermod -aG netdev {user}"
+    )
+
+
+def _log(msg: str) -> None:
+    try:
+        from datetime import datetime, timezone
+
+        stamp = datetime.now(timezone.utc).astimezone().strftime("%H:%M:%S")
+        with _LOG.open("a", encoding="utf-8") as fh:
+            fh.write(f"{stamp} {msg.rstrip()}\n")
+    except OSError:
+        pass
+
+
+def _have_display() -> bool:
+    return bool(os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"))
+
+
+def _hypr_seat_to_laptop() -> None:
+    """Keep keyboard/pointer on eDP so the dialog cannot strand the seat on Extend."""
+    if not shutil.which("hyprctl"):
+        return
+    try:
+        import json
+
+        ms = json.loads(
+            subprocess.check_output(
+                ["timeout", "2", "hyprctl", "-j", "monitors"],
+                text=True,
+                timeout=3,
+            )
+        )
+    except Exception:
+        return
+    primary = None
+    for mon in ms:
+        name = str(mon.get("name") or "")
+        if name.startswith(("eDP", "LVDS", "DSI")):
+            primary = mon
+            break
+    if primary is None:
+        return
+    name = str(primary.get("name") or "")
+    x = int(primary.get("x") or 0)
+    y = int(primary.get("y") or 0)
+    w = int(primary.get("width") or 1920)
+    h = int(primary.get("height") or 1080)
+    scale = float(primary.get("scale") or 1) or 1.0
+    cx = x + max(int(round(w / scale)), 1) // 2
+    cy = y + max(int(round(h / scale)), 1) // 2
+    for expr in (
+        "hl.dsp.release_input_capture()",
+        f'hl.dsp.focus({{ monitor = "{name}" }})',
+        f"hl.dsp.cursor.move({{ x = {cx}, y = {cy} }})",
+        f'hl.dsp.focus({{ monitor = "{name}" }})',
+    ):
+        try:
+            subprocess.run(
+                ["timeout", "2", "hyprctl", "dispatch", expr],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+                check=False,
+            )
+        except Exception:
+            pass
+
+
+def _try_external() -> None:
+    if not _have_display():
+        return
+    text = f"{PROMPT}\n\n{_netdev_hint()}"
+    if shutil.which("zenity"):
+        os.execvp("zenity", ["zenity", "--password", "--title", TITLE, "--text", text])
+    if shutil.which("kdialog"):
+        os.execvp("kdialog", ["kdialog", "--title", TITLE, "--password", text])
+    if shutil.which("yad"):
+        os.execvp(
+            "yad",
+            ["yad", "--entry", "--hide-text", "--title", TITLE, "--text", text],
+        )
+    if shutil.which("wofi"):
+        proc = subprocess.run(
+            ["wofi", "--dmenu", "--password", "--prompt", TITLE, "--lines", "1"],
+            input=PROMPT + "\n",
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode == 0:
+            print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
+            raise SystemExit(0)
+        raise SystemExit(1)
+    if shutil.which("rofi"):
+        proc = subprocess.run(
+            ["rofi", "-dmenu", "-password", "-p", TITLE],
+            input=PROMPT + "\n",
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode == 0:
+            print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
+            raise SystemExit(0)
+        raise SystemExit(1)
+    for name in ("ssh-askpass", "x11-ssh-askpass"):
+        path = shutil.which(name)
+        if path:
+            os.execvp(path, [name, PROMPT])
+
+
+def _selection_bounds(entry):
+    try:
+        bounds = entry.get_selection_bounds()
+    except Exception:
+        return None
+    if not bounds:
+        return None
+    if len(bounds) == 3:
+        ok, start, end = bounds
+        return (start, end) if ok else None
+    if len(bounds) == 2:
+        return bounds[0], bounds[1]
+    return None
+
+
+def _collapse_full_selection(entry) -> bool:
+    text = entry.get_text() or ""
+    n = len(text)
+    if n <= 0:
+        return False
+    bounds = _selection_bounds(entry)
+    if bounds is None:
+        return False
+    start, end = bounds
+    if start == 0 and end >= n:
+        try:
+            entry.select_region(n, n)
+            entry.set_position(n)
+        except Exception:
+            pass
+    return False
+
+
+def _focus_password_entry(entry) -> bool:
+    grab = getattr(entry, "grab_focus_without_selecting", None)
+    if grab is not None:
+        grab()
+    else:
+        entry.grab_focus()
+    _collapse_full_selection(entry)
+    return False
+
+
+def _prevent_password_select_all(Gtk, GLib, entry) -> None:
+    """Hyprland focus_on_activate re-focuses the window; GTK then select-alls."""
+    def on_focus(*_a):
+        GLib.idle_add(_collapse_full_selection, entry)
+        return False
+
+    try:
+        ctrl = Gtk.EventControllerFocus()
+        ctrl.connect("enter", on_focus)
+        entry.add_controller(ctrl)
+    except Exception:
+        pass
+    for sig in ("notify::has-focus", "notify::is-focus"):
+        try:
+            entry.connect(sig, on_focus)
+        except Exception:
+            pass
+    try:
+        entry.connect("notify::selection-bound", on_focus)
+    except Exception:
+        pass
+
+
+def _gtk4_password() -> str | None:
+    import gi
+
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Gdk", "4.0")
+    from gi.repository import GLib, Gtk
+
+    GLib.set_prgname("fluxcast-askpass")
+    GLib.set_application_name(TITLE)
+    result: dict[str, str | None] = {"value": None}
+    app = Gtk.Application(
+        application_id=f"dev.fluxcast.askpass.p{os.getpid()}",
+        flags=0,
+    )
+
+    def on_activate(_app) -> None:
+        win = Gtk.ApplicationWindow(application=app, title=TITLE)
+        win.set_default_size(480, 240)
+        win.set_resizable(False)
+        win.set_modal(True)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_top(16)
+        box.set_margin_bottom(12)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        label = Gtk.Label(label=PROMPT)
+        label.set_wrap(True)
+        label.set_xalign(0.0)
+        hint = Gtk.Label(label=_netdev_hint())
+        hint.set_wrap(True)
+        hint.set_xalign(0.0)
+        try:
+            hint.set_selectable(True)
+        except Exception:
+            pass
+        entry = Gtk.Entry()
+        entry.set_visibility(False)
+        entry.set_invisible_char("\u2022")
+        entry.set_hexpand(True)
+        try:
+            entry.set_activates_default(True)
+        except Exception:
+            pass
+        _prevent_password_select_all(Gtk, GLib, entry)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row.set_halign(Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel")
+        ok = Gtk.Button(label="Authenticate")
+        try:
+            ok.add_css_class("suggested-action")
+        except Exception:
+            pass
+        row.append(cancel)
+        row.append(ok)
+        box.append(label)
+        box.append(entry)
+        box.append(hint)
+        box.append(row)
+        win.set_child(box)
+
+        def accept(*_a) -> None:
+            result["value"] = entry.get_text()
+            app.quit()
+
+        def reject(*_a) -> None:
+            result["value"] = None
+            app.quit()
+
+        cancel.connect("clicked", reject)
+        ok.connect("clicked", accept)
+        entry.connect("activate", accept)
+        win.connect("close-request", lambda *_a: (reject(), False)[1])
+        try:
+            win.set_default_widget(ok)
+        except Exception:
+            pass
+        win.present()
+        GLib.idle_add(lambda: (_focus_password_entry(entry) or False))
+
+    app.connect("activate", on_activate)
+    app.run([])
+    return result["value"]
+
+
+def _gtk3_password() -> str | None:
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    from gi.repository import GLib, Gtk
+
+    GLib.set_prgname("fluxcast-askpass")
+    dialog = Gtk.Dialog(title=TITLE)
+    dialog.set_modal(True)
+    dialog.set_keep_above(True)
+    dialog.set_resizable(False)
+    dialog.set_default_size(480, 240)
+    dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+    dialog.add_button("Authenticate", Gtk.ResponseType.OK)
+    dialog.set_default_response(Gtk.ResponseType.OK)
+    box = dialog.get_content_area()
+    box.set_spacing(10)
+    box.set_margin_top(16)
+    box.set_margin_bottom(8)
+    box.set_margin_start(16)
+    box.set_margin_end(16)
+    label = Gtk.Label(label=PROMPT, xalign=0)
+    label.set_line_wrap(True)
+    hint = Gtk.Label(label=_netdev_hint(), xalign=0)
+    hint.set_line_wrap(True)
+    try:
+        hint.set_selectable(True)
+    except Exception:
+        pass
+    entry = Gtk.Entry()
+    entry.set_visibility(False)
+    entry.set_invisible_char("\u2022")
+    entry.set_activates_default(True)
+    entry.set_hexpand(True)
+    box.add(label)
+    box.add(entry)
+    box.add(hint)
+    _prevent_password_select_all(Gtk, GLib, entry)
+    dialog.show_all()
+    _focus_password_entry(entry)
+    dialog.present()
+    response = dialog.run()
+    value = entry.get_text() if response == Gtk.ResponseType.OK else None
+    dialog.destroy()
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+    return value
+
+
+def _tk_password() -> str | None:
+    import tkinter as tk
+    import tkinter.simpledialog as dialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    value = dialog.askstring(TITLE, f"{PROMPT}\n\n{_netdev_hint()}", show="*", parent=root)
+    root.destroy()
+    return value
+
+
+def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print("FluxCast SUDO_ASKPASS helper", file=sys.stderr)
+        return 0
+    # Do not warp/focus before the dialog maps — unpark racing this stole
+    # focus and made GTK re-select the password field on every key.
+    try:
+        return _main_prompt()
+    finally:
+        _hypr_seat_to_laptop()
+
+
+def _main_prompt() -> int:
+    _try_external()
+    backends = (
+        ("gtk4", _gtk4_password),
+        ("gtk3", _gtk3_password),
+        ("tk", _tk_password),
+    )
+    for name, fn in backends:
+        try:
+            value = fn()
+        except Exception:
+            _log(f"{name} failed:\n{traceback.format_exc()}")
+            continue
+        _log(f"{name} returned {'ok' if value is not None else 'cancel'}")
+        if value is None:
+            return 1
+        print(value)
+        return 0
+    print(
+        "fluxcast-askpass: no graphical password dialog found "
+        "(install zenity, python-gobject, or ssh-askpass)",
+        file=sys.stderr,
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

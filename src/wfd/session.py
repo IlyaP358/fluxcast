@@ -22,6 +22,7 @@ from .p2p.nm import (
 )
 from .p2p.peers import _scan_and_select
 from .p2p.usb_dedicated import _is_usb_wifi
+from .privileged import prime_privileged
 from .p2p.wpas import connect_via_wpa_supplicant, release_wpa_supplicant_connection
 from .probe import _active_rtsp_probe
 from .rtsp.rtsp_server import WFDRTSPServer
@@ -42,6 +43,12 @@ def _cleanup_step(label: str, action) -> None:
         print(f"[FluxCast WFD] Cleanup step '{label}' failed: {exc}")
 
 def start_experimental_backend(args) -> None:
+    # Health watcher unparks the Extend head as soon as the GO is up and
+    # SIGUSR1s FluxCast. The real handler is only installed after P2P/DHCP;
+    # default SIGUSR1 terminates the process (DHCP wait never finishes).
+    signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+    print("[FluxCast WFD] Requesting administrator access (sudo)...")
+    prime_privileged()
     usb_p2p = bool(args.wfd_interface and _is_usb_wifi(args.wfd_interface))
     if usb_p2p:
         print(
@@ -201,6 +208,10 @@ def start_experimental_backend(args) -> None:
                 _disconnect_device(device_path)
         except Exception:
             pass
+        if not getattr(args, "wfd_no_firewall", False):
+            # Open 7236 before GO/DHCP. The sink SYNs RTSP immediately after
+            # DHCPACK; opening the firewall afterwards drops that first try.
+            firewall_opened = _open_wfd_firewall_port(rtsp_port)
         rtsp.start()
         if usb_p2p:
             p2p_backend = "wpas"
@@ -254,11 +265,8 @@ def start_experimental_backend(args) -> None:
 
         if not getattr(args, "wfd_no_firewall", False):
             uibc_enabled = getattr(args, "wfd_uibc", False)
-            firewall_opened = _open_wfd_firewall_port(rtsp_port)
             if uibc_enabled:
                 uibc_firewall_opened = _open_wfd_firewall_port(WFD_UIBC_PORT)
-
-            # One hint per session, covering every port opened above.
             ufw_ports = [(rtsp_port, "RTSP")]
             if uibc_enabled:
                 ufw_ports.append((WFD_UIBC_PORT, "UIBC"))

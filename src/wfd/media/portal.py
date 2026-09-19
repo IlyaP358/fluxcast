@@ -96,8 +96,6 @@ class PortalMixin:
         requested_kbits = _bitrate_to_kbits(self.config.bitrate)
         effective_kbits = max(requested_kbits,
                               _quality_floor_kbits(out_w, out_h, self.config.fps))
-        if "LG" in self.config.peer_name.upper():
-            effective_kbits = min(effective_kbits, 4000)
         effective_bitrate = _kbits_to_bitrate_text(effective_kbits)
         if effective_kbits > requested_kbits:
             print("[FluxCast WFD Media] Raising bitrate for desktop clarity: "
@@ -283,10 +281,6 @@ class PortalMixin:
         floor_kbits = _quality_floor_kbits(parsed_out[0], parsed_out[1], self.config.fps)
         effective_kbits = max(requested_kbits, floor_kbits)
 
-        is_lg = "LG" in self.config.peer_name.upper()
-        if is_lg:
-            effective_kbits = min(effective_kbits, 4000)
-
         effective_bitrate = _kbits_to_bitrate_text(effective_kbits)
         if effective_kbits > requested_kbits:
             print(
@@ -322,8 +316,6 @@ class PortalMixin:
             if "min-force-user-latency" in props:
                 pipewire_args.append("min-force-user-latency=0")
 
-            is_lg = "LG" in self.config.peer_name.upper()
-
             # x264enc configuration
             encoder_args = [
                 "tune=zerolatency",
@@ -354,35 +346,22 @@ class PortalMixin:
                     "(option-string unavailable); update gst-plugins-ugly to fix periodic artifacts."
                 )
 
-            if is_lg:
-                # Limit VBV rate via GObject/fallback to prevent IDR spikes overflowing LG's buffer.
-                lg_vbv: list[str] = []
-
-                if "rc-lookahead" in x264_props:
-                    lg_vbv.append("rc-lookahead=0")
-
-                if "vbv-maxrate" in x264_props:
-                    lg_vbv.insert(0, f"vbv-maxrate={bitrate_kbits}")
-                elif "option-string" in x264_props:
-                    opt_parts.append(f"vbv-maxrate={bitrate_kbits}")
-
-                if "vbv-buf-capacity" in x264_props:
-                    lg_vbv.append("vbv-buf-capacity=100")
-                elif "option-string" in x264_props:
-                    opt_parts.append(f"vbv-bufsize={bitrate_kbits // 10}")
-
-                encoder_args += lg_vbv
-                if "vbv-maxrate" not in x264_props and "option-string" not in x264_props:
-                    print(
-                        "[FluxCast WFD Media] LG profile: VBV rate cap unavailable; "
-                        "update gst-plugins-ugly for better LG compatibility."
-                    )
-            else:
-                if "vbv-buf-capacity" in x264_props:
-                    encoder_args.append("vbv-buf-capacity=200")
-                # vbv-maxrate not exposed as GObject property; mirrors ffmpeg's -maxrate.
-                if "option-string" in x264_props:
-                    opt_parts.append(f"vbv-maxrate={bitrate_kbits}")
+            # Tight VBV (IDR-friendly) for all sinks; do not key off peer name.
+            if "rc-lookahead" in x264_props:
+                encoder_args.append("rc-lookahead=0")
+            if "vbv-maxrate" in x264_props:
+                encoder_args.append(f"vbv-maxrate={bitrate_kbits}")
+            elif "option-string" in x264_props:
+                opt_parts.append(f"vbv-maxrate={bitrate_kbits}")
+            if "vbv-buf-capacity" in x264_props:
+                encoder_args.append("vbv-buf-capacity=100")
+            elif "option-string" in x264_props:
+                opt_parts.append(f"vbv-bufsize={max(1, bitrate_kbits // 10)}")
+            if "vbv-maxrate" not in x264_props and "option-string" not in x264_props:
+                print(
+                    "[FluxCast WFD Media] Portal: VBV rate cap unavailable; "
+                    "update gst-plugins-ugly."
+                )
 
             if opt_parts:
                 encoder_args.append("option-string=" + ":".join(opt_parts))

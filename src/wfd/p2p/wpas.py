@@ -153,7 +153,7 @@ def _wpas_connect(iface_path: str, peer_path: str, go_intent: int = 0,
         f"'wps_method': <'{wps_method}'>, "
         f"'go_intent': <int32 {go_intent}>, "
         f"{freq_part}"
-        "'persistent': <false>"
+        "'persistent': <true>"
         "}"
     )
     result = _gdbus_call([

@@ -22,5 +22,6 @@ rm "$DESTDIR/usr/share/applications/fluxcast.desktop"
 rm "$DESTDIR/usr/share/icons/hicolor/512x512/apps/fluxcast.png"
 rm "$DESTDIR/usr/share/dbus-1/system.d/zz-dev.fluxcast.wpa-supplicant.conf"
 rm "$DESTDIR/usr/bin/fluxcast"
+rm -f "$DESTDIR/usr/libexec/fluxcast-askpass"
 
 echo -e "\e[1m\e[32m>>>\e[0m Uninstalled fluxcast successfully!"

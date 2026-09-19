@@ -244,9 +244,16 @@ def _mode_policy() -> str:
 
 
 def _best_advertised_mode(modes: list[WFDCEAMode]) -> Optional[WFDCEAMode]:
-    """Pick the richest progressive mode (pixel-rate, then pixels, then fps)."""
+    """Pick the richest progressive mode (pixel-rate, then pixels, then fps).
+
+    Prefer CEA 1080p over VESA 1920x1200. TVs that advertise 1200p often
+    black-screen it when the captured head is 1080p.
+    """
     if not modes:
         return None
+    cea_1080 = [m for m in modes if m.width == 1920 and m.height == 1080]
+    if cea_1080:
+        return max(cea_1080, key=lambda m: (m.fps, not m.interlaced))
     return max(
         modes,
         key=lambda m: (m.width * m.height * m.fps, m.width * m.height, m.fps),

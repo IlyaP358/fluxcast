@@ -13,10 +13,17 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wfd.p2p import formation
+from wfd.p2p.formation import freq_to_p2p_class_channel, peer_advertised_freqs
 from wfd.p2p.usb_dedicated import (
     _apply_5ghz_oper_preference,
+    _cached_listen_mhz,
+    _ensure_wpa_conf,
     _is_usb_wifi,
+    _persistent_go_ids,
+    _usb_go_intents,
     _wpa_bin,
+    mark_p2p_persistent_ok,
+    peer_has_persistent_ok,
     wpa_bound_to_iface,
 )
 
@@ -298,6 +305,28 @@ frequency: 2462 MHz
 """
 
 
+class P2pClassChannelTest(unittest.TestCase):
+    def test_24_social(self):
+        self.assertEqual(freq_to_p2p_class_channel(2412), ("81", "1"))
+        self.assertEqual(freq_to_p2p_class_channel(2437), ("81", "6"))
+        self.assertEqual(freq_to_p2p_class_channel(2462), ("81", "11"))
+
+    def test_5ghz_does_not_collapse_to_class_81(self):
+        self.assertEqual(freq_to_p2p_class_channel(5180), ("115", "36"))
+        self.assertEqual(freq_to_p2p_class_channel(5745), ("124", "149"))
+
+    def test_peer_channel_list_and_listen(self):
+        freqs = peer_advertised_freqs(
+            {
+                "listen_freq": "5745",
+                "channel_list": "81:1,6,11 115:36,40,44,48 124:149",
+            }
+        )
+        self.assertIn(2437, freqs)
+        self.assertIn(5745, freqs)
+        self.assertIn(5180, freqs)
+
+
 class UsbGo5GhzPreferenceTest(unittest.TestCase):
     def _run_pref(self, go_5ghz, peer_info):
         cli = mock.Mock()
@@ -342,11 +371,86 @@ class UsbGo5GhzPreferenceTest(unittest.TestCase):
         self.assertIn(("set", "p2p_oper_reg_class", "115"), sets)
         self.assertIn(("set", "p2p_oper_channel", "36"), sets)
 
+    def test_5ghz_listen_keeps_peer_channel_in_go_set(self):
+        sets = self._run_pref(False, {"listen_freq": "5745"})
+        self.assertIn(("set", "p2p_no_go_freq", ""), sets)
+        self.assertIn(("set", "p2p_oper_reg_class", "124"), sets)
+        self.assertIn(("set", "p2p_oper_channel", "149"), sets)
+
     def test_go_5ghz_without_peer_5ghz_keeps_24_oper_without_exclude(self):
         sets = self._run_pref(True, {"listen_freq": "2437"})
         self.assertIn(("set", "p2p_no_go_freq", ""), sets)
         self.assertIn(("set", "p2p_oper_reg_class", "81"), sets)
         self.assertIn(("set", "p2p_oper_channel", "6"), sets)
+
+
+class PersistentPlayMarkerTest(unittest.TestCase):
+    def test_play_marker_roundtrip(self):
+        import tempfile
+        from pathlib import Path
+        from wfd.p2p import usb_dedicated as u
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(u, "_state_dir", return_value=Path(tmp)):
+                self.assertFalse(peer_has_persistent_ok("AA:BB:CC:DD:EE:FF"))
+                mark_p2p_persistent_ok("AA:BB:CC:DD:EE:FF")
+                self.assertTrue(peer_has_persistent_ok("aa:bb:cc:dd:ee:ff"))
+
+
+class PersistentGroupConfTest(unittest.TestCase):
+    def test_parse_persistent_ids(self):
+        text = (
+            "network id / ssid / bssid / flags\n"
+            "0\tDIRECT-xx-kenya\tany\t[DISABLED][P2P-PERSISTENT]\n"
+            "1\toffice\tany\t[CURRENT]\n"
+        )
+        self.assertEqual(_persistent_go_ids(text), [0])
+
+    def test_write_wpa_conf_falls_back_to_privileged(self):
+        import tempfile
+        from pathlib import Path
+        from wfd.p2p import usb_dedicated as u
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = Path(tmp) / "usb-wpa.conf"
+            conf.write_text("old\n")
+            conf.chmod(0o444)
+            with mock.patch.object(u, "run_privileged", return_value=mock.Mock(returncode=0, stdout="")) as rp:
+                u._write_wpa_conf(conf, "new\n")
+            self.assertTrue(any(c[0][0][:1] == ["cp"] or "cp" in c[0][0] for c in rp.call_args_list) or rp.called)
+
+    def test_ensure_wpa_conf_keeps_networks(self):
+        import tempfile
+        from pathlib import Path
+        from wfd.p2p import usb_dedicated as u
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = Path(tmp) / "usb-wpa.conf"
+            conf.write_text(
+                "ctrl_interface=/old\ndevice_name=old\n\n"
+                "network={\n\tssid=\"DIRECT-ab\"\n\tdisabled=2\n\tmode=3\n}\n"
+            )
+            with mock.patch.object(u, "_conf_path", return_value=conf):
+                u._ensure_wpa_conf()
+            text = conf.read_text()
+            self.assertIn("update_config=1", text)
+            self.assertIn("persistent_reconnect=1", text)
+            self.assertIn('ssid="DIRECT-ab"', text)
+            self.assertIn("disabled=2", text)
+
+
+class UsbGoIntentTest(unittest.TestCase):
+    def test_24_only_never_falls_back_to_client(self):
+        self.assertEqual(_usb_go_intents(0, False), [15])
+        self.assertEqual(_usb_go_intents(15, False), [15])
+
+    def test_5ghz_allowed_tries_go_then_client(self):
+        self.assertEqual(_usb_go_intents(0, True), [15, 0])
+        self.assertEqual(_usb_go_intents(15, True), [15, 0])
+
+    def test_cached_listen_from_env(self):
+        with mock.patch.dict("os.environ", {"FLUXCAST_PEER_LISTEN_MHZ": "5745"}):
+            self.assertEqual(_cached_listen_mhz("62:ab:14:3d:6e:e4"), 5745)
 
 
 if __name__ == "__main__":

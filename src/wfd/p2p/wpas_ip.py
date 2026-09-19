@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..config import WFDNotReady
+from ..privileged import run_privileged, wrap_privileged
 
 # Standard Wi-Fi Direct convention subnet (matches diagnostics.py's own
 # "P2P subnet" check, and Android's own WiFi Direct GO addressing) - used
@@ -36,13 +37,8 @@ _go_dnsmasq_lease_file: Optional[str] = None
 
 
 def _sudo_run(args: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
-    """Like subprocess.run, but under sudo. This whole backend runs as the
-    calling user (main.py is never invoked with sudo itself) - binding a DHCP
-    client/server to a raw interface and touching routes both need root.
-    sudo's password prompt goes straight to the controlling terminal, so this
-    stays interactive if the session's cached sudo timestamp has expired.
-    """
-    return subprocess.run(["sudo", *args], capture_output=True, text=True, timeout=timeout)
+    """Run *args* as root via the shared privileged helper (sudo / sudo -A)."""
+    return run_privileged(args, timeout=timeout)
 
 
 def get_p2p_role(iface: str) -> str:
@@ -105,6 +101,68 @@ def release_ip_config(iface: str) -> None:
 # GO role: we host DHCP for the projector.
 # ---------------------------------------------------------------------------
 
+def _normalize_mac(mac: str) -> str:
+    return mac.lower().replace("-", ":")
+
+
+def _associated_sta_macs(iface: str) -> list[str]:
+    """P2P *interface* addresses (often != the advertised device address)."""
+    try:
+        result = subprocess.run(
+            ["iw", "dev", iface, "station", "dump"],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    macs: list[str] = []
+    for line in result.stdout.splitlines():
+        if not line.startswith("Station "):
+            continue
+        mac = line.split()[1].strip()
+        if re.fullmatch(r"[0-9a-fA-F:]{17}", mac):
+            key = _normalize_mac(mac)
+            if key not in macs:
+                macs.append(key)
+    return macs
+
+
+def _dhcp_host_macs(iface: str, peer_mac: str) -> list[str]:
+    macs: list[str] = []
+    for raw in (peer_mac, *_associated_sta_macs(iface)):
+        key = _normalize_mac(raw)
+        if re.fullmatch(r"[0-9a-f:]{17}", key) and key not in macs:
+            macs.append(key)
+    return macs
+
+
+def _macs_refused_in_log(log: str) -> list[str]:
+    found: list[str] = []
+    for match in re.finditer(
+        r"DHCPDISCOVER\([^)]*\)\s+([0-9a-fA-F:]{17})\s+no address available",
+        log,
+        re.I,
+    ):
+        key = _normalize_mac(match.group(1))
+        if key not in found:
+            found.append(key)
+    return found
+
+
+def _iface_has_go_ip(iface: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "addr", "show", "dev", iface],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return f"{WFD_P2P_SUBNET}.1/" in (result.stdout or "")
+
+
 def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
                 timeout: float = 40.0) -> None:
     global _go_dnsmasq_lease_file
@@ -118,6 +176,36 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
     # own "shared" mode (self-assign + its own dnsmasq) on it concurrently,
     # which would conflict with the dnsmasq instance we're about to start.
     mark_unmanaged(iface)
+    lease_file = f"/tmp/fluxcast-dnsmasq-{iface}.leases"
+    dnsmasq_log = f"/tmp/fluxcast-dnsmasq-{iface}.log"
+    extra_now = _associated_sta_macs(iface)
+    if _iface_has_go_ip(iface):
+        existing = _wait_for_lease(
+            lease_file,
+            peer_mac,
+            0.5,
+            dnsmasq_log=dnsmasq_log,
+            extra_macs=extra_now,
+        )
+        if existing:
+            print(
+                f"[FluxCast WFD] GO {iface} already serving {existing}; "
+                "not restarting dnsmasq"
+            )
+            subprocess.run(
+                ["ping", "-c", "1", "-W", "2", "-I", iface, existing],
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+            )
+            return
+    # Kill leftover dnsmasq *before* flushing the GO address. A stale
+    # instance (previous attempt, missing dhcp-host) answers DISCOVER with
+    # "no address available" and "packet received on p2p-0 which has no
+    # address", and the sink gives up before the new daemon can ACK.
+    _sudo_run(["pkill", "-f", f"dnsmasq.*{lease_file}"], timeout=5.0)
+    _sudo_run(["pkill", "-f", f"dnsmasq.*--interface={iface}"], timeout=5.0)
+    time.sleep(0.3)
     _sudo_run(["ip", "addr", "flush", "dev", iface], timeout=5.0)
     add = _sudo_run(["ip", "addr", "add", f"{gateway_ip}/24", "dev", iface], timeout=5.0)
     if add.returncode != 0:
@@ -134,15 +222,15 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
     if not shutil.which("dnsmasq"):
         raise WFDNotReady("dnsmasq not found - needed to serve DHCP while we're P2P GO.")
 
-    lease_file = f"/tmp/fluxcast-dnsmasq-{iface}.leases"
     # Previous GO runs start dnsmasq via sudo; the lease file is root-owned.
     # os.remove then raises PermissionError and aborts after GROUP-STARTED.
-    _sudo_run(["pkill", "-f", f"dnsmasq.*{lease_file}"], timeout=5.0)
     _sudo_run(["rm", "-f", lease_file], timeout=5.0)
     _sudo_run(["touch", lease_file], timeout=5.0)
     _sudo_run(["chmod", "a+rw", lease_file], timeout=5.0)
+    _sudo_run(["rm", "-f", dnsmasq_log], timeout=5.0)
+    _sudo_run(["touch", dnsmasq_log], timeout=5.0)
+    _sudo_run(["chmod", "a+rw", dnsmasq_log], timeout=5.0)
     _go_dnsmasq_lease_file = lease_file
-    dnsmasq_log = f"/tmp/fluxcast-dnsmasq-{iface}.log"
 
     # dnsmasq is scoped by the sink's MAC address (--dhcp-host + a tagged
     # --dhcp-range) rather than by interface. This matters for two reasons:
@@ -160,28 +248,98 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
     # Note that listing an interface explicitly disables --bind-dynamic's
     # usual auto-detection for any *other* interface, so once physical_iface
     # is involved at all, both interfaces need to be named explicitly.
-    dnsmasq_cmd = ["sudo", "dnsmasq", "--no-daemon", "--bind-dynamic",
-                   f"--interface={iface}"]
-    if physical_iface:
-        dnsmasq_cmd.append(f"--interface={physical_iface}")
-    dnsmasq_cmd += [
-        # --dhcp-host sets the wfdsink tag on the sink's MAC. The range
-        # must then require that tag (tag:) to actually restrict who's
-        # eligible for it - set:wfdsink here would instead apply the tag
-        # to whoever happens to take an address, which doesn't restrict
-        # anything and would turn physical_iface into an open DHCP server
-        # for every other device on that network.
-        f"--dhcp-host={peer_mac},set:wfdsink",
-        f"--dhcp-range=tag:wfdsink,{WFD_P2P_SUBNET}.2,{WFD_P2P_SUBNET}.254,255.255.255.0,1h",
-        f"--dhcp-leasefile={lease_file}",
-        "--port=0",  # DHCP only, no DNS service on this interface
-        "--no-resolv", "--no-hosts",
-    ]
-    print(f"[FluxCast WFD] Starting dnsmasq on {iface}...")
-    log_fp = open(dnsmasq_log, "ab", buffering=0)
-    subprocess.Popen(dnsmasq_cmd, stdout=log_fp, stderr=subprocess.STDOUT, start_new_session=True)
-    print(f"[FluxCast WFD] Waiting up to {timeout:.0f}s for DHCP lease from {peer_mac}...")
-    peer_ip = _wait_for_lease(lease_file, peer_mac, timeout, dnsmasq_log=dnsmasq_log)
+    # --dhcp-host sets the wfdsink tag on the sink's MAC. The range
+    # must then require that tag (tag:) to actually restrict who's
+    # eligible for it - set:wfdsink here would instead apply the tag
+    # to whoever happens to take an address, which doesn't restrict
+    # anything and would turn physical_iface into an open DHCP server
+    # for every other device on that network.
+    #
+    # P2P device address (peer_mac) is not always the DHCP client
+    # hardware address. P2P clients often DHCP from the *interface*
+    # address (AP-STA-CONNECTED) which differs from the device address.
+    host_macs = _dhcp_host_macs(iface, peer_mac)
+    remaining = timeout
+    peer_ip = None
+    for attempt in range(2):
+        host_args = [f"--dhcp-host={mac},set:wfdsink" for mac in host_macs]
+        dnsmasq_cmd = ["dnsmasq", "--no-daemon", "--bind-dynamic",
+                       f"--interface={iface}"]
+        if physical_iface:
+            # Parent STA radio: MAC-tag the range so we are not a rogue
+            # DHCP server on the office LAN.
+            dnsmasq_cmd.append(f"--interface={physical_iface}")
+            range_arg = (
+                f"--dhcp-range=tag:wfdsink,{WFD_P2P_SUBNET}.2,"
+                f"{WFD_P2P_SUBNET}.254,255.255.255.0,1h"
+            )
+        else:
+            # Dedicated P2P GO: only this BSS. Untagged range so the
+            # sink's P2P *interface* MAC still gets a lease.
+            range_arg = (
+                f"--dhcp-range={WFD_P2P_SUBNET}.2,"
+                f"{WFD_P2P_SUBNET}.254,255.255.255.0,1h"
+            )
+        dnsmasq_cmd += [
+            *host_args,
+            range_arg,
+            f"--dhcp-option=3,{WFD_P2P_SUBNET}.1",
+            f"--dhcp-option=6,{WFD_P2P_SUBNET}.1",
+            f"--dhcp-leasefile={lease_file}",
+            "--port=0",
+            "--no-resolv", "--no-hosts",
+        ]
+        dnsmasq_cmd, dnsmasq_env = wrap_privileged(dnsmasq_cmd)
+        extra = [m for m in host_macs if m != _normalize_mac(peer_mac)]
+        extra_note = f" (also {', '.join(extra)})" if extra else ""
+        print(f"[FluxCast WFD] Starting dnsmasq on {iface}{extra_note}...")
+        log_fp = open(dnsmasq_log, "ab", buffering=0)
+        subprocess.Popen(
+            dnsmasq_cmd,
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=dnsmasq_env,
+        )
+        print(
+            f"[FluxCast WFD] Waiting up to {remaining:.0f}s for DHCP lease "
+            f"from {peer_mac}..."
+        )
+        t0 = time.monotonic()
+        peer_ip = _wait_for_lease(
+            lease_file,
+            peer_mac,
+            remaining,
+            dnsmasq_log=dnsmasq_log,
+            extra_macs=extra,
+        )
+        remaining -= time.monotonic() - t0
+        if peer_ip:
+            break
+        try:
+            log = Path(dnsmasq_log).read_text(errors="replace")
+        except OSError:
+            log = ""
+        refused = _macs_refused_in_log(log)
+        new_macs = [m for m in refused if m not in host_macs]
+        stale = bool(refused) and not new_macs and attempt == 0
+        if remaining < 8 or not (new_macs or stale):
+            break
+        if new_macs:
+            print(
+                "[FluxCast WFD] DHCPDISCOVER from P2P interface MAC "
+                f"{', '.join(new_macs)} (device addr {peer_mac}); "
+                "restarting dnsmasq with that host"
+            )
+            host_macs.extend(new_macs)
+        else:
+            print(
+                "[FluxCast WFD] Stale dnsmasq refused "
+                f"{', '.join(refused)}; restarting"
+            )
+        _sudo_run(["pkill", "-f", f"dnsmasq.*{lease_file}"], timeout=5.0)
+        _sudo_run(["pkill", "-f", f"dnsmasq.*--interface={iface}"], timeout=5.0)
+        time.sleep(0.3)
     if not peer_ip:
         try:
             with open(dnsmasq_log) as f:
@@ -195,6 +353,32 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
             "not have real client-mode network logic to fall back on)."
         )
     print(f"[FluxCast WFD] Projector leased {peer_ip}. Seeding ARP entry...")
+    _sudo_run(
+        ["sysctl", "-w", f"net.ipv4.conf.{iface}.rp_filter=0"],
+        timeout=3.0,
+    )
+    ins = _sudo_run(
+        [
+            "iptables", "-C", "INPUT", "-i", iface, "-p", "tcp",
+            "--dport", "7236", "-j", "ACCEPT",
+        ],
+        timeout=3.0,
+    )
+    if ins.returncode != 0:
+        _sudo_run(
+            [
+                "iptables", "-I", "INPUT", "1", "-i", iface, "-p", "tcp",
+                "--dport", "7236", "-j", "ACCEPT",
+            ],
+            timeout=3.0,
+        )
+    _sudo_run(
+        [
+            "ufw", "allow", "in", "on", iface, "to", "any", "port", "7236",
+            "proto", "tcp",
+        ],
+        timeout=8.0,
+    )
     subprocess.run(["ping", "-c", "1", "-W", "2", "-I", iface, peer_ip],
                     capture_output=True, text=True, timeout=5.0)
 
@@ -220,31 +404,50 @@ def _wait_for_lease(
     peer_mac: str,
     timeout: float,
     dnsmasq_log: Optional[str] = None,
+    extra_macs: Optional[list[str]] = None,
 ) -> Optional[str]:
-    target = peer_mac.lower().replace("-", ":")
+    targets = {_normalize_mac(peer_mac)}
+    for mac in extra_macs or []:
+        targets.add(_normalize_mac(mac))
     ack_re = re.compile(
-        r"DHCPACK\([^)]*\)\s+(\d+\.\d+\.\d+\.\d+)\s+" + re.escape(target),
+        r"DHCPACK\([^)]*\)\s+(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F:.-]{17})",
         re.I,
     )
     deadline = time.monotonic() + timeout
+    _sudo_run(["chmod", "a+rw", lease_file], timeout=3.0)
     while time.monotonic() < deadline:
-        _sudo_run(["chmod", "a+rw", lease_file], timeout=3.0)
         try:
             with open(lease_file) as f:
                 for line in f:
                     parts = line.split()
-                    if len(parts) >= 3 and parts[1].lower().replace("-", ":") == target:
-                        return parts[2]
+                    if len(parts) < 3:
+                        continue
+                    mac = _normalize_mac(parts[1])
+                    ip = parts[2]
+                    if mac in targets or ip.startswith(WFD_P2P_SUBNET + "."):
+                        return ip
         except OSError:
-            pass
+            cat = _sudo_run(["cat", lease_file], timeout=3.0)
+            for line in (cat.stdout or "").splitlines():
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mac = _normalize_mac(parts[1])
+                ip = parts[2]
+                if mac in targets or ip.startswith(WFD_P2P_SUBNET + "."):
+                    return ip
         if dnsmasq_log:
             try:
                 log = Path(dnsmasq_log).read_text(errors="replace")
             except OSError:
                 log = ""
-            m = ack_re.search(log)
-            if m:
-                return m.group(1)
+            for match in ack_re.finditer(log):
+                mac = _normalize_mac(match.group(2))
+                ip = match.group(1)
+                if mac in targets or ip.startswith(WFD_P2P_SUBNET + "."):
+                    return ip
+        if timeout <= 0.5:
+            break
         time.sleep(0.4)
     return None
 

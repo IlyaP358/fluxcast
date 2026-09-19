@@ -39,10 +39,55 @@ def peer_listen_freq(
     return default
 
 
+def freq_to_p2p_class_channel(freq: int) -> tuple[str, str]:
+    """Map MHz → (global oper class, channel) for p2p_listen_* / p2p_pref_chan.
+
+    Wi-Fi P2P uses operating classes (81 = 2.4 GHz 20 MHz, 115/118/121/124 =
+    5 GHz 20 MHz). A 5 GHz listen freq must not collapse to class 81.
+    """
+    if 2400 <= freq < 2500:
+        ch = {2412: 1, 2437: 6, 2462: 11}.get(freq)
+        if ch is None:
+            ch = (freq - 2407) // 5
+        return "81", str(ch)
+    if 5000 <= freq <= 5925:
+        ch = (freq - 5000) // 5
+        return oper_class_for_5ghz_channel(ch), str(ch)
+    return "81", "6"
+
+
 def freq_to_social_channel(freq: int) -> tuple[str, str]:
-    """Map common 2.4 GHz MHz → (reg_class, channel) for p2p listen/oper."""
-    ch = {2412: "1", 2437: "6", 2462: "11"}.get(freq, "6")
-    return "81", ch
+    """Alias: listen/oper class+channel for any band (not 2.4-only)."""
+    return freq_to_p2p_class_channel(freq)
+
+
+def peer_advertised_freqs(peer_info: Mapping[str, str]) -> set[int]:
+    """Frequencies the peer listed (listen/oper + P2P channel_list)."""
+    out: set[int] = set()
+    for key in ("listen_freq", "oper_freq", "freq"):
+        try:
+            freq = int(peer_info.get(key) or 0)
+        except ValueError:
+            continue
+        if 2400 <= freq <= 5925:
+            out.add(freq)
+    blob = " ".join(
+        str(peer_info.get(k) or "")
+        for k in ("channels", "channel_list", "freq_list")
+    )
+    for m in re.finditer(
+        r"\b(81|115|118|121|124|125):([0-9,]+)", blob
+    ):
+        cls, chans = m.group(1), m.group(2)
+        for token in chans.split(","):
+            if not token.strip().isdigit():
+                continue
+            ch = int(token.strip())
+            if cls == "81":
+                out.add(2407 + 5 * ch)
+            else:
+                out.add(5000 + 5 * ch)
+    return out
 
 
 def parse_iw_phy_caps(iw_phy_text: str) -> dict[str, bool]:
@@ -243,6 +288,7 @@ def oper_class_for_5ghz_channel(channel: int) -> str:
 def first_quiet_5ghz_oper(
     local_5ghz: list[tuple[int, int]],
     occupied_mhz: tuple[int, int] | None = None,
+    prefer_freq: int | None = None,
 ) -> tuple[str, str, int] | None:
     """First 5 GHz channel this phy can use that is outside occupied_mhz.
 
@@ -251,12 +297,21 @@ def first_quiet_5ghz_oper(
     """
     if not local_5ghz:
         return None
-    for ch, freq in local_5ghz:
+
+    def ok(freq: int) -> bool:
         if occupied_mhz:
             lo, hi = occupied_mhz
             if lo <= freq <= hi:
-                continue
-        return oper_class_for_5ghz_channel(ch), str(ch), freq
+                return False
+        return True
+
+    if prefer_freq and prefer_freq >= 5000:
+        for ch, freq in local_5ghz:
+            if freq == prefer_freq and ok(freq):
+                return oper_class_for_5ghz_channel(ch), str(ch), freq
+    for ch, freq in local_5ghz:
+        if ok(freq):
+            return oper_class_for_5ghz_channel(ch), str(ch), freq
     ch, freq = local_5ghz[0]
     return oper_class_for_5ghz_channel(ch), str(ch), freq
 

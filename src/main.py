@@ -298,7 +298,10 @@ def main() -> None:
 
     if args.wfd_scan:
         from wfd import WFDNotReady, active_scan, print_scan
+        from wfd.privileged import prime_privileged
         try:
+            print("[FluxCast WFD] Requesting administrator access (sudo)...")
+            prime_privileged()
             peers = active_scan(interface=args.wfd_interface, timeout=args.wfd_timeout)
         except WFDNotReady as exc:
             print(f"[FluxCast WFD] ERROR: {exc}")

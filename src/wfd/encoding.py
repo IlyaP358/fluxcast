@@ -53,8 +53,7 @@ def _vbv_bufsize(bitrate_text: str, config: WFDMediaConfig) -> str:
         except ValueError:
             multiplier = 0.5
     else:
-        # 0.5 validated on hotyeah pipe+LPCM (stable TX, acceptable lag).
-        # LG historically used 0.5; non-LG used 2.0 (extra lag, little gain).
+        # 0.5 s VBV: low-latency WFD; longer buffers add lag with little gain.
         multiplier = 0.5
 
     amount *= multiplier
@@ -98,13 +97,9 @@ def _quality_floor_kbits(width: int, height: int, fps: int) -> int:
     return 14000 if fps <= 30 else 20000
 
 def _calculate_gop(config: WFDMediaConfig) -> int:
+    """IDR interval in frames.
+
+    Miracast sinks recover from loss on IDR. Cap at 30 frames (~0.5–1 s at
+    30–60 fps) for all sinks — not a per-brand special case.
     """
-    Calculate Group of Pictures (GOP) size.
-    LG TVs are strict and often require more frequent keyframes (IDR frames)
-    to maintain a stable session, especially during initial buffering.
-    """
-    gop = max(1, config.fps)
-    if "LG" in config.peer_name.upper():
-        # For LG, use a 0.5s or 1s GOP but no more than 30 frames.
-        return min(gop, 30)
-    return gop
+    return min(max(1, int(config.fps or 30)), 30)

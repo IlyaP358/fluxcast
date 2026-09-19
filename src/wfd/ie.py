@@ -26,6 +26,24 @@ def _wfd_ie_device_info(rtsp_port: int) -> bytes:
         0x00, 0xc8   # Throughput: 100 Mbps
     ])
 
+
+def wfd_wpa_cli_device_info_hex(rtsp_port: int) -> str:
+    """Hex for ``wfd_subelem_set 0``. wpa_cli prepends the subelem ID.
+
+    Payload is 2-byte length + 6-byte body (Android/miraclecast). Without
+    the length, parsers treat 0x0010 as length 16 and skip RTSP.
+    """
+    port = max(1, min(int(rtsp_port), 65535))
+    return f"0006{0x0010:04x}{port:04x}00c8"
+
+
+def wfd_wpa_cli_local_ip_hex(ipv4: str = "192.168.49.1") -> str:
+    """Hex for ``wfd_subelem_set 8`` (IPv4 version 1 + address)."""
+    parts = [int(p) for p in ipv4.split(".")]
+    if len(parts) != 4 or any(p < 0 or p > 255 for p in parts):
+        parts = [192, 168, 49, 1]
+    return "000501" + "".join(f"{p:02x}" for p in parts)
+
 def _wfd_ie_device_name(name: str) -> bytes:
     """
     WFD Subelement ID 10: WFD Device Name

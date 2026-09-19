@@ -7,7 +7,11 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wfd.config import WFDNotReady  # noqa: E402
-from wfd.ie import _wfd_ie_device_info  # noqa: E402
+from wfd.ie import (  # noqa: E402
+    _wfd_ie_device_info,
+    wfd_wpa_cli_device_info_hex,
+    wfd_wpa_cli_local_ip_hex,
+)
 from wfd.p2p import dbus, device, wpas, wpas_ip  # noqa: E402
 from wfd.p2p.dbus import _wfd_source_ie  # noqa: E402
 
@@ -41,6 +45,15 @@ class WfdDeviceInfoIeTest(unittest.TestCase):
         self.assertEqual(ie[0:3], bytes([0x00, 0x00, 0x06]))  # subelem 0, length 6
         port = (ie[5] << 8) | ie[6]
         self.assertEqual(port, 7236)
+
+    def test_wpa_cli_hex_includes_length_so_lg_parses_rtsp_port(self):
+        hexstr = wfd_wpa_cli_device_info_hex(7236)
+        self.assertEqual(hexstr, "000600101c4400c8")
+        stored = bytes.fromhex("00" + hexstr)  # wpa_cli prepends subelem id
+        self.assertEqual(stored[1:3], bytes([0x00, 0x06]))
+        self.assertEqual((stored[3] << 8) | stored[4], 0x0010)
+        self.assertEqual((stored[5] << 8) | stored[6], 7236)
+        self.assertEqual(wfd_wpa_cli_local_ip_hex(), "000501c0a83101")
 
     def test_rejects_out_of_range_port(self):
         with self.assertRaises(WFDNotReady):
@@ -148,6 +161,41 @@ class RunAsGoDnsmasqCommandTest(unittest.TestCase):
         self.assertIn("tag:wfdsink", range_arg)
         self.assertNotIn("set:wfdsink", range_arg)
         self.assertIn("set:wfdsink", host_arg)
+        self.assertIn(PEER_MAC, host_arg)
+
+    def test_dedicated_go_without_physical_uses_untagged_range(self):
+        with mock.patch.object(wpas_ip, "mark_unmanaged"), \
+             mock.patch.object(wpas_ip, "_sudo_run", return_value=_completed()), \
+             mock.patch.object(wpas_ip, "_wait_for_link_running", return_value=True), \
+             mock.patch.object(wpas_ip.shutil, "which", return_value="/usr/sbin/dnsmasq"), \
+             mock.patch.object(wpas_ip, "_associated_sta_macs", return_value=["66:ab:14:3d:6e:e4"]), \
+             mock.patch("builtins.open", mock.mock_open()), \
+             mock.patch.object(wpas_ip.subprocess, "Popen") as popen, \
+             mock.patch.object(wpas_ip.subprocess, "run", return_value=_completed()), \
+             mock.patch.object(wpas_ip, "_wait_for_lease", return_value="192.168.49.5"):
+            wpas_ip._run_as_go("p2p-0", "62:ab:14:3d:6e:e4")
+        cmd = popen.call_args[0][0]
+        range_arg = next(a for a in cmd if a.startswith("--dhcp-range="))
+        self.assertNotIn("tag:wfdsink", range_arg)
+        self.assertIn("192.168.49.2", range_arg)
+        self.assertFalse(any(a.startswith("--interface=wlp") for a in cmd))
+
+    def test_dhcp_host_includes_associated_interface_mac(self):
+        sta = "66:ab:14:3d:6e:e4"
+        with mock.patch.object(wpas_ip, "mark_unmanaged"), \
+             mock.patch.object(wpas_ip, "_sudo_run", return_value=_completed()), \
+             mock.patch.object(wpas_ip, "_wait_for_link_running", return_value=True), \
+             mock.patch.object(wpas_ip.shutil, "which", return_value="/usr/sbin/dnsmasq"), \
+             mock.patch.object(wpas_ip, "_associated_sta_macs", return_value=[sta]), \
+             mock.patch("builtins.open", mock.mock_open()), \
+             mock.patch.object(wpas_ip.subprocess, "Popen") as popen, \
+             mock.patch.object(wpas_ip.subprocess, "run", return_value=_completed()), \
+             mock.patch.object(wpas_ip, "_wait_for_lease", return_value="192.168.49.5"):
+            wpas_ip._run_as_go("p2p-0", "62:ab:14:3d:6e:e4", physical_iface="wlp0s20f0u4")
+        cmd = popen.call_args[0][0]
+        hosts = [a for a in cmd if a.startswith("--dhcp-host=")]
+        self.assertTrue(any("62:ab:14:3d:6e:e4" in a for a in hosts))
+        self.assertTrue(any("66:ab:14:3d:6e:e4" in a for a in hosts))
 
 
 def _access_denied():
@@ -268,6 +316,43 @@ class WaitForLeaseTest(unittest.TestCase):
                     str(lease), PEER_MAC, timeout=0.2, dnsmasq_log=str(log)
                 )
             self.assertEqual(ip, "192.168.49.10")
+
+    def test_lease_file_any_p2p_subnet_ip(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            lease = Path(tmp) / "leases"
+            lease.write_text(
+                "123 66:ab:14:3d:6e:e4 192.168.49.178 LGwebOSTV *\n"
+            )
+            with mock.patch.object(wpas_ip, "_sudo_run", return_value=_completed()):
+                ip = wpas_ip._wait_for_lease(
+                    str(lease), "62:ab:14:3d:6e:e4", timeout=0.2
+                )
+            self.assertEqual(ip, "192.168.49.178")
+
+    def test_parses_dhcpack_for_p2p_interface_mac(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            lease = Path(tmp) / "leases"
+            log = Path(tmp) / "dnsmasq.log"
+            lease.write_text("")
+            log.write_text(
+                "dnsmasq-dhcp: DHCPDISCOVER(p2p-0) 66:ab:14:3d:6e:e4 no address available\n"
+                "dnsmasq-dhcp: DHCPACK(p2p-0) 192.168.49.7 66:ab:14:3d:6e:e4 sink\n"
+            )
+            with mock.patch.object(wpas_ip, "_sudo_run", return_value=_completed()):
+                ip = wpas_ip._wait_for_lease(
+                    str(lease),
+                    "62:ab:14:3d:6e:e4",
+                    timeout=0.2,
+                    dnsmasq_log=str(log),
+                    extra_macs=["66:ab:14:3d:6e:e4"],
+                )
+            self.assertEqual(ip, "192.168.49.7")
 
 
 if __name__ == "__main__":

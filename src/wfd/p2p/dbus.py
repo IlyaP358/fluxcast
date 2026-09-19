@@ -6,6 +6,7 @@ from typing import Optional
 from ..config import WFDNotReady
 from ..constants import NM_DEST, _DEVICE_NAME
 from ..ie import _wfd_ie_device_info, _wfd_ie_device_name
+from ..privileged import wrap_privileged
 from ..proc import _run
 
 WPA_DEST = "fi.w1.wpa_supplicant1"
@@ -122,11 +123,14 @@ def _gdbus_call(args: list[str], timeout: float = 5.0,
         result = _run(cmd, timeout=timeout)
         if result.returncode == 0 or "AccessDenied" not in (result.stderr or result.stdout or ""):
             return result
-        # No -n: sudo's password prompt goes straight to the controlling
-        # terminal (/dev/tty) regardless of stdout/stderr capture here, so
-        # this still works interactively. Falls through instantly if the
-        # session's sudo timestamp is already cached from an earlier command.
-        return _run(["sudo", *cmd], timeout=timeout)
+        # wrap_privileged: stdin TTY → sudo; otherwise sudo -A + graphical
+        # askpass (even if /dev/tty exists). Never sudo -n. Cached sudo
+        # timestamp (~5 min) covers later calls.
+        wrapped, env = wrap_privileged(cmd)
+        retry_timeout = timeout
+        if wrapped[:2] == ["sudo", "-A"]:
+            retry_timeout = max(timeout, 120.0)
+        return _run(wrapped, timeout=retry_timeout, env=env)
     except subprocess.TimeoutExpired as exc:
         raise WFDNotReady(f"{method} timed out after {timeout:.0f}s") from exc
 

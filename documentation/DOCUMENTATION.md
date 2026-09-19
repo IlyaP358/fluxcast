@@ -206,11 +206,17 @@ and protocol selection remain controlled by the tray and cannot be set here.
     P2P address range changes.
 - `--wfd-go-5ghz`
   - USB / secondary-radio GO only. Default USB GO drops 5 GHz from the
-    channel set (`p2p_no_go_freq` plus `p2p_pref_chan`) so GO Negotiation
-    lands on 2.4 GHz without `p2p_connect freq=` (which hops off the peer
-    listen channel and breaks Confirm). This flag keeps 5 GHz in the set.
+    channel set unless the *peer listen frequency* is 5 GHz (WPS stays on
+    the Neg channel; Wi-Fi Direct). Never `p2p_connect freq=`. After
+    GROUP-STARTED, 1-stream 5 GHz GOs CSA to 2.4 GHz before RTSP (weak
+    USB TX). This flag keeps 5 GHz in the set even when the peer listens
+    on 2.4.
   - Ignored on NetworkManager / non-USB ifaces. Equivalent env:
     `FLUXCAST_WFD_GO_5GHZ=1`.
+  - Dedicated USB `wpa_supplicant` sets WFD Device Info as Source +
+    session available with a length-prefixed `wfd_subelem_set` (RTSP
+    7236). Persistent P2P groups are saved after PLAY; later connects
+    may `p2p_invite` instead of a new accept dialog.
 - `--wfd-p2p-backend`
   - `nm` (default) brings up the P2P link through NetworkManager.
   - `wpas` talks to wpa_supplicant's own D-Bus interface directly instead,
@@ -222,6 +228,19 @@ and protocol selection remain controlled by the tray and cannot be set here.
     without sudo, courtesy of the `netdev` grant in the distro's own
     `wpa_supplicant.conf`; elsewhere (including Arch, this project's
     primary platform) it falls back to sudo - see the file for details.
+  - Privileged work (gdbus retry, `ip`/`dnsmasq`/`nmcli`, dedicated USB
+    wpa) goes through one helper (`wfd/privileged.py`): `sudo` when stdin
+    is a TTY, or `sudo -A` plus `meta/fluxcast-askpass` when stdin is not
+    (tray / panel / piped logs). A session `/dev/tty` is not treated as
+    interactive — Hyprland can open it while sudo still has nowhere
+    visible to prompt. The askpass helper tries zenity/kdialog/yad/wofi/
+    rofi, then GTK4/GTK3 via PyGObject (`python-gobject`), then Tk. The first
+    prompt caches sudo's timestamp. `sudo -A` has no terminal, so the
+    default `timestamp_type=tty` behaves like per-parent-pid and would
+    re-prompt on every scan/start; after the first success FluxCast
+    installs `/etc/sudoers.d/10-fluxcast-timestamp` (`timestamp_type=global`,
+    8 minutes). Override the dialog with `FLUXCAST_ASKPASS` or
+    `SUDO_ASKPASS`. Never `sudo -n`.
 - `--wfd-p2p-channel`
   - Forces the P2P group onto channel `1`, `6`, or `11` (2.4GHz) instead of
     letting the driver pick. Only used by `--wfd-p2p-backend wpas`.
@@ -375,6 +394,7 @@ historical software encode pipeline (`libx264` over a raw pipe).
 | `FLUXCAST_WFD_GO_5GHZ` | unset | USB GO only. `1`/`true`/`yes`/`on` keeps 5 GHz in the GO channel set (same as `--wfd-go-5ghz`). Default USB GO is 2.4 GHz only. |
 | `FLUXCAST_WFD_GO_2GHZ_MHZ` | unset | USB GO only. Integer MHz (2400–2499) to keep as the sole 2.4 GHz GO channel when it is enabled on the phy (e.g. `2462` for channel 11). Still not `p2p_connect freq=`. |
 | `FLUXCAST_USB_WPA` | `wpa_supplicant` on `PATH` | Absolute path to the `wpa_supplicant` binary used for dedicated USB P2P. NetworkManager keeps the system daemon on the primary STA iface. |
+| `FLUXCAST_ASKPASS` / `SUDO_ASKPASS` | bundled `meta/fluxcast-askpass` | Graphical password helper for `sudo -A` when stdin is not a TTY (tray/panel). GTK4/GTK3 via PyGObject on desktops without zenity/Tk. |
 | `FLUXCAST_WFD_WF_RECORDER_DAMAGE` | unset | Set to `1` / `true` / `yes` / `on` to omit `wf-recorder -D` (damage-aware capture). Default keeps `-D` for historical continuous capture. LPCM honors this the same as DMA paths. |
 | `FLUXCAST_WFD_WF_RECORDER_BIN` | unset | Absolute path to a `wf-recorder` binary. When set (and usable), preferred over `PATH`. Opt-in for a local [PR #347](https://github.com/ammen99/wf-recorder/pull/347) ICC build — **not** probed automatically. |
 | `FLUXCAST_WFD_WF_RECORDER_PROTO` | unset / `auto` | `icc` requires an ICC-capable binary (`--toplevel` / `ext-copy-capture`). In FluxCast alone, a non-ICC binary with `PROTO=icc` yields no recorder; Omarchy `miracast-ctl` fail-softs to PATH instead. `wlr` / unset / `auto` accept any usable binary (default stock `PATH`). |

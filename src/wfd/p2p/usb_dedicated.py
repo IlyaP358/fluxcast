@@ -20,6 +20,7 @@ USB ctrl socket and phy binding.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -27,7 +28,9 @@ from pathlib import Path
 from typing import Optional
 
 from ..config import WFDNotReady
-from ..constants import WFD_RTSP_PORT
+from ..privileged import run_privileged
+from ..constants import WFD_RTSP_PORT, _DEVICE_NAME
+from ..ie import wfd_wpa_cli_device_info_hex, wfd_wpa_cli_local_ip_hex
 from .formation import (
     describe_neg_log,
     first_quiet_2ghz_oper,
@@ -52,9 +55,104 @@ from .formation import (
 from .wpas_ip import configure_ip, mark_unmanaged
 
 _CTRL = Path("/tmp/fluxcast-usb-wpa")
-_CONF = _CTRL / "wpa.conf"
 _PID = _CTRL / "wpa.pid"
 _LOG = _CTRL / "wpa.log"
+
+
+def _state_dir() -> Path:
+    root = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    d = root / "omarchy-miracast"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def persistent_ok_path(mac: str) -> Path:
+    d = _state_dir() / "p2p-persistent-ok"
+    d.mkdir(parents=True, exist_ok=True)
+    key = mac.replace("-", ":").replace(":", "-").lower()
+    return d / key
+
+
+def mark_p2p_persistent_ok(mac: str) -> None:
+    """Record that a full PLAY completed with this P2P device address."""
+    mac = (mac or "").strip()
+    if not mac:
+        return
+    try:
+        persistent_ok_path(mac).write_text("play\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def peer_has_persistent_ok(mac: str) -> bool:
+    return bool(mac) and persistent_ok_path(mac).is_file()
+
+
+def _conf_path() -> Path:
+    """Durable wpa.conf so persistent P2P groups survive dedicated-wpa restarts."""
+    return _state_dir() / "usb-wpa.conf"
+
+
+def _read_wpa_conf(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        result = run_privileged(["cat", str(path)], timeout=5.0)
+        return result.stdout or ""
+
+
+def _write_wpa_conf(path: Path, text: str) -> None:
+    try:
+        path.write_text(text, encoding="utf-8")
+        return
+    except OSError:
+        pass
+    tmp = Path("/tmp/fluxcast-usb-wpa.conf.new")
+    tmp.write_text(text, encoding="utf-8")
+    run_privileged(["cp", str(tmp), str(path)], timeout=5.0)
+    run_privileged(["chmod", "0666", str(path)], timeout=5.0)
+
+
+def _ensure_wpa_conf() -> Path:
+    """Write/refresh headers; keep any saved network={...} persistent groups."""
+    path = _conf_path()
+    existing = _read_wpa_conf(path) if path.exists() else ""
+    networks = ""
+    idx = existing.find("network={")
+    if idx >= 0:
+        networks = existing[idx:].rstrip() + "\n"
+    persist_mac = ""
+    for line in existing.splitlines():
+        if line.startswith("p2p_device_persistent_mac_addr="):
+            persist_mac = line
+            break
+    headers = [
+        f"ctrl_interface={_CTRL}",
+        "ctrl_interface_group=0",
+        f"device_name={_DEVICE_NAME}",
+        "p2p_go_intent=15",
+        "driver_param=use_p2p_group_interface=1",
+        "update_config=1",
+        "persistent_reconnect=1",
+        "p2p_device_random_mac_addr=2",
+    ]
+    if persist_mac:
+        headers.append(persist_mac)
+    headers.append("")
+    _write_wpa_conf(path, "\n".join(headers) + "\n" + networks)
+    return path
+
+
+def _persistent_go_ids(list_networks_out: str) -> list[int]:
+    """network ids marked [P2P-PERSISTENT] in wpa_cli list_networks."""
+    ids: list[int] = []
+    for line in (list_networks_out or "").splitlines():
+        if "P2P-PERSISTENT" not in line:
+            continue
+        nid = line.split()[0]
+        if nid.isdigit():
+            ids.append(int(nid))
+    return ids
 
 
 def _wpa_bin() -> str:
@@ -78,6 +176,68 @@ def _chmod_wpa_log() -> None:
             _run(["chmod", "a+r", str(_LOG)], timeout=2.0)
     except (OSError, subprocess.TimeoutExpired):
         pass
+
+
+def _usb_go_intents(go_intent: int, go_5ghz: bool) -> list[int]:
+    """USB SoftMAC: GO (15) first. Client (0) only if 5 GHz GO is allowed.
+
+    Confirm TX as client often drops on USB SoftMAC. Intent 0 also lets a
+    5 GHz-listen sink become GO, which this radio may never complete.
+    """
+    if go_5ghz:
+        if go_intent == 0:
+            return [15, 0]
+        if go_intent == 15:
+            return [15, 0]
+        return [go_intent]
+    return [15]
+
+
+def _cached_listen_mhz(peer_mac: str) -> Optional[int]:
+    env = os.environ.get("FLUXCAST_PEER_LISTEN_MHZ", "").strip()
+    if env.isdigit():
+        mhz = int(env)
+        if mhz > 0:
+            return mhz
+    mac = peer_mac.replace("-", ":").upper()
+    state = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    peers_path = state / "omarchy-miracast" / "peers.json"
+    try:
+        import json
+
+        for row in json.loads(peers_path.read_text()):
+            if str(row.get("mac") or "").replace("-", ":").upper() != mac:
+                continue
+            for key in ("listenFreqMHz", "operFreqMHz"):
+                val = row.get(key)
+                if val in (None, "", 0, "0"):
+                    continue
+                try:
+                    mhz = int(val)
+                except (TypeError, ValueError):
+                    continue
+                if mhz > 0:
+                    return mhz
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def _ht_spatial_streams(iface: str) -> int:
+    """HT MCS 0-7 → 1 SS, 0-15 → 2 SS (iw phy). Default 1 if unknown."""
+    text = _iw_phy_text(iface)
+    m = re.search(
+        r"HT TX/RX MCS rate indexes supported:\s*0-(\d+)",
+        text,
+    )
+    if m:
+        hi = int(m.group(1))
+        if hi >= 23:
+            return 3
+        if hi >= 15:
+            return 2
+        return 1
+    return 1
 
 
 def _is_usb_wifi(iface: str) -> bool:
@@ -144,9 +304,7 @@ def _stop_competing_wpa(iface: str, keep_pid: Optional[int] = None) -> None:
 
 
 def _run(cmd: list[str], timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["sudo", *cmd], capture_output=True, text=True, timeout=timeout
-    )
+    return run_privileged(cmd, timeout=timeout)
 
 
 def _wpa_cli(iface: str, *args: str, timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
@@ -158,18 +316,7 @@ def _wpa_cli(iface: str, *args: str, timeout: float = 10.0) -> subprocess.Comple
 def ensure_dedicated_wpa(iface: str) -> None:
     """nmcli unmanaged + dedicated wpa_supplicant on iface."""
     _CTRL.mkdir(parents=True, exist_ok=True)
-    _CONF.write_text(
-        "\n".join(
-            [
-                f"ctrl_interface={_CTRL}",
-                "ctrl_interface_group=0",
-                "device_name=fluxcast-p2p",
-                "p2p_go_intent=0",
-                "driver_param=use_p2p_group_interface=1",
-                "",
-            ]
-        )
-    )
+    conf = _ensure_wpa_conf()
     _run(["nmcli", "device", "set", iface, "managed", "no"], timeout=5.0)
     p2p_dev = f"p2p-dev-{iface}"
     _run(["nmcli", "device", "set", p2p_dev, "managed", "no"], timeout=5.0)
@@ -183,7 +330,7 @@ def ensure_dedicated_wpa(iface: str) -> None:
             ping = _wpa_cli(iface, "ping", timeout=3.0)
             if ping.returncode == 0 and "PONG" in (ping.stdout or ""):
                 _stop_competing_wpa(iface, keep_pid=pid)
-                _wpa_cli(iface, "set", "device_name", "fluxcast-p2p", timeout=3.0)
+                _wpa_cli(iface, "set", "device_name", _DEVICE_NAME, timeout=3.0)
                 _wpa_cli(iface, "set", "p2p_group_formation_timeout", "45", timeout=3.0)
                 _run(["ip", "link", "set", iface, "up"], timeout=5.0)
                 _chmod_wpa_log()
@@ -219,7 +366,7 @@ def ensure_dedicated_wpa(iface: str) -> None:
             "-i",
             iface,
             "-c",
-            str(_CONF),
+            str(conf),
             "-P",
             str(_PID),
             "-f",
@@ -299,7 +446,15 @@ def _apply_5ghz_oper_preference(
     ghz2 = parse_iw_phy_2ghz_channels(phy_text)
     ghz5 = parse_iw_phy_5ghz_channels(phy_text)
     listen_freq = peer_listen_freq(peer_info, default=0)
-    prefer_24 = listen_freq if 2400 <= listen_freq < 2500 else None
+    # P2P GO Neg: operating channel from local∩peer. If the peer *listens*
+    # on 5 GHz, WPS stays on that channel (Wi-Fi Direct); a 2.4-only GO
+    # set then never gets GROUP-STARTED. USB 5 GHz TX is often weak, so
+    # GROUP-STARTED CSA moves payload to 2.4 — radio role, not a TV brand.
+    peer_5ghz = listen_freq >= 5000 or peer_advertises_5ghz(peer_info)
+    use_5ghz = bool(go_5ghz or listen_freq >= 5000)
+    prefer_24 = listen_freq if 2400 <= listen_freq < 2500 else (
+        None if use_5ghz else 2437
+    )
     env_mhz = os.environ.get("FLUXCAST_WFD_GO_2GHZ_MHZ", "").strip()
     if env_mhz.isdigit():
         mhz = int(env_mhz)
@@ -311,13 +466,17 @@ def _apply_5ghz_oper_preference(
             )
     pick = None
     band = "2.4 GHz"
-    if go_5ghz:
+    if use_5ghz:
         # Clear leftover exclude / pref from a prior USB session on reused wpa.
         _cli("set", "p2p_no_go_freq", "")
         _cli("set", "p2p_pref_chan", "")
-        print("[FluxCast WFD] USB GO 5 GHz kept (--wfd-go-5ghz)")
-        if peer_advertises_5ghz(peer_info):
-            pick = first_quiet_5ghz_oper(ghz5, occ)
+        why = "--wfd-go-5ghz" if go_5ghz else f"peer listen {listen_freq} MHz"
+        print(f"[FluxCast WFD] USB GO 5 GHz kept ({why})")
+        pick5 = first_quiet_5ghz_oper(
+            ghz5, occ, prefer_freq=listen_freq if peer_5ghz else None
+        )
+        if pick5 and (peer_5ghz or peer_advertises_5ghz(peer_info)):
+            pick = pick5
             band = "5 GHz"
         if not pick:
             pick = first_quiet_2ghz_oper(
@@ -334,7 +493,7 @@ def _apply_5ghz_oper_preference(
         print("[FluxCast WFD] No usable GO oper channel on this phy")
         return
     reg, ch, freq = pick
-    if not go_5ghz:
+    if not use_5ghz:
         parts: list[str] = []
         no_24 = p2p_no_go_freq_ranges([f for _, f in ghz2], {freq})
         if no_24:
@@ -350,7 +509,7 @@ def _apply_5ghz_oper_preference(
                 f"[FluxCast WFD] USB GO channel set kept {freq} MHz; "
                 f"p2p_no_go_freq {no_go} (not p2p_connect freq=)"
             )
-        _cli("set", "p2p_pref_chan", f"{reg}:{ch}")
+    _cli("set", "p2p_pref_chan", f"{reg}:{ch}")
     _cli("set", "p2p_oper_reg_class", reg)
     _cli("set", "p2p_oper_channel", ch)
     extra = ""
@@ -477,70 +636,175 @@ def connect_usb_dedicated(
 ) -> str:
     """Form a finished P2P group on the USB phy; return data iface with IP.
 
-    Tries client role (go_intent=0) first when intent is 0 — Miracast sources
-    commonly let the sink be GO. Falls back to go_intent=15 if requested.
+    USB SoftMAC Confirm TX as client (intent 0) drops; we GO at intent 15.
+    Client fallback is only used when go_5ghz is on (otherwise a 5 GHz-listen
+    sink becomes GO and GROUP-STARTED never completes on this dongle).
     go_5ghz keeps 5 GHz in the GO channel set; default drops it
     (p2p_no_go_freq). Never p2p_connect freq=.
     """
     if not _is_usb_wifi(iface):
         raise WFDNotReady(f"{iface} does not look like a USB wifi device")
 
-    ensure_dedicated_wpa(iface)
-    _chmod_wpa_log()
     peer = peer_mac.lower()
     phy = _phy_of(iface)
-    print(
-        f"[FluxCast WFD] Dedicated P2P on {iface} (phy={phy}); "
-        "primary STA radio left on NetworkManager for internet"
-    )
+    # Reuse before ensure_dedicated_wpa — that helper kills leftover wpa and
+    # deletes p2p-* , which tears down a BSS the sink is still on
+    # (e.g. after a DHCP miss) and then p2p_find cannot see it.
     live = _live_group_on_phy(phy, peer)
     if live:
+        print(
+            f"[FluxCast WFD] Dedicated P2P on {iface} (phy={phy}); "
+            "primary STA radio left on NetworkManager for internet"
+        )
         print(
             f"[FluxCast WFD] Reusing live USB group {live} "
             "(skip GO Neg — do not tear down a working BSS)"
         )
         mark_unmanaged(live)
-        configure_ip(live, peer_mac, "P2P-GO" if "GO" in _iw_info(live) else "P2P-client", iface)
+        _wpa_cli(iface, "set", "wifi_display", "1", timeout=3.0)
+        _wpa_cli(
+            iface, "wfd_subelem_set", "0",
+            wfd_wpa_cli_device_info_hex(rtsp_port), timeout=3.0,
+        )
+        _wpa_cli(
+            iface, "wfd_subelem_set", "8",
+            wfd_wpa_cli_local_ip_hex(), timeout=3.0,
+        )
+        configure_ip(
+            live,
+            peer_mac,
+            "P2P-GO" if "GO" in _iw_info(live) else "P2P-client",
+            physical_iface=None,
+        )
         return live
+
+    idle_go = None
+    for path in Path("/sys/class/net").glob("p2p-*"):
+        if _phy_of(path.name) != phy:
+            continue
+        info = _iw_info(path.name)
+        if "type P2P-GO" in info and not is_pending_go_shell(info):
+            idle_go = path.name
+            break
+    if idle_go:
+        print(
+            f"[FluxCast WFD] USB GO {idle_go} still up (no STA); "
+            "waiting for sink to rejoin before a new find"
+        )
+        ensure_dedicated_wpa(iface)
+        _chmod_wpa_log()
+        deadline = time.time() + 20.0
+        while time.time() < deadline:
+            if _is_live_group(idle_go, "P2P-GO"):
+                print(f"[FluxCast WFD] Sink rejoined {idle_go}")
+                mark_unmanaged(idle_go)
+                configure_ip(idle_go, peer_mac, "P2P-GO", physical_iface=None)
+                return idle_go
+            time.sleep(1.0)
+        print("[FluxCast WFD] Sink did not rejoin; removing idle GO then find")
+        _teardown_phy_groups(phy)
+
+    ensure_dedicated_wpa(iface)
+    _chmod_wpa_log()
+    print(
+        f"[FluxCast WFD] Dedicated P2P on {iface} (phy={phy}); "
+        "primary STA radio left on NetworkManager for internet"
+    )
 
     def _cli(*args: str, timeout: float = 10.0):
         return _wpa_cli(iface, *args, timeout=timeout)
 
+    _cli("set", "device_name", _DEVICE_NAME)
     _cli("set", "wifi_display", "1")
     port = max(1, min(int(rtsp_port), 65535))
-    dev_info = f"{0x0011:04x}{port:04x}00c8"
+    dev_info = wfd_wpa_cli_device_info_hex(port)
     _cli("wfd_subelem_set", "0", dev_info)
+    _cli("wfd_subelem_set", "8", wfd_wpa_cli_local_ip_hex())
 
     # Listen defaults; overridden to the peer listen_freq after find.
     # Do not set p2p_oper_*: a leftover 81/6 pin fights 5 GHz intersection.
     _cli("set", "p2p_listen_reg_class", "81")
     _cli("set", "p2p_listen_channel", "6")
 
-    intents = [go_intent]
-    if go_intent == 0:
-        # USB SoftMAC: Confirm TX as client (intent 0) has been dropping the
-        # pending Action; GO (15) is what produced GROUP-STARTED.
-        intents = [15, 0]
-    elif go_intent == 15:
-        intents.append(0)
+    cached_listen = _cached_listen_mhz(peer_mac)
+    intents = _usb_go_intents(go_intent, go_5ghz)
 
     last_err = "USB P2P group formation failed"
     for intent in intents:
         _teardown_phy_groups(phy)
         _cli("p2p_cancel", timeout=3.0)
         _cli("set", "p2p_go_intent", str(intent))
-        _cli("p2p_find", "12")
+        _run(["ip", "link", "set", iface, "up"], timeout=5.0)
+        log_mark = _LOG.stat().st_size if _LOG.exists() else 0
         found = False
-        for _ in range(20):
+
+        def _peer_visible() -> bool:
             peers = _cli("p2p_peers", timeout=5.0)
             if peer in (peers.stdout or "").lower():
+                return True
+            delta = _neg_log_delta(log_mark)
+            return "P2P-GO-NEG-REQUEST" in delta and peer.replace(":", "") in (
+                delta.lower().replace(":", "")
+            )
+
+        # Sink Screen Share searches for sources. If we only p2p_find, both
+        # sides scan and miss. Listen first so the sink can list this device.
+        _cli("set", "p2p_listen_reg_class", "81")
+        _cli("set", "p2p_listen_channel", "6")
+        print(
+            f"[FluxCast WFD] Listening as '{_DEVICE_NAME}' on ch 6 then "
+            "5 GHz — open Screen Share / Miracast receive on the sink"
+        )
+        _cli("p2p_listen", "20", timeout=5.0)
+        for _ in range(20):
+            if _peer_visible():
                 found = True
                 break
             time.sleep(1)
+        if not found and cached_listen and cached_listen >= 5000:
+            listen_reg, listen_ch = freq_to_social_channel(cached_listen)
+            _cli("set", "p2p_listen_reg_class", listen_reg)
+            _cli("set", "p2p_listen_channel", listen_ch)
+            print(f"[FluxCast WFD] Listening on {cached_listen} MHz")
+            _cli("p2p_listen", "15", timeout=5.0)
+            for _ in range(15):
+                if _peer_visible():
+                    found = True
+                    break
+                time.sleep(1)
+        _cli("p2p_stop_find", timeout=3.0)
+
+        if not found:
+            find_plan: list[Optional[int]] = [None]
+            if cached_listen and cached_listen >= 5000:
+                find_plan.append(cached_listen)
+            for find_listen in find_plan:
+                if find_listen:
+                    listen_reg, listen_ch = freq_to_social_channel(find_listen)
+                    _cli("set", "p2p_listen_reg_class", listen_reg)
+                    _cli("set", "p2p_listen_channel", listen_ch)
+                    print(
+                        f"[FluxCast WFD] Find listen {find_listen} MHz "
+                        "(scan cache; after listen/2.4 miss)"
+                    )
+                    find_s = 20
+                else:
+                    _cli("set", "p2p_listen_reg_class", "81")
+                    _cli("set", "p2p_listen_channel", "6")
+                    find_s = 20
+                _cli("p2p_find", str(find_s))
+                for _ in range(find_s):
+                    if _peer_visible():
+                        found = True
+                        break
+                    time.sleep(1)
+                _cli("p2p_stop_find", timeout=3.0)
+                if found:
+                    break
         if not found:
             last_err = (
-                f"Peer {peer_mac} not seen on dedicated USB P2P find. "
-                "Wake the sink and retry."
+                f"Peer {peer_mac} not seen. On the TV open Screen Share / "
+                f"Miracast receive so it can find '{_DEVICE_NAME}'."
             )
             continue
 
@@ -577,26 +841,90 @@ def connect_usb_dedicated(
         # Mark after PD settle. TX_WAIT_EXPIRE in this window is not failure
         # (GO Neg retries, or a delayed PD wait-expire).
         log_mark = _LOG.stat().st_size if _LOG.exists() else 0
-        print(
-            f"[FluxCast WFD] p2p_connect {peer_mac} go_intent={intent} "
-            f"listen={listen_freq} (oper class negotiated, not pinned) "
-            "(wait for GO-NEG + GROUP-STARTED)..."
-        )
-        conn = _cli(
-            "p2p_connect",
-            peer,
-            "pbc",
-            f"go_intent={intent}",
-            timeout=10.0,
-        )
-        conn_out = (conn.stdout or conn.stderr or "").strip()
-        if conn.returncode != 0 or "FAIL" in conn_out.upper():
-            print(f"[FluxCast WFD] p2p_connect failed ({conn_out}); trying join")
-            conn = _cli("p2p_connect", peer, "pbc", "join", timeout=10.0)
+        persistent_reinvoke = False
+        if peer_has_persistent_ok(peer_mac):
+            ids = _persistent_go_ids(
+                (_cli("list_networks", timeout=5.0).stdout or "")
+            )
+            if ids:
+                nid = ids[0]
+                print(
+                    f"[FluxCast WFD] Reinvoking persistent group id={nid} "
+                    "(previous PLAY succeeded)"
+                )
+                add = _cli("p2p_group_add", f"persistent={nid}", timeout=10.0)
+                add_out = (add.stdout or add.stderr or "").strip()
+                if add.returncode == 0 and "FAIL" not in add_out.upper():
+                    inv = _cli(
+                        "p2p_invite",
+                        f"persistent={nid}",
+                        f"peer={peer}",
+                        timeout=10.0,
+                    )
+                    inv_out = (inv.stdout or inv.stderr or "").strip()
+                    inv_ok = False
+                    if inv.returncode == 0 and "FAIL" not in inv_out.upper():
+                        until = time.time() + 8.0
+                        while time.time() < until:
+                            dlt = _neg_log_delta(log_mark)
+                            if re.search(
+                                r"P2P-INVITATION-RESULT status=0\b", dlt
+                            ):
+                                inv_ok = True
+                                break
+                            if re.search(
+                                r"P2P-INVITATION-RESULT status=", dlt
+                            ):
+                                break
+                            if _is_live_group(
+                                next(
+                                    (
+                                        p.name
+                                        for p in Path("/sys/class/net").glob("p2p-*")
+                                        if _phy_of(p.name) == phy
+                                    ),
+                                    "",
+                                ),
+                                "P2P-GO",
+                            ):
+                                inv_ok = True
+                                break
+                            time.sleep(0.3)
+                    if inv_ok:
+                        persistent_reinvoke = True
+                    else:
+                        print(
+                            "[FluxCast WFD] Persistent invite rejected; "
+                            "falling back to GO Neg"
+                        )
+                        _cli("p2p_group_remove", "*", timeout=5.0)
+                        _teardown_phy_groups(phy)
+                        time.sleep(0.4)
+        if not persistent_reinvoke:
+            print(
+                f"[FluxCast WFD] p2p_connect {peer_mac} pbc persistent "
+                f"go_intent={intent} listen={listen_freq} "
+                "(oper class negotiated, not pinned) "
+                "(wait for GO-NEG + GROUP-STARTED)..."
+            )
+            conn = _cli(
+                "p2p_connect",
+                peer,
+                "pbc",
+                "persistent",
+                f"go_intent={intent}",
+                timeout=10.0,
+            )
             conn_out = (conn.stdout or conn.stderr or "").strip()
             if conn.returncode != 0 or "FAIL" in conn_out.upper():
-                last_err = f"USB p2p_connect failed: {conn_out}"
-                continue
+                print(f"[FluxCast WFD] p2p_connect failed ({conn_out}); trying join")
+                conn = _cli(
+                    "p2p_connect", peer, "pbc", "join", timeout=10.0
+                )
+                conn_out = (conn.stdout or conn.stderr or "").strip()
+                if conn.returncode != 0 or "FAIL" in conn_out.upper():
+                    last_err = f"USB p2p_connect failed: {conn_out}"
+                    continue
 
         deadline = time.time() + 40.0
         saw_pending_go = ""
@@ -608,13 +936,13 @@ def connect_usb_dedicated(
                 and "Received GO Negotiation Response" in delta
             ):
                 saw_neg_resp = True
-                deadline = max(deadline, time.time() + 25.0)
+                deadline = time.time() + 70.0
                 print(
                     "[FluxCast WFD] GO Neg Response received — "
                     "holding group until GROUP-STARTED (not tearing pending GO)"
                 )
             if "WPS-PBC-ACTIVE" in delta or "AP-ENABLED" in delta:
-                deadline = max(deadline, time.time() + 50.0)
+                deadline = max(deadline, time.time() + 70.0)
             outcome = neg_outcome_from_log(delta)
             if outcome == "failure":
                 diag = describe_neg_log(delta)
@@ -647,14 +975,37 @@ def connect_usb_dedicated(
                     if is_pending_go_shell(info):
                         saw_pending_go = name
                         continue
-                    # GO beacons + STA assoc happen before WPS. DHCP/unpark
-                    # during WPS made the sink deauth (FORMATION_FAILED).
-                    if "P2P-GROUP-STARTED" not in delta:
+                    # GO beacons + STA assoc can finish before the
+                    # GROUP-STARTED line is in the log; don't miss a live BSS.
+                    if (
+                        "P2P-GROUP-STARTED" not in delta
+                        and not _is_live_group(name, "P2P-GO")
+                    ):
                         continue
                     if _is_live_group(name, "P2P-GO"):
                         print(f"[FluxCast WFD] GO {name}: GROUP-STARTED")
                         mark_unmanaged(name)
-                        configure_ip(name, peer_mac, "P2P-GO", iface)
+                        mhz_m = re.search(r"\((\d{4}) MHz\)", info)
+                        if (
+                            mhz_m
+                            and int(mhz_m.group(1)) >= 5000
+                            and _ht_spatial_streams(iface) <= 1
+                        ):
+                            print(
+                                "[FluxCast WFD] 1-stream 5 GHz GO cannot carry "
+                                "the stream; CSA to 2437 MHz before RTSP"
+                            )
+                            _wpa_cli(
+                                name, "chan_switch", "5", "2437", timeout=8.0
+                            )
+                            time.sleep(1.2)
+                        _wpa_cli(name, "wfd_subelem_set", "0", dev_info, timeout=3.0)
+                        _wpa_cli(
+                            name, "wfd_subelem_set", "8",
+                            wfd_wpa_cli_local_ip_hex(), timeout=3.0,
+                        )
+                        configure_ip(name, peer_mac, "P2P-GO", physical_iface=None)
+                        _cli("save_config", timeout=5.0)
                         return name
                 if "type P2P-client" in info and _is_live_group(name, "P2P-client"):
                     if "P2P-GROUP-STARTED" not in delta:

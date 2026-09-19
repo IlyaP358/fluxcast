@@ -244,6 +244,8 @@ def _scan_wfd() -> None:
     _refresh()
     try:
         from wfd import active_scan
+        from wfd.privileged import prime_privileged
+        prime_privileged()
         peers = active_scan(timeout=8)
     except Exception as e:
         _log(f"wfd scan error: {e}")
