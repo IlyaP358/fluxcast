@@ -1,3 +1,4 @@
+import socket
 import socketserver
 import threading
 import time
@@ -12,11 +13,58 @@ from ..p2p.addressing import (
     _valid_interface,
 )
 from .handler import _WFDRTSPHandler
+from .message import RTSP_WRITE_TIMEOUT
 
 
 class _ThreadingTCPServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+    max_connections = 4
+
+    def __init__(self, *args, **kwargs):
+        self._requests = set()
+        self._requests_lock = threading.Lock()
+        self._closing = False
+        super().__init__(*args, **kwargs)
+
+    def track_request(self, request):
+        with self._requests_lock:
+            if self._closing or len(self._requests) >= self.max_connections:
+                return False
+            self._requests.add(request)
+            return True
+
+    def untrack_request(self, request):
+        with self._requests_lock:
+            self._requests.discard(request)
+
+    def process_request(self, request, client_address):
+        if not self.track_request(request):
+            self.shutdown_request(request)
+            return
+        try:
+            request.settimeout(RTSP_WRITE_TIMEOUT)
+            super().process_request(request, client_address)
+        except Exception:
+            self.shutdown_request(request)
+            raise
+
+    def shutdown_request(self, request):
+        try:
+            super().shutdown_request(request)
+        finally:
+            self.untrack_request(request)
+
+    def server_close(self):
+        with self._requests_lock:
+            self._closing = True
+            requests = list(self._requests)
+        for request in requests:
+            try:
+                request.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        super().server_close()
 
     def verify_request(self, request, client_address) -> bool:
         """Reject other hosts before ThreadingMixIn creates a handler thread."""
@@ -137,6 +185,13 @@ class WFDRTSPServer:
     def _register_media(self, media: WFDMediaPipeline) -> None:
         with self._media_lock:
             self._active_media.append(media)
+
+    def _register_rtsp_socket(self, sock) -> bool:
+        return self._server is not None and self._server.track_request(sock)
+
+    def _unregister_rtsp_socket(self, sock) -> None:
+        if self._server is not None:
+            self._server.untrack_request(sock)
 
     def _unregister_media(self, media: WFDMediaPipeline) -> None:
         with self._media_lock:

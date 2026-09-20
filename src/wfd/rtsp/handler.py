@@ -1,4 +1,5 @@
 import random
+import socket
 import socketserver
 import threading
 import time
@@ -17,6 +18,7 @@ from ..modes import (
 )
 from ..net import _netdev_tx_bytes, _safe_source_port
 from .message import (
+    RTSP_IDLE_TIMEOUT, RTSP_MAX_PENDING, _RTSPReader,
     RTSPMessage, WFD_NEGOTIATION_METHODS, _parse_parameters, _parse_rtp_ports,
     _parse_transport_client_ports, _read_rtsp_message, _sink_advertises_uibc,
 )
@@ -68,6 +70,9 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         self.pending: dict[str, str] = {}
         self.session_id = str(random.randint(1_000_000, 9_999_999))
         self._write_lock = threading.Lock()
+        self._timer_lock = threading.RLock()
+        self._keepalive_timer = None
+        self._probe_timer = None
         self._keepalive_active = True
         self.sink_rtp_port: Optional[int] = None
         self.sink_rtcp_port: int = 0
@@ -90,8 +95,12 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         )
         try:
             self._send_m1_options()
+            reader = _RTSPReader(self.request)
             while True:
-                msg = _read_rtsp_message(self.rfile)
+                # Some sinks disable keepalives. Silence during PLAY is not
+                # a session timeout; an incomplete message still has a deadline.
+                reader.idle_timeout = None if self.media is not None else RTSP_IDLE_TIMEOUT
+                msg = _read_rtsp_message(reader)
                 if msg is None:
                     print(f"[FluxCast WFD RTSP] TV disconnected from {peer}")
                     return
@@ -103,7 +112,11 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         except OSError as exc:
             print(f"[FluxCast WFD RTSP] Socket closed: {exc}")
         finally:
-            self._keepalive_active = False
+            with self._timer_lock:
+                self._keepalive_active = False
+                if self._keepalive_timer is not None:
+                    self._keepalive_timer.cancel()
+                    self._keepalive_timer = None
             self._stop_media()
 
     @property
@@ -146,9 +159,18 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         headers: Optional[dict[str, str]] = None,
         body: str = "",
     ) -> None:
-        cseq = str(self.next_cseq)
-        self.next_cseq += 1
-        self.pending[cseq] = name
+        with self._write_lock:
+            if name == "M16_KEEPALIVE":
+                # Keep only the latest heartbeat, including for silent sinks.
+                for old in [key for key, value in self.pending.items() if value == name]:
+                    self.pending.pop(old, None)
+            if len(self.pending) >= RTSP_MAX_PENDING:
+                raise WFDNotReady("Too many pending RTSP requests")
+            while str(self.next_cseq) in self.pending:
+                self.next_cseq = self.next_cseq % 2147483647 + 1
+            cseq = str(self.next_cseq)
+            self.next_cseq = self.next_cseq % 2147483647 + 1
+            self.pending[cseq] = name
 
         output = [
             f"{method} {uri} RTSP/1.0",
@@ -260,7 +282,8 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         )
 
     def _handle_response(self, msg: RTSPMessage) -> None:
-        name = self.pending.pop(msg.cseq, "UNKNOWN")
+        with self._write_lock:
+            name = self.pending.pop(msg.cseq, "UNKNOWN")
         if not msg.status.startswith("200"):
             if name == "M16_KEEPALIVE":
                 # LG (or any TV) rejected our keepalive, STOP RESCHEDULING
@@ -527,17 +550,38 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         uibc.schedule_post_play_enable(self, delay)
 
     def _schedule_probe(self, delay: float) -> None:
-        probe = threading.Timer(delay, self._probe_tx)
-        probe.daemon = True
-        probe.start()
+        self._schedule_timer("_probe_timer", delay, self._probe_tx)
+
+    def _schedule_timer(self, name: str, delay: float, callback) -> None:
+        def run():
+            with self._timer_lock:
+                if getattr(self, name) is not timer:
+                    return
+            next_delay = None
+            try:
+                next_delay = callback()
+            finally:
+                with self._timer_lock:
+                    if getattr(self, name) is timer:
+                        setattr(self, name, None)
+                        if next_delay is not None:
+                            self._schedule_timer(name, next_delay, callback)
+
+        with self._timer_lock:
+            if getattr(self, name) is not None:
+                return
+            timer = threading.Timer(delay, run)
+            timer.daemon = True
+            setattr(self, name, timer)
+            timer.start()
 
     def _schedule_rtsp_keepalive(self, delay: float = 25.0) -> None:
         """Schedule the next RTSP M16 GET_PARAMETER keepalive."""
-        t = threading.Timer(delay, self._send_rtsp_keepalive)
-        t.daemon = True
-        t.start()
+        with self._timer_lock:
+            if self._keepalive_active:
+                self._schedule_timer("_keepalive_timer", delay, self._send_rtsp_keepalive)
 
-    def _send_rtsp_keepalive(self) -> None:
+    def _send_rtsp_keepalive(self) -> Optional[float]:
         """Send RTSP GET_PARAMETER (M16) on the existing TCP connection."""
         if not self._keepalive_active:
             return
@@ -554,11 +598,14 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 headers={"Session": f"{self.session_id};timeout=30"},
             )
             print("[FluxCast WFD RTSP] M16 keepalive sent")
-            self._schedule_rtsp_keepalive(25.0)
-        except OSError:
-            pass  # Socket dead -> DONT RESCHEDULE
+            return 25.0
+        except (OSError, WFDNotReady):
+            try:
+                self.request.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
-    def _probe_tx(self) -> None:
+    def _probe_tx(self) -> Optional[float]:
         media = self.media
         if media is None:
             return
@@ -609,8 +656,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 processes=states,
                 tx_summary=media.tx_summary(),
             )
-            self._schedule_probe(5.0)
-            return
+            return 5.0
 
         detail = ", ".join(states) if states else "no sender process"
         print(
@@ -619,6 +665,10 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         )
 
     def _stop_media(self) -> None:
+        with self._timer_lock:
+            if self._probe_timer is not None:
+                self._probe_timer.cancel()
+                self._probe_timer = None
         if self.media is not None:
             print("[FluxCast WFD Media] Stopping RTP stream...")
             if hasattr(self.server, "parent_server"):

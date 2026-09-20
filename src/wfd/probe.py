@@ -4,7 +4,7 @@ import time
 from dataclasses import replace
 from typing import Optional
 
-from .config import WFDMediaConfig
+from .config import WFDMediaConfig, WFDNotReady
 from .constants import WFD_AUDIO_AAC, WFD_AUDIO_LPCM_48K
 from .dump import schedule_ts_dump_report
 from .ie import WFDPeer
@@ -16,6 +16,7 @@ from .modes import (
 from .net import _safe_source_port
 from .p2p.addressing import _wait_for_peer_ip
 from .rtsp.message import (
+    RTSP_MAX_PENDING, RTSP_WRITE_TIMEOUT, _RTSPReader,
     RTSPMessage, WFD_NEGOTIATION_METHODS, _parse_parameters, _parse_rtp_ports,
     _parse_transport_client_ports, _read_rtsp_message,
 )
@@ -73,19 +74,35 @@ def _active_rtsp_probe(
         return
 
     print(f"[FluxCast WFD RTSP] Active probe: connected to TV RTSP at {tv_ip}:{tv_port}")
-    claim = rtsp_server.claim_client(tv_ip, replace_unconfirmed=True)
-    if claim is None:
-        print(f"[FluxCast WFD RTSP] Active probe: rejected unverified or duplicate client {tv_ip}")
+    if not rtsp_server._register_rtsp_socket(sock):
         sock.close()
         return
     try:
-        sock.settimeout(8.0)
-        rfile = sock.makefile("rb")
+        claim = rtsp_server.claim_client(tv_ip, replace_unconfirmed=True)
+    except Exception:
+        sock.close()
+        rtsp_server._unregister_rtsp_socket(sock)
+        raise
+    if claim is None:
+        print(f"[FluxCast WFD RTSP] Active probe: rejected unverified or duplicate client {tv_ip}")
+        sock.close()
+        rtsp_server._unregister_rtsp_socket(sock)
+        return
+    wfile = None
+    try:
+        sock.settimeout(RTSP_WRITE_TIMEOUT)
+        rfile = _RTSPReader(sock)
         wfile = sock.makefile("wb")
         local_ip: str = sock.getsockname()[0]
     except (OSError, ValueError) as exc:
         print(f"[FluxCast WFD RTSP] Active probe: socket setup failed: {exc}")
+        if wfile is not None:
+            try:
+                wfile.close()
+            except OSError:
+                pass
         sock.close()
+        rtsp_server._unregister_rtsp_socket(sock)
         rtsp_server.release_client(tv_ip, claim)
         return
     local_uri = f"rtsp://{local_ip}:{rtsp_server.port}/wfd1.0"
@@ -103,8 +120,12 @@ def _active_rtsp_probe(
     }
 
     def _send(name: str, method: str, uri: str, hdrs: Optional[dict] = None, body: str = "") -> None:
+        if len(st["pending"]) >= RTSP_MAX_PENDING:
+            raise WFDNotReady("Too many pending RTSP requests")
+        while str(st["cseq"]) in st["pending"]:
+            st["cseq"] = st["cseq"] % 2147483647 + 1
         cseq = str(st["cseq"])
-        st["cseq"] += 1
+        st["cseq"] = st["cseq"] % 2147483647 + 1
         st["pending"][cseq] = name
         lines = [f"{method} {uri} RTSP/1.0", f"CSeq: {cseq}"]
         for k, v in (hdrs or {}).items():
@@ -260,6 +281,7 @@ def _active_rtsp_probe(
                         if eff_cfg.aosp_pmt_pid:
                             print("[FluxCast WFD RTSP] AOSP-compatible MPEG-TS requested: PMT 0x0100, PSI version 1 (#84).")
                         media.start()
+                        rfile.idle_timeout = None
                         schedule_ts_dump_report(eff_cfg.dump_ts_path)
                         # Keep-alive: respond to GET_PARAMETER/SET_PARAMETER heartbeats.
                         while True:
@@ -280,10 +302,18 @@ def _active_rtsp_probe(
                     else:
                         _reply(msg, status="405 Method Not Allowed")
 
-    except OSError as exc:
+    except (OSError, WFDNotReady) as exc:
         print(f"[FluxCast WFD RTSP] Active probe: I/O error: {exc}")
     finally:
-        if media is not None:
-            media.stop()
-        rtsp_server.release_client(tv_ip, claim)
+        try:
+            if media is not None:
+                media.stop()
+        finally:
+            try:
+                wfile.close()
+            except OSError:
+                pass
+            sock.close()
+            rtsp_server._unregister_rtsp_socket(sock)
+            rtsp_server.release_client(tv_ip, claim)
     print("[FluxCast WFD RTSP] Active probe: session ended.")
