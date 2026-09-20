@@ -1,4 +1,3 @@
-import re
 import time
 from typing import Callable, Optional
 
@@ -7,6 +6,7 @@ from ..constants import NM_DEST, NM_PATH, WFD_RTSP_PORT
 from ..ie import (
     WFDPeer, _parse_gdbus_byte_array, _parse_wfd_ies_rtsp_port, _wfd_capability,
 )
+from .addressing import _is_p2p_group_iface, _valid_interface
 from .dbus import (
     NM_ACTIVE_STATE_NAMES, NM_DEVICE_REASON_NAMES, NM_DEVICE_STATE_NAMES,
     NM_DEVICE_TYPE_WIFI_P2P,
@@ -46,11 +46,7 @@ def _nm_group_interface(device_paths: list[str]) -> Optional[str]:
                 "org.freedesktop.NetworkManager.Device",
                 prop,
             )
-            if (
-                re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", interface)
-                and interface.startswith("p2p-")
-                and not interface.startswith("p2p-dev-")
-            ):
+            if _valid_interface(interface) and _is_p2p_group_iface(interface):
                 return interface
     return None
 

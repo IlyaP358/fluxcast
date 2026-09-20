@@ -20,6 +20,44 @@ def _completed(stdout="", returncode=0, stderr=""):
 
 
 class PeerIpAddressingTest(unittest.TestCase):
+    def test_iwd_group_support_keeps_both_lookup_and_authentication_scoped(self):
+        for group in ("wlan0-p2p-cl0", "wlan12-p2p-go3"):
+            for mac in (PEER_MAC, "7a:11:22:33:44:55"):
+                with (
+                    self.subTest(group=group, mac=mac),
+                    mock.patch.object(addressing.shutil, "which", return_value="/usr/bin/ip"),
+                    mock.patch.object(addressing, "_run", return_value=_completed(
+                        f"{P2P_IP} lladdr {mac} REACHABLE"
+                    )) as run,
+                ):
+                    self.assertEqual(
+                        addressing._get_peer_ip_from_arp(PEER_MAC, interface=group),
+                        P2P_IP,
+                    )
+                    self.assertTrue(addressing._is_expected_peer_ip(P2P_IP, PEER_MAC, group))
+                    self.assertFalse(addressing._is_expected_peer_ip("192.168.1.20", PEER_MAC, group))
+                    self.assertEqual(run.call_count, 3)
+                    for call in run.call_args_list:
+                        self.assertEqual(call, mock.call(
+                            ["ip", "neigh", "show", "dev", group], timeout=3.0
+                        ))
+
+    def test_iwd_group_rejects_lan_sibling_and_ambiguous_neighbors(self):
+        cases = (
+            f"{P2P_IP} dev wlan0 lladdr {PEER_MAC} REACHABLE",
+            f"{P2P_IP} dev wlan0-p2p-cl1 lladdr {PEER_MAC} REACHABLE",
+            f"{P2P_IP} lladdr 7a:11:22:33:44:55 REACHABLE\n"
+            "10.42.0.183 lladdr 7a:aa:bb:cc:dd:ee STALE",
+        )
+        for rows in cases:
+            with (
+                self.subTest(rows=rows),
+                mock.patch.object(addressing.shutil, "which", return_value="/usr/bin/ip"),
+                mock.patch.object(addressing, "_run", return_value=_completed(rows)),
+            ):
+                self.assertIsNone(addressing._get_peer_ip_from_arp(PEER_MAC, interface="wlan0-p2p-cl0"))
+                self.assertFalse(addressing._is_expected_peer_ip(P2P_IP, PEER_MAC, "wlan0-p2p-cl0"))
+
     def test_scoped_kernel_row_inherits_the_queried_interface(self):
         row = f"{P2P_IP} lladdr {PEER_MAC} REACHABLE"
 

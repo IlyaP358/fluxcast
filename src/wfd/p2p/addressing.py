@@ -8,7 +8,12 @@ from ..proc import _run
 
 
 def _is_p2p_group_iface(iface: str) -> bool:
-    return iface.startswith("p2p-") and not iface.startswith("p2p-dev-")
+    # wpa_supplicant and IWD use different names for group data interfaces.
+    # This is only a shape check: authentication still requires the exact
+    # interface published by the backend for the selected connection.
+    return (
+        iface.startswith("p2p-") and not iface.startswith("p2p-dev-")
+    ) or re.fullmatch(r"wlan[0-9]+-p2p-(?:go|cl)[0-9]+", iface) is not None
 
 
 def _normalized_mac(value: str) -> str:

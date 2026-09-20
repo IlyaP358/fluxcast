@@ -1,10 +1,13 @@
+import contextlib
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from wfd import session  # noqa: E402
 from wfd.p2p import nm, wpas  # noqa: E402
 
 
@@ -20,11 +23,24 @@ class NetworkManagerGroupInterfaceTest(unittest.TestCase):
             )
 
     def test_control_and_invalid_interfaces_fail_closed(self):
-        for value in ("p2p-dev-wlo1", "wlo1", "bad/interface"):
+        for value in (
+            "p2p-dev-wlo1", "wlo1", "bad/interface", "/net/connman/iwd/0",
+            "wlan0-p2p", "wlan0-p2p-go", "wlan0-p2p-cl0x", "wlan0-p2p-dev0",
+        ):
             with self.subTest(value=value), mock.patch.object(
                 nm, "_nm_get_string", return_value=value
             ):
                 self.assertIsNone(nm._nm_group_interface(["/device/1"]))
+
+    def test_iwd_data_interface_is_read_from_the_active_device(self):
+        for group in ("wlan0-p2p-cl0", "wlan12-p2p-go3"):
+            with self.subTest(group=group):
+                def get_string(path, _interface, prop):
+                    self.assertEqual(path, "/device/1")
+                    return group if prop == "IpInterface" else "/net/connman/iwd/0"
+
+                with mock.patch.object(nm, "_nm_get_string", side_effect=get_string):
+                    self.assertEqual(nm._nm_group_interface(["/device/1"]), group)
 
     def test_activation_publishes_group_interface_before_return(self):
         callback = mock.Mock()
@@ -65,6 +81,57 @@ class NetworkManagerGroupInterfaceTest(unittest.TestCase):
 
         self.assertEqual(group.call_count, 2)
         callback.assert_called_once_with("p2p-wlo1-2")
+
+
+class SessionGroupInterfaceTest(unittest.TestCase):
+    def test_nm_session_preserves_backend_controls_and_publishes_group(self):
+        for iwd in (False, True):
+            with self.subTest(iwd=iwd), contextlib.ExitStack() as stack:
+                group = "wlan0-p2p-cl0" if iwd else "p2p-wlan0-0"
+                peer = SimpleNamespace(address="aa:bb:cc:dd:ee:ff", name="receiver")
+                args = SimpleNamespace(
+                    wfd_interface="wlan0", wfd_timeout=1, wfd_test_pattern=True,
+                    wfd_no_firewall=True, fps=30, bitrate="2M", output_res="1280x720",
+                )
+                replacements = {
+                    "run_diagnostics": mock.Mock(return_value=SimpleNamespace(wfd_candidate=True)),
+                    "print_report": mock.Mock(),
+                    "_nm_p2p_device_path": mock.Mock(return_value="/device/1"),
+                    "_nm_p2p_uses_iwd": mock.Mock(return_value=iwd),
+                    "_set_p2p_device_name": mock.Mock(),
+                    "_scan_and_select": mock.Mock(return_value=peer),
+                    "_set_p2p_go_intent": mock.Mock(return_value=7),
+                    "_disconnect_device": mock.Mock(),
+                    "_connect_peer": mock.Mock(return_value="/active/1"),
+                    "_deactivate_connection": mock.Mock(),
+                    "_wait_for_nm_activation": mock.Mock(
+                        side_effect=lambda _path, *, on_group_interface: on_group_interface(group)
+                    ),
+                    "WFDRTSPServer": mock.Mock(),
+                    "report_ts_dump": mock.Mock(),
+                }
+                for name, replacement in replacements.items():
+                    stack.enter_context(mock.patch.object(session, name, replacement))
+                stack.enter_context(mock.patch.object(session.threading, "Thread"))
+                stack.enter_context(mock.patch.object(session.time, "sleep", side_effect=KeyboardInterrupt))
+                session.start_experimental_backend(args)
+
+                server = replacements["WFDRTSPServer"].return_value
+                self.assertEqual(replacements["WFDRTSPServer"].call_args.kwargs["peer_address"], peer.address)
+                replacements["_wait_for_nm_activation"].assert_called_once_with(
+                    "/active/1", on_group_interface=server.set_group_interface
+                )
+                server.set_group_interface.assert_called_once_with(group)
+                server.stop.assert_called_once_with()
+                replacements["_deactivate_connection"].assert_called_once_with("/active/1")
+                if iwd:
+                    replacements["_set_p2p_device_name"].assert_not_called()
+                    replacements["_set_p2p_go_intent"].assert_not_called()
+                else:
+                    replacements["_set_p2p_device_name"].assert_called_once_with("wlan0")
+                    self.assertEqual(replacements["_set_p2p_go_intent"].call_args_list, [
+                        mock.call("wlan0", 0), mock.call("wlan0", 7, restoring=True),
+                    ])
 
 
 class SupplicantGroupInterfaceTest(unittest.TestCase):

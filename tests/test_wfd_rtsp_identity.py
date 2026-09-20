@@ -117,6 +117,13 @@ class RTSPGroupInterfaceTest(unittest.TestCase):
         self.assertFalse(self.server.set_group_interface("bad/interface"))
         self.assertIsNone(self.server.interface)
 
+    def test_iwd_group_can_be_published_but_not_replaced(self):
+        self.assertFalse(self.server.set_group_interface("/net/connman/iwd/0"))
+        self.assertFalse(self.server.set_group_interface("wlan0"))
+        self.assertTrue(self.server.set_group_interface("wlan0-p2p-cl0"))
+        self.assertFalse(self.server.set_group_interface("wlan0-p2p-cl1"))
+        self.assertEqual(self.server.interface, "wlan0-p2p-cl0")
+
     def test_connection_waits_for_the_backend_to_publish_the_group(self):
         checked = threading.Event()
 
