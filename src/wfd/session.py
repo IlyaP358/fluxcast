@@ -35,7 +35,6 @@ def _cleanup_step(label: str, action) -> None:
     except Exception as exc:
         print(f"[FluxCast WFD] Cleanup step '{label}' failed: {exc}")
 
-
 def start_experimental_backend(args) -> None:
     report = run_diagnostics(skip_firewall=getattr(args, "wfd_no_firewall", False))
     print_report(report)
@@ -73,8 +72,7 @@ def start_experimental_backend(args) -> None:
                 from capture import prompt_monitor
                 monitor = prompt_monitor()
 
-    requested_interface = getattr(args, "wfd_interface", None)
-    backend_probe_path = _nm_p2p_device_path(requested_interface)
+    backend_probe_path = _nm_p2p_device_path(args.wfd_interface)
     if not backend_probe_path:
         raise WFDNotReady(
             "NetworkManager did not expose a Wi-Fi P2P device before scanning."
@@ -89,17 +87,17 @@ def start_experimental_backend(args) -> None:
             "NetworkManager/IWD control."
         )
     else:
-        _set_p2p_device_name(requested_interface)
+        _set_p2p_device_name(args.wfd_interface)
 
     peer = _scan_and_select(
-        requested_interface,
+        args.wfd_interface,
         getattr(args, "wfd_peer", None),
         args.wfd_timeout,
     )
 
     # Refresh the device after scanning. The scan may retry for tens of
     # seconds, so the path used for the actual connection should be fresh.
-    device_path = _nm_p2p_device_path(requested_interface)
+    device_path = _nm_p2p_device_path(args.wfd_interface)
     if not device_path:
         raise WFDNotReady(
             "NetworkManager P2P device disappeared before connection."
@@ -170,7 +168,7 @@ def start_experimental_backend(args) -> None:
             # see wpas.py's module docstring for why. connect_via_wpa_supplicant
             # handles GO-intent lowering internally, so it isn't done here.
             wpas_data_iface = connect_via_wpa_supplicant(
-                requested_interface, peer.address,
+                args.wfd_interface, peer.address,
                 go_intent=getattr(args, "wfd_go_intent", 0),
                 rtsp_port=rtsp_port,
                 p2p_channel=getattr(args, "wfd_p2p_channel", None),
@@ -181,7 +179,7 @@ def start_experimental_backend(args) -> None:
             # owner; most Miracast sinks only start the RTSP session in that role.
             if not using_iwd:
                 previous_go_intent = _set_p2p_go_intent(
-                    requested_interface, getattr(args, "wfd_go_intent", 0)
+                    args.wfd_interface, getattr(args, "wfd_go_intent", 0)
                 )
 
             active_path = _connect_peer(
@@ -189,6 +187,7 @@ def start_experimental_backend(args) -> None:
                 peer,
                 rtsp_port=rtsp_port,
             )
+
             _wait_for_nm_activation(
                 active_path,
                 on_group_interface=rtsp.set_group_interface,
@@ -236,7 +235,7 @@ def start_experimental_backend(args) -> None:
             _cleanup_step(
                 "wpa_supplicant connection release",
                 lambda: release_wpa_supplicant_connection(
-                    requested_interface, wpas_data_iface
+                    args.wfd_interface, wpas_data_iface
                 ),
             )
         _cleanup_step("P2P device disconnect", lambda: _disconnect_device(device_path))
@@ -244,6 +243,6 @@ def start_experimental_backend(args) -> None:
             _cleanup_step(
                 "GO intent restore",
                 lambda: _set_p2p_go_intent(
-                    requested_interface, previous_go_intent, restoring=True
+                    args.wfd_interface, previous_go_intent, restoring=True
                 ),
             )

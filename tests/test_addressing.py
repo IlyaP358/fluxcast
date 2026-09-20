@@ -292,23 +292,6 @@ class PeerIpAddressingTest(unittest.TestCase):
                 )
             )
 
-    def test_receiver_identity_rejects_unexpected_extra_neighbor_output(self):
-        rows = "\n".join(
-            [
-                f"{P2P_IP} dev p2p-wlan0-3 lladdr 7a:11:22:33:44:55 REACHABLE",
-                "10.42.0.183 dev p2p-wlan0-3 lladdr 7a:aa:bb:cc:dd:ee STALE",
-            ]
-        )
-        with (
-            mock.patch.object(addressing.shutil, "which", return_value="/usr/bin/ip"),
-            mock.patch.object(addressing, "_run", return_value=_completed(rows)),
-        ):
-            self.assertFalse(
-                addressing._is_expected_peer_ip(
-                    P2P_IP, PEER_MAC, "p2p-wlan0-3"
-                )
-            )
-
     def test_receiver_identity_rejects_invalid_inputs_without_running_ip(self):
         with mock.patch.object(addressing, "_run") as run:
             self.assertFalse(

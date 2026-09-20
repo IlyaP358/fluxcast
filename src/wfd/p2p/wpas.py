@@ -190,9 +190,7 @@ def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
                                 go_intent: int = 0,
                                 rtsp_port: int = WFD_RTSP_PORT,
                                 p2p_channel: Optional[int] = None,
-                                on_group_interface: Optional[
-                                    Callable[[str], None]
-                                ] = None) -> str:
+                                on_group_interface: Optional[Callable[[str], None]] = None) -> str:
     """Full connect flow bypassing NetworkManager. Returns the data interface
     name once it has a real IP address, ready for the RTSP server to use.
     """

@@ -58,7 +58,7 @@ class WFDRTSPServer:
         self._uibc_server = None  # opt-in UIBC input server; None unless enabled
 
     def set_group_interface(self, interface: str) -> bool:
-        """Record the one exact P2P group created for the selected receiver."""
+        """Set the session's P2P group interface."""
         if not _valid_interface(interface) or not _is_p2p_group_iface(interface):
             return False
         with self._auth_lock:
@@ -69,7 +69,7 @@ class WFDRTSPServer:
             return True
 
     def authenticate_client(self, client_ip: str) -> bool:
-        """Authenticate one address without allowing concurrent lookup forks."""
+        """Check the receiver address, serializing neighbour lookups."""
         # The listener starts before P2P activation so passive receivers do not
         # race a closed port. If one connects as the group comes up, briefly
         # wait for the backend to publish the exact group interface.
