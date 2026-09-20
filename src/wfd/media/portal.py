@@ -517,7 +517,12 @@ class PortalMixin:
                             "layout=interleaved ! appsink name=sink sync=false"
                         )
 
-                        muxer = WFDLPCMMuxer(self.tv_ip, self.sink_rtp_port)
+                        muxer = WFDLPCMMuxer(
+                            self.tv_ip,
+                            self.sink_rtp_port,
+                            local_ip=self.local_ip,
+                            local_port=self.config.source_port,
+                        )
                         try:
                             muxer.start(vid_pipeline, aud_pipeline)
                         except Exception as exc:

@@ -46,6 +46,30 @@ class WFDRTSPServer:
         for pipeline in pipelines:
             pipeline.stop()
 
+    def restart_active_media(self) -> int:
+        """Restart capture/encode for every live PLAY session. Returns count.
+
+        Pipelines already mid-rebind are skipped (single-flight coalesce).
+        """
+        with self._media_lock:
+            pipelines = list(self._active_media)
+        restarted = 0
+        for pipeline in pipelines:
+            if getattr(pipeline, "restarting", False):
+                print(
+                    "[FluxCast WFD] Capture restart coalesced "
+                    "(pipeline already restarting)"
+                )
+                continue
+            pipeline.restart_video()
+            restarted += 1
+        return restarted
+
+    def any_media_restarting(self) -> bool:
+        with self._media_lock:
+            pipelines = list(self._active_media)
+        return any(getattr(p, "restarting", False) for p in pipelines)
+
     def start(self) -> None:
         self._server = _ThreadingTCPServer((self.host, self.port), _WFDRTSPHandler)
         self._server.media_config = self.media_config  # type: ignore[attr-defined]

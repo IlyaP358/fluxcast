@@ -51,8 +51,8 @@ class WfdDeviceInfoIeTest(unittest.TestCase):
 
 class OperChannelTest(unittest.TestCase):
     """--wfd-p2p-channel forces the operating channel via the same
-    P2PDeviceConfig struct as GOIntent, using reg_class 81 (2.4GHz,
-    channels 1-13).
+    P2PDeviceConfig struct as GOIntent. Reg class follows the band:
+    81 for 2.4GHz, 115/125 for non-DFS 5GHz UNII-1 / UNII-3.
     """
 
     def test_sends_the_requested_channel_and_reg_class(self):
@@ -67,9 +67,35 @@ class OperChannelTest(unittest.TestCase):
         self.assertIn("'OperChannel': <uint32 6>", payload)
         self.assertIn("'OperRegClass': <uint32 81>", payload)
 
+    def test_maps_5ghz_unii1_reg_class(self):
+        with mock.patch.object(device, "_p2p_device_iface_paths",
+                                return_value=["/fi/w1/wpa_supplicant1/Interfaces/1"]), \
+             mock.patch.object(device, "_gdbus_call", return_value=_completed()) as call:
+            ok = device._set_p2p_oper_channel("wlan0", 36)
+
+        self.assertTrue(ok)
+        payload = call.call_args[0][0][-1]
+        self.assertIn("'OperChannel': <uint32 36>", payload)
+        self.assertIn("'OperRegClass': <uint32 115>", payload)
+
+    def test_maps_5ghz_unii3_reg_class(self):
+        with mock.patch.object(device, "_p2p_device_iface_paths",
+                                return_value=["/fi/w1/wpa_supplicant1/Interfaces/1"]), \
+             mock.patch.object(device, "_gdbus_call", return_value=_completed()) as call:
+            ok = device._set_p2p_oper_channel("wlan0", 149)
+
+        self.assertTrue(ok)
+        payload = call.call_args[0][0][-1]
+        self.assertIn("'OperChannel': <uint32 149>", payload)
+        self.assertIn("'OperRegClass': <uint32 125>", payload)
+
     def test_returns_false_without_a_p2p_interface(self):
         with mock.patch.object(device, "_p2p_device_iface_paths", return_value=[]):
             ok = device._set_p2p_oper_channel("wlan0", 6)
+        self.assertFalse(ok)
+
+    def test_returns_false_for_unsupported_channel(self):
+        ok = device._set_p2p_oper_channel("wlan0", 99)
         self.assertFalse(ok)
 
 
@@ -210,6 +236,38 @@ class WpaSupplicantPropertyPrivilegeTest(unittest.TestCase):
         with mock.patch.object(dbus, "_run", return_value=_access_denied()) as run:
             device._set_p2p_device_name("wlan0")
         self._assert_no_escalation(run)
+
+
+class WaitForLeaseTest(unittest.TestCase):
+    """Lease wait must survive root-owned files and MAC dash vs colon."""
+
+    def test_reads_lease_when_mac_uses_dashes(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            lease = Path(tmp) / "leases"
+            lease.write_text("123 aa-bb-cc-dd-ee-ff 192.168.49.9 * *\n")
+            with mock.patch.object(wpas_ip, "_sudo_run", return_value=_completed()):
+                ip = wpas_ip._wait_for_lease(str(lease), "AA:BB:CC:DD:EE:FF", timeout=0.2)
+            self.assertEqual(ip, "192.168.49.9")
+
+    def test_parses_dhcpack_from_log(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            lease = Path(tmp) / "leases"
+            log = Path(tmp) / "dnsmasq.log"
+            lease.write_text("")
+            log.write_text(
+                "dnsmasq-dhcp: DHCPACK(p2p-wlan0-5) 192.168.49.10 46:d2:44:e4:37:2f sink\n"
+            )
+            with mock.patch.object(wpas_ip, "_sudo_run", return_value=_completed()):
+                ip = wpas_ip._wait_for_lease(
+                    str(lease), PEER_MAC, timeout=0.2, dnsmasq_log=str(log)
+                )
+            self.assertEqual(ip, "192.168.49.10")
 
 
 if __name__ == "__main__":

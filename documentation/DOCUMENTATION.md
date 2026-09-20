@@ -70,6 +70,7 @@ python3 src/main.py --protocol cast
 - `--wfd-interface IFACE`
 - `--wfd-timeout SEC`
 - `--wfd-go-intent 0-15`
+- `--wfd-go-5ghz` USB GO only: keep 5 GHz in the GO channel set (default: 2.4 GHz)
 - `--wfd-p2p-backend nm|wpas` talk to wpa_supplicant directly instead of NetworkManager (default `nm`)
 - `--wfd-p2p-channel 1|6|11` force the P2P group onto this 2.4GHz channel (`wpas` backend only)
 - `--wfd-uibc` enable the input back channel (control the desktop from the sink)
@@ -139,6 +140,7 @@ sections also accept `host`, `port`, `discover-timeout`, `transport`, and
 - `wfd-interface`
 - `wfd-timeout`
 - `wfd-go-intent`
+- `wfd-go-5ghz`
 - `wfd-uibc`
 
 `monitor` preselects the capture output for that mode by its name (as shown by
@@ -202,6 +204,13 @@ and protocol selection remain controlled by the tray and cannot be set here.
     session; raise it only if a specific sink requires a higher intent.
   - Does not claim or require that the TV becomes the group owner or that the
     P2P address range changes.
+- `--wfd-go-5ghz`
+  - USB / secondary-radio GO only. Default USB GO drops 5 GHz from the
+    channel set (`p2p_no_go_freq` plus `p2p_pref_chan`) so GO Negotiation
+    lands on 2.4 GHz without `p2p_connect freq=` (which hops off the peer
+    listen channel and breaks Confirm). This flag keeps 5 GHz in the set.
+  - Ignored on NetworkManager / non-USB ifaces. Equivalent env:
+    `FLUXCAST_WFD_GO_5GHZ=1`.
 - `--wfd-p2p-backend`
   - `nm` (default) brings up the P2P link through NetworkManager.
   - `wpas` talks to wpa_supplicant's own D-Bus interface directly instead,
@@ -227,6 +236,8 @@ and protocol selection remain controlled by the tray and cannot be set here.
     is missing, but never raises GO intent on its own: `go_intent 0` is a
     deliberate fix for some sinks (see #72), and silently overriding it
     would break those.
+  - Also accepts non-DFS 5GHz `36|40|44|48|149|153|157|161` and applies for
+    `--wfd-p2p-backend nm` as well as `wpas` (wpa OperChannel before connect).
 - `--wfd-monitor NAME`
   - **Deprecated** alias for `--monitor`, kept for backward compatibility. Use `--monitor` instead.
 
@@ -261,7 +272,26 @@ and protocol selection remain controlled by the tray and cannot be set here.
   - **Video-only mode** - May cause immediate disconnects on Samsung TVs during WFD negotiation.
   - Use primarily for diagnostic/testing purposes.
 - `--wfd-audio-device`
-  - Explicit Pulse/PipeWire monitor source.
+  - Explicit Pulse/PipeWire **sink monitor** (e.g. `miracast.monitor`). Prefer a
+    `.monitor` device — never the default mic/`alsa_input` source.
+- **LPCM-only sinks** (many cheap Miracast dongles advertise `LPCM` and no `AAC`):
+  - FluxCast negotiates WFD LPCM and muxes MPEG-TS with `stream_type=0x83`
+    (custom `WFDLPCMMuxer`; GStreamer/ffmpeg cannot emit that type).
+  - Works on **both** capture paths: DMA-BUF `wf-recorder` H.264 → muxer, and
+    **pipe** raw NV12 → ffmpeg annex-B H.264 → muxer (when
+    `FLUXCAST_WFD_CAPTURE_ENCODE_PREF=vaapi` / `cpu` and `prefer_lpcm`).
+  - Desktop audio should be routed to a dedicated null sink whose `.monitor`
+    is passed as `--wfd-audio-device`; capture uses `pw-cat --target` with
+    `media.role=Abstract` (not `Video` — stream-restore remapped that onto the
+    default mic → feedback; also not `ffmpeg -f pulse` / Lavf).
+  - Escape hatch: `FLUXCAST_WFD_FORCE_AAC=1` keeps the DMA+AAC path (picture often
+    works; speakers stay silent on true LPCM-only TVs).
+  - Sender stderr is watched for `buffer pool full` / non-monotonic DTS; after a
+    short debounce FluxCast auto-rebinds desktop capture (keeps RTSP up).
+  - Unit coverage: `tests/test_wfd_lpcm_mux.py` (AU framing, AOSP-style PIDs);
+    `tests/test_lpcm_audio_capture.py` (pw-cat/parec argv + Abstract role +
+    S16LE→BE + pipe LPCM); `tests/test_vaapi_rc.py` (CQP vs CBR `-p` order);
+    `tests/test_icc_integration.py` (PROTO=icc, `-D`/`-r` vs `config.fps`).
 - `--wfd-rtsp-port`
   - RTSP port in WFD source IE (usually does not need changes).
 - `--wfd-rtp-source-port`
@@ -319,6 +349,108 @@ python3 src/main.py --wfd-latency-log
 python3 src/main.py --wfd-latency-log /tmp/my-latency.jsonl
 ```
 
+### WFD environment variables
+
+Optional knobs for the wlroots/`wf-recorder` capture path. Defaults preserve the
+historical software encode pipeline (`libx264` over a raw pipe).
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `FLUXCAST_WFD_ENCODER` | `libx264` | Encode backend: `libx264` (historical default), `vaapi`, `qsv`, or `auto` (VAAPI then QSV then libx264). |
+| `FLUXCAST_WFD_POWER_PLAN` | unset | Select encode power plan by id (`power_plan_0`) or OS profile name (`balanced`, `power-saver`, …). Plans are discovered from power-profiles-daemon / TLP-pd D-Bus, `powerprofilesctl`, ACPI `platform_profile`, `system76-power`, or `tuned-adm`. |
+| `FLUXCAST_WFD_ENCODE_BIAS` | unset | **Deprecated.** Legacy alias: `full` = unthrottled, `efficient` = throttled. Prefer `FLUXCAST_WFD_POWER_PLAN`. When unset, automatic battery / saver-profile throttling only applies if GPU encode was opted in (`vaapi` / `qsv` / `auto`). |
+| `FLUXCAST_WFD_VAAPI_DEVICE` | first `/dev/dri/renderD12x` | VAAPI render node override. |
+| `FLUXCAST_WFD_CAPTURE_ENCODE` | unset → pipe | Capture path when no preference file/pref is set: `pipe` / `raw` / `hwupload` = raw `wf-recorder` → ffmpeg encode; `vaapi` / `dmabuf` / `gpu` = prefer `wf-recorder -c h264_vaapi` (DMA-BUF); `auto` = DMA-BUF when GPU encode was requested. |
+| `FLUXCAST_WFD_CAPTURE_ENCODE_PREF` | unset | Explicit capture preference: `dmabuf` (DMA-BUF + VAAPI CQP), `vaapi` (raw pipe → `hwupload` → `h264_vaapi`), or `cpu` (raw pipe → `libx264`). Overrides deriving preference from `FLUXCAST_WFD_CAPTURE_ENCODE` / `FLUXCAST_WFD_ENCODER`. |
+| `FLUXCAST_WFD_CAPTURE_ENCODE_FILE` | unset | Path to a one-line preference file (`dmabuf`, `vaapi`, or `cpu`). Read on every desktop capture start/rebind so an external controller can change path without restarting the process. Wins over `FLUXCAST_WFD_CAPTURE_ENCODE_PREF`. |
+| `FLUXCAST_WFD_DMABUF_ALLOW_SCALED` | allow | When the Hyprland output scale is not `1`, DMA-BUF is still allowed by default. Set to `0` / `false` / `no` / `off` / `never` to force the pipe path on scaled outputs. |
+| `FLUXCAST_WFD_VAAPI_RC` | `CQP` | DMA-BUF `h264_vaapi` rate control: `CQP` (default, best for desktop text), `CBR`, `VBR`, … On Intel, CBR often **undershoots** (~3 Mbps despite a high target) → blocky video; prefer CQP for quality. |
+| `FLUXCAST_WFD_VAAPI_QP` | `18` | Constant QP when `RC=CQP`. Lower is sharper / larger. |
+| `FLUXCAST_WFD_VAAPI_BITRATE` | desktop plan / `12M` | Target for CBR/VBR (AVOption `b=` in bits/s). Ignored for CQP. |
+| `FLUXCAST_WFD_VAAPI_GOP` | stream fps | GOP length in frames (default ≈ 1s). Shorter recovers faster after drops; longer is more efficient for film. |
+| `FLUXCAST_WFD_VAAPI_QUALITY` | `5` throttled / `4` otherwise | VAAPI speed/quality tradeoff (1–8; **lower** = slower/better). Override anytime with this env (Omarchy defaults to `5`). |
+| `FLUXCAST_WFD_VBV_MULTIPLIER` | `0.5` | CBR `-bufsize` as a fraction of bitrate (~seconds of VBV). Values ≪0.5 correlated with pipe buffer-pool / TX stalls; `2.0` adds lag. |
+| `FLUXCAST_WFD_VAAPI_PIPE_LOW_LATENCY` | unset | When `1`/`true`, pipe ffmpeg uses `nobuffer`/`low_delay` and may shrink `thread_queue_size`. Leave unset for production; stack with tiny VBV caused lockups in A/B. |
+| `FLUXCAST_WFD_INTERFACE` | auto | Managed Wi‑Fi iface for P2P. Unset/`auto` prefers P2P-GO-capable ifaces that are not already NM-connected (e.g. idle USB vs STA). |
+| `FLUXCAST_WFD_GO_5GHZ` | unset | USB GO only. `1`/`true`/`yes`/`on` keeps 5 GHz in the GO channel set (same as `--wfd-go-5ghz`). Default USB GO is 2.4 GHz only. |
+| `FLUXCAST_WFD_GO_2GHZ_MHZ` | unset | USB GO only. Integer MHz (2400–2499) to keep as the sole 2.4 GHz GO channel when it is enabled on the phy (e.g. `2462` for channel 11). Still not `p2p_connect freq=`. |
+| `FLUXCAST_USB_WPA` | `wpa_supplicant` on `PATH` | Absolute path to the `wpa_supplicant` binary used for dedicated USB P2P. NetworkManager keeps the system daemon on the primary STA iface. |
+| `FLUXCAST_WFD_WF_RECORDER_DAMAGE` | unset | Set to `1` / `true` / `yes` / `on` to omit `wf-recorder -D` (damage-aware capture). Default keeps `-D` for historical continuous capture. LPCM honors this the same as DMA paths. |
+| `FLUXCAST_WFD_WF_RECORDER_BIN` | unset | Absolute path to a `wf-recorder` binary. When set (and usable), preferred over `PATH`. Opt-in for a local [PR #347](https://github.com/ammen99/wf-recorder/pull/347) ICC build — **not** probed automatically. |
+| `FLUXCAST_WFD_WF_RECORDER_PROTO` | unset / `auto` | `icc` requires an ICC-capable binary (`--toplevel` / `ext-copy-capture`). In FluxCast alone, a non-ICC binary with `PROTO=icc` yields no recorder; Omarchy `miracast-ctl` fail-softs to PATH instead. `wlr` / unset / `auto` accept any usable binary (default stock `PATH`). |
+| `FLUXCAST_WFD_MODE_STATE` | unset | If set to a file path, write sink-advertised CEA/VESA modes (chosen mode, supported list, peer MAC / name) as JSON after RTSP negotiation — for external UIs. |
+
+#### Power plans (`power_plan_N`)
+
+FluxCast does not invent profile *names*. It discovers whatever power stack is
+active and assigns stable ids ``power_plan_0`` … ``power_plan_{n-1}`` in that
+backend’s order. The OS string (e.g. ``performance``, ``balanced``,
+``power-saver``, ``battery``, ``quiet``) is the plan’s ``name`` for logs and
+``FLUXCAST_WFD_POWER_PLAN`` overrides.
+
+Discovery order (first backend that yields at least one profile wins):
+
+1. power-profiles-daemon D-Bus (``org.freedesktop.UPower.PowerProfiles`` or
+   legacy ``net.hadess.PowerProfiles``) — also covers TLP 1.9+ ``tlp-pd``
+2. ``powerprofilesctl`` CLI
+3. ACPI ``/sys/firmware/acpi/platform_profile`` (+ ``_choices``)
+4. ``system76-power`` (Pop!_OS: performance / balanced / battery)
+5. ``tuned-adm``
+6. Synthetic ``power_plan_0`` name ``default`` when nothing is available
+
+Encode **throttling** (milder bitrate / faster presets — the old ``efficient``
+knobs) applies when GPU encode was opted in (or an override is set) **and**:
+
+- the system is on battery, or
+- the active plan’s OS name looks saver-like (``power-saver``, ``battery``,
+  ``low-power``, ``cool``, ``quiet``, …)
+
+Default ``FLUXCAST_WFD_ENCODER=libx264`` sessions stay unthrottled unless you
+set ``FLUXCAST_WFD_POWER_PLAN`` or legacy ``FLUXCAST_WFD_ENCODE_BIAS``.
+
+```bash
+# Force the saver plan by OS name (id also works: power_plan_0, …)
+FLUXCAST_WFD_ENCODER=auto FLUXCAST_WFD_POWER_PLAN=power-saver python3 src/main.py
+```
+
+#### Capture preference and fallback
+
+With no preference file and default `FLUXCAST_WFD_ENCODER=libx264`, capture stays on the historical raw-pipe + software encode path.
+
+When preference is `dmabuf` (or derived from `CAPTURE_ENCODE=auto`/`vaapi` with a GPU encoder request), FluxCast tries in order:
+
+1. `wf-recorder -c h264_vaapi` DMA-BUF (`rc_mode` from `FLUXCAST_WFD_VAAPI_RC`, default CQP; `out_range=tv`, `bf=0`; stock omits `-r`, ICC builds pass `-r $fps`)
+2. raw pipe → `hwupload` → `h264_vaapi`
+3. raw pipe → `libx264`
+
+Preference `vaapi` skips DMA-BUF and tries steps 2 then 3. Preference `cpu` uses step 3 only.
+
+Examples:
+
+```bash
+# Opt into GPU encode when ffmpeg has h264_vaapi / h264_qsv
+FLUXCAST_WFD_ENCODER=auto python3 src/main.py
+
+# Prefer DMA-BUF capture+encode (falls back to pipe VAAPI, then libx264)
+FLUXCAST_WFD_ENCODER=auto FLUXCAST_WFD_CAPTURE_ENCODE_PREF=dmabuf python3 src/main.py
+
+# Force software encode over the raw pipe
+FLUXCAST_WFD_CAPTURE_ENCODE_PREF=cpu python3 src/main.py
+
+# Live-updatable preference (write "vaapi\n" or "cpu\n" into the file, then SIGUSR1)
+FLUXCAST_WFD_CAPTURE_ENCODE_FILE=/tmp/fluxcast-capture-encode \
+  FLUXCAST_WFD_ENCODER=auto python3 src/main.py
+
+# Quieter Hyprland capture (omit wf-recorder -D)
+FLUXCAST_WFD_WF_RECORDER_DAMAGE=1 python3 src/main.py
+
+# Opt into a local ext-image-copy-capture wf-recorder (PR #347) — not the default
+FLUXCAST_WFD_WF_RECORDER_BIN=/path/to/wf-recorder-icc \
+  FLUXCAST_WFD_WF_RECORDER_PROTO=icc \
+  FLUXCAST_WFD_ENCODER=auto FLUXCAST_WFD_CAPTURE_ENCODE_PREF=dmabuf \
+  python3 src/main.py
+```
+
 ## Latency Log Events
 
 - `rtsp_connected`
@@ -333,6 +465,9 @@ python3 src/main.py --wfd-latency-log /tmp/my-latency.jsonl
   - This is an accurate sender-path latency metric inside FluxCast (excludes TV decode/render delay).
 - `sender_health`
   - Periodic telemetry of process health and transmitted-byte counter.
+- `capture_encode`
+  - Emitted when a desktop capture/encode path starts (including after SIGUSR1 rebind).
+  - Fields: `capture_path` (`dmabuf` or `pipe`), `encoder` (e.g. `h264_vaapi`, `libx264`), `preference` (`dmabuf` / `vaapi` / `cpu`), `fallback` (true if not the first attempt).
 
 ## Practical Command Combinations
 

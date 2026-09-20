@@ -120,6 +120,15 @@ wfd-go-intent = 0
         self.assertEqual(args, ["--wfd-aosp-pmt-pid", "--wfd-go-intent", "0"])
         self.assertEqual(warnings, [])
 
+    def test_loads_wfd_go_5ghz_flag(self):
+        self._write("[wfd]\nwfd-go-5ghz = true\n")
+        warnings = []
+        args = tray_config.load_profile(
+            "wfd", config_path=self.config_path, warn=warnings.append
+        )
+        self.assertEqual(args, ["--wfd-go-5ghz"])
+        self.assertEqual(warnings, [])
+
     def test_go_intent_out_of_range_warns(self):
         self._write("[wfd]\nwfd-go-intent = 16\n")
         warnings = []

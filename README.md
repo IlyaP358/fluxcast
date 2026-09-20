@@ -103,6 +103,11 @@ python3 src/main.py --protocol wfd --wfd-p2p-backend wpas
 python3 src/main.py --protocol wfd --wfd-p2p-backend wpas --wfd-p2p-channel 6
 ```
 
+USB / secondary-radio GO (dedicated wpa on `--wfd-interface`): 2.4 GHz by
+default. Keep 5 GHz in the GO set with `--wfd-go-5ghz` (or
+`FLUXCAST_WFD_GO_5GHZ=1`). Do not use `--wfd-p2p-channel` to pin USB GO;
+that sets FORCE_FREQ and hops off the peer listen channel during GO Neg.
+
 Needs the D-Bus policy in `meta/zz-dev.fluxcast.wpa-supplicant.conf`
 installed to `/usr/share/dbus-1/system.d/`. On Debian/Ubuntu, a user in the
 `netdev` group can run it without sudo, courtesy of the `netdev` grant in
@@ -272,6 +277,13 @@ sudo ufw allow 7236/tcp
 
 Detailed flags, modes, and usage examples:  
 [documentation/DOCUMENTATION.md](documentation/DOCUMENTATION.md)
+
+Optional WFD encode/capture env vars (`FLUXCAST_WFD_ENCODER`, capture
+preference / DMA-BUF, power plans, damage-aware `wf-recorder`, sink mode
+state file) are documented under **WFD environment variables** in that file.
+Default encode stays `libx264`; set `FLUXCAST_WFD_ENCODER=auto` to try
+VAAPI/QSV when available, and optionally `FLUXCAST_WFD_CAPTURE_ENCODE_PREF`
+(`dmabuf` / `vaapi` / `cpu`) to choose the capture path.
 
 ## Tested Environment
 
