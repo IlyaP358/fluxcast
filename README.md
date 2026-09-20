@@ -216,10 +216,12 @@ sudo fluxcast-install-system
 ### Arch Linux - AUR
 
 ```bash
-yay -S fluxcast-git
+yay -S fluxcast
 # or
-paru -S fluxcast-git
+paru -S fluxcast
 ```
+
+`fluxcast` tracks the latest release. [`fluxcast-git`](https://aur.archlinux.org/packages/fluxcast-git) builds the current `main` instead, if you want to run ahead of a release.
 
 ### From source
 

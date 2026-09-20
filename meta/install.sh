@@ -22,11 +22,14 @@ while IFS= read -r rel; do
 done < <(cd "$SRCDIR/src" && find . \( -name "*.py" -o -name "*.json" \) -not -path "*/__pycache__/*" | sed 's|^\./||' | sort)
 
 # Stamp the version so an installed copy, which has no .git to ask, can still
-# report what it was built from.
-if [[ -d "$SRCDIR/.git" ]] && command -v git >/dev/null 2>&1; then
+STAMP="${FLUXCAST_VERSION:-}"
+if [[ -z "$STAMP" ]] && [[ -d "$SRCDIR/.git" ]] && command -v git >/dev/null 2>&1; then
     REAL_VER=$(cd "$SRCDIR" && git describe --long --tags --always --abbrev=7 | sed 's/^v//')
     REAL_BRANCH=$(cd "$SRCDIR" && git rev-parse --abbrev-ref HEAD)
-    sed -i "s|^__installed_version__ = \"dev\"|__installed_version__ = \"$REAL_VER (branch: $REAL_BRANCH)\"|" \
+    STAMP="$REAL_VER (branch: $REAL_BRANCH)"
+fi
+if [[ -n "$STAMP" ]]; then
+    sed -i "s|^__installed_version__ = \"dev\"|__installed_version__ = \"$STAMP\"|" \
         "$DESTDIR/opt/fluxcast/version.py" || true
 fi
 while IFS= read -r rel; do

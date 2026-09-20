@@ -390,8 +390,15 @@ def _show_about() -> None:
     version = get_fluxcast_version()
 
     def _run():
-        import tkinter as tk
-        from PIL import ImageTk
+        try:
+            import tkinter as tk
+            from PIL import ImageTk
+        except ImportError as exc:
+            _log(f"About window unavailable: {exc}")
+            _notify(_l("About FluxCast"),
+                    _l("The About window needs the Tk libraries "
+                       "(install the 'tk' package)."))
+            return
 
         BG = "#0a120d"
         FG = "#e5e7eb"

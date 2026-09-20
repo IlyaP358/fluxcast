@@ -122,3 +122,30 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  aur:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set pkgver from tag
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${TAG#v}"
+          sed -i -E "s/^pkgver=.*/pkgver=$VERSION/" aur/PKGBUILD
+          sed -i -E "s/^pkgrel=.*/pkgrel=1/" aur/PKGBUILD
+
+      - name: Publish to the AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
+        with:
+          pkgname: fluxcast
+          asset_dir: aur
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: ${{ github.event.release.tag_name }}
+          ssh_keyscan_types: rsa,ecdsa,ed25519
+          updpkgsums: true
+          test: true
