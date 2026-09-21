@@ -72,6 +72,8 @@ def _is_expected_peer_ip(
     peer_ip: str,
     peer_mac: str,
     interface: Optional[str],
+    *,
+    timeout: float = 3.0,
 ) -> bool:
     """Return whether peer_ip belongs to the selected receiver's P2P group.
 
@@ -93,7 +95,7 @@ def _is_expected_peer_ip(
         return False
     command = ["ip", "neigh", "show", "dev", interface]
     try:
-        result = _run(command, timeout=3.0)
+        result = _run(command, timeout=timeout)
     except Exception:
         return False
     if result.returncode != 0:

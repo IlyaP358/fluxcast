@@ -60,6 +60,7 @@ def _wait_for_nm_activation(
     print("[FluxCast WFD] Waiting for NetworkManager P2P activation...")
     deadline = time.monotonic() + timeout
     last_status = ""
+    state = None
 
     while time.monotonic() < deadline:
         state_raw = _nm_get_property(
@@ -75,6 +76,8 @@ def _wait_for_nm_activation(
             on_group_interface(group_interface)
         device_status = ", ".join(_nm_device_summary(path) for path in devices) or "no-device"
         status = f"{state_text}; {device_status}"
+        if state == 2 and on_group_interface is not None and group_interface is None:
+            status += "; waiting for P2P group interface"
 
         if status != last_status:
             print(f"[FluxCast WFD] NM active connection: {status}")
@@ -93,6 +96,12 @@ def _wait_for_nm_activation(
 
         time.sleep(0.5)
 
+    if state == 2 and on_group_interface is not None:
+        raise WFDNotReady(
+            "NetworkManager activated the Wi-Fi Direct connection, but its "
+            "P2P group interface could not be determined. "
+            f"Last status: {last_status}"
+        )
     raise WFDNotReady(
         "Timed out waiting for NetworkManager Wi-Fi Direct activation. "
         f"Last status: {last_status or 'unknown'}"

@@ -1,5 +1,6 @@
 import socketserver
 import threading
+import time
 from typing import Optional
 
 from ..config import WFDMediaConfig
@@ -73,13 +74,31 @@ class WFDRTSPServer:
         # The listener starts before P2P activation so passive receivers do not
         # race a closed port. If one connects as the group comes up, briefly
         # wait for the backend to publish the exact group interface.
-        self._group_interface_ready.wait(timeout=2.0)
-        with self._auth_lock:
-            return _is_expected_peer_ip(
-                client_ip,
-                self.peer_address,
-                self.interface,
-            )
+        if not self._group_interface_ready.wait(timeout=2.0):
+            return False
+        # The neighbour entry can lag behind the group interface. Share one
+        # deadline across lock acquisition, queries and retry sleeps.
+        deadline = time.monotonic() + 2.0
+        if not self._auth_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            return False
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                if _is_expected_peer_ip(
+                    client_ip,
+                    self.peer_address,
+                    self.interface,
+                    timeout=remaining,
+                ):
+                    return time.monotonic() < deadline
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                time.sleep(min(0.1, remaining))
+        finally:
+            self._auth_lock.release()
 
     def claim_client(
         self,

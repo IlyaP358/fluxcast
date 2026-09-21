@@ -8,10 +8,41 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wfd import session  # noqa: E402
+from wfd.config import WFDNotReady
 from wfd.p2p import nm, wpas  # noqa: E402
 
 
 class NetworkManagerGroupInterfaceTest(unittest.TestCase):
+    def test_timeout_distinguishes_activation_from_missing_group_interface(self):
+        for state, message in (
+            (1, "Timed out waiting for NetworkManager Wi-Fi Direct activation"),
+            (2, "activated.*P2P group interface could not be determined"),
+            (4, "deactivated the Wi-Fi Direct connection"),
+        ):
+            with (
+                self.subTest(state=state),
+                mock.patch.object(nm, "_nm_get_property", return_value="state"),
+                mock.patch.object(nm, "_variant_uint", return_value=state),
+                mock.patch.object(nm, "_nm_active_devices", return_value=["/device/1"]),
+                mock.patch.object(nm, "_nm_group_interface", return_value=None),
+                mock.patch.object(nm, "_nm_device_summary", return_value="device status"),
+                mock.patch.object(nm.time, "monotonic", side_effect=[0, 0, 2]),
+                mock.patch.object(nm.time, "sleep"),
+            ):
+                callback = mock.Mock()
+                with self.assertRaisesRegex(WFDNotReady, message):
+                    nm._wait_for_nm_activation("/active/1", timeout=1, on_group_interface=callback)
+                callback.assert_not_called()
+
+    def test_activation_without_callback_does_not_require_group_interface(self):
+        with (
+            mock.patch.object(nm, "_nm_get_property", return_value="state"),
+            mock.patch.object(nm, "_variant_uint", return_value=2),
+            mock.patch.object(nm, "_nm_active_devices", return_value=[]),
+            mock.patch.object(nm, "_nm_group_interface", return_value=None),
+        ):
+            nm._wait_for_nm_activation("/active/1")
+
     def test_exact_ip_interface_is_read_from_active_device(self):
         def get_string(_path, _interface, prop):
             return "p2p-wlo1-2" if prop == "IpInterface" else "p2p-dev-wlo1"

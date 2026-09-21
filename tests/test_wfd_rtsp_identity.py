@@ -60,7 +60,7 @@ class RTSPClientClaimTest(unittest.TestCase):
             self.assertFalse(self.server.has_connected_client)
 
         self.assertEqual(verify.call_count, 2)
-        verify.assert_called_with(PEER_IP, PEER_MAC, "p2p-wlan0-3")
+        verify.assert_called_with(PEER_IP, PEER_MAC, "p2p-wlan0-3", timeout=mock.ANY)
 
     def test_unverified_client_cannot_claim(self):
         with mock.patch(
@@ -127,10 +127,12 @@ class RTSPGroupInterfaceTest(unittest.TestCase):
     def test_connection_waits_for_the_backend_to_publish_the_group(self):
         checked = threading.Event()
 
-        def verify(client_ip, peer_mac, interface):
+        def verify(client_ip, peer_mac, interface, *, timeout):
             self.assertEqual(client_ip, PEER_IP)
             self.assertEqual(peer_mac, PEER_MAC)
             self.assertEqual(interface, "p2p-wlan0-3")
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 2.0)
             checked.set()
             return True
 
