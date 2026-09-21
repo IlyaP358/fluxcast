@@ -2,6 +2,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from unittest import mock
@@ -136,8 +137,113 @@ class ReceiverNeighbourWaitTest(unittest.TestCase):
         query.assert_called_once()
         self.assertEqual(self.now, 0)
 
+    def test_retry_sleeps_do_not_hold_the_lookup_lock(self):
+        def sleep(seconds):
+            self.assertFalse(self.server._auth_lock.locked())
+            self.advance(seconds)
+
+        with (
+            mock.patch("time.sleep", side_effect=sleep),
+            mock.patch("wfd.p2p.addressing._run", return_value=self.result("")),
+        ):
+            self.assertFalse(self.server.authenticate_client(PEER_IP))
+        self.assertAlmostEqual(self.now, 2.0)
+
+    def test_expired_lock_acquisition_skips_query_and_releases_lock(self):
+        def acquire(*, timeout):
+            self.advance(timeout + 0.1)
+            return True
+
+        self.server._auth_lock = mock.Mock()
+        self.server._auth_lock.acquire.side_effect = acquire
+        with mock.patch("wfd.p2p.addressing._run") as query:
+            self.assertFalse(self.server.authenticate_client(PEER_IP))
+        query.assert_not_called()
+        self.server._auth_lock.release.assert_called_once_with()
+
+    def test_unexpected_lookup_exception_releases_lock(self):
+        with mock.patch("wfd.rtsp.rtsp_server._is_expected_peer_ip", side_effect=RuntimeError("lookup failed")):
+            with self.assertRaisesRegex(RuntimeError, "lookup failed"):
+                self.server.authenticate_client(PEER_IP)
+        self.assertFalse(self.server._auth_lock.locked())
+
 
 class ReceiverNeighbourTimingTest(unittest.TestCase):
+    def test_unverified_retries_do_not_starve_verified_receiver(self):
+        server = WFDRTSPServer(
+            WFDMediaConfig(monitor=None), peer_address=PEER_MAC, interface=GROUP,
+        )
+        first_query = threading.Event()
+        verified_waiting = threading.Event()
+        verified_done = threading.Event()
+        unverified_done = threading.Event()
+        results = {}
+        errors = []
+        query_threads = set()
+        lock = server._auth_lock
+
+        class ObservedLock:
+            def acquire(self, *, timeout):
+                if threading.current_thread() is verified:
+                    verified_waiting.set()
+                return lock.acquire(timeout=timeout)
+
+            def release(self):
+                lock.release()
+
+        server._auth_lock = ObservedLock()
+
+        def query(command, timeout):
+            current = threading.current_thread()
+            if query_threads:
+                errors.append("neighbour queries overlapped")
+            query_threads.add(current)
+            try:
+                if not first_query.is_set():
+                    first_query.set()
+                    if not verified_waiting.wait(1):
+                        errors.append("verified receiver did not reach lookup lock")
+                time.sleep(min(0.05, timeout))
+                if timeout < 0.05:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                return subprocess.CompletedProcess(command, 0, f"{PEER_IP} lladdr {PEER_MAC} REACHABLE", "")
+            finally:
+                query_threads.remove(current)
+
+        def authenticate(label, address, done):
+            try:
+                results[label] = server.authenticate_client(address)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                done.set()
+
+        unverified = threading.Thread(
+            target=authenticate, args=("unverified", "192.168.1.50", unverified_done), daemon=True,
+        )
+        verified = threading.Thread(
+            target=authenticate, args=("verified", PEER_IP, verified_done), daemon=True,
+        )
+        with (
+            mock.patch("wfd.p2p.addressing.shutil.which", return_value="/usr/bin/ip"),
+            mock.patch("wfd.p2p.addressing._run", side_effect=query),
+        ):
+            unverified.start()
+            try:
+                self.assertTrue(first_query.wait(1))
+                verified.start()
+                self.assertTrue(verified_done.wait(1), "valid receiver blocked behind retries")
+                self.assertTrue(results.get("verified"))
+                self.assertFalse(unverified_done.is_set())
+            finally:
+                unverified.join(3)
+                if verified.ident is not None:
+                    verified.join(3)
+        self.assertFalse(unverified.is_alive())
+        self.assertFalse(verified.is_alive())
+        self.assertFalse(results.get("unverified", True))
+        self.assertEqual(errors, [])
+
     def test_real_subprocess_cannot_extend_neighbour_deadline(self):
         server = WFDRTSPServer(
             WFDMediaConfig(monitor=None), peer_address=PEER_MAC, interface=GROUP,

@@ -79,10 +79,11 @@ class WFDRTSPServer:
         # The neighbour entry can lag behind the group interface. Share one
         # deadline across lock acquisition, queries and retry sleeps.
         deadline = time.monotonic() + 2.0
-        if not self._auth_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
-            return False
-        try:
-            while True:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self._auth_lock.acquire(timeout=remaining):
+                return False
+            try:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
@@ -93,12 +94,13 @@ class WFDRTSPServer:
                     timeout=remaining,
                 ):
                     return time.monotonic() < deadline
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                time.sleep(min(0.1, remaining))
-        finally:
-            self._auth_lock.release()
+            finally:
+                self._auth_lock.release()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            # Let another receiver check its identity between retries.
+            time.sleep(min(0.1, remaining))
 
     def claim_client(
         self,
