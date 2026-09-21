@@ -1,11 +1,12 @@
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from ..config import WFDNotReady
 from ..constants import NM_DEST, NM_PATH, WFD_RTSP_PORT
 from ..ie import (
     WFDPeer, _parse_gdbus_byte_array, _parse_wfd_ies_rtsp_port, _wfd_capability,
 )
+from .addressing import _is_p2p_group_iface, _valid_interface
 from .dbus import (
     NM_ACTIVE_STATE_NAMES, NM_DEVICE_REASON_NAMES, NM_DEVICE_STATE_NAMES,
     NM_DEVICE_TYPE_WIFI_P2P,
@@ -35,10 +36,31 @@ def _nm_active_devices(active_path: str) -> list[str]:
     )
     return _object_paths(raw)
 
-def _wait_for_nm_activation(active_path: str, timeout: float = 35.0) -> None:
+
+def _nm_group_interface(device_paths: list[str]) -> Optional[str]:
+    """Return the exact P2P group interface attached to an active connection."""
+    for path in device_paths:
+        for prop in ("IpInterface", "Interface"):
+            interface = _nm_get_string(
+                path,
+                "org.freedesktop.NetworkManager.Device",
+                prop,
+            )
+            if _valid_interface(interface) and _is_p2p_group_iface(interface):
+                return interface
+    return None
+
+
+def _wait_for_nm_activation(
+    active_path: str,
+    timeout: float = 35.0,
+    *,
+    on_group_interface: Optional[Callable[[str], None]] = None,
+) -> None:
     print("[FluxCast WFD] Waiting for NetworkManager P2P activation...")
     deadline = time.monotonic() + timeout
     last_status = ""
+    state = None
 
     while time.monotonic() < deadline:
         state_raw = _nm_get_property(
@@ -49,14 +71,21 @@ def _wait_for_nm_activation(active_path: str, timeout: float = 35.0) -> None:
         state = _variant_uint(state_raw)
         state_text = NM_ACTIVE_STATE_NAMES.get(state or -1, str(state))
         devices = _nm_active_devices(active_path)
+        group_interface = _nm_group_interface(devices)
+        if group_interface and on_group_interface is not None:
+            on_group_interface(group_interface)
         device_status = ", ".join(_nm_device_summary(path) for path in devices) or "no-device"
         status = f"{state_text}; {device_status}"
+        if state == 2 and on_group_interface is not None and group_interface is None:
+            status += "; waiting for P2P group interface"
 
         if status != last_status:
             print(f"[FluxCast WFD] NM active connection: {status}")
             last_status = status
 
-        if state == 2:
+        if state == 2 and (
+            on_group_interface is None or group_interface is not None
+        ):
             print("[FluxCast WFD] P2P link is activated; waiting for RTSP session...")
             return
         if state == 4:
@@ -67,6 +96,12 @@ def _wait_for_nm_activation(active_path: str, timeout: float = 35.0) -> None:
 
         time.sleep(0.5)
 
+    if state == 2 and on_group_interface is not None:
+        raise WFDNotReady(
+            "NetworkManager activated the Wi-Fi Direct connection, but its "
+            "P2P group interface could not be determined. "
+            f"Last status: {last_status}"
+        )
     raise WFDNotReady(
         "Timed out waiting for NetworkManager Wi-Fi Direct activation. "
         f"Last status: {last_status or 'unknown'}"

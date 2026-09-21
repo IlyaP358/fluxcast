@@ -3,6 +3,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+WFD_NEGOTIATION_METHODS = frozenset(
+    {"OPTIONS", "GET_PARAMETER", "SET_PARAMETER", "SETUP", "PLAY", "TEARDOWN"}
+)
+
+
 @dataclass
 class RTSPMessage:
     start: str

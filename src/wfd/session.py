@@ -147,6 +147,7 @@ def start_experimental_backend(args) -> None:
     rtsp_port = getattr(args, "wfd_rtsp_port", WFD_RTSP_PORT)
     rtsp = WFDRTSPServer(
         media_config=media_config,
+        peer_address=peer.address,
         port=rtsp_port,
     )
     firewall_opened = False
@@ -171,6 +172,7 @@ def start_experimental_backend(args) -> None:
                 go_intent=getattr(args, "wfd_go_intent", 0),
                 rtsp_port=rtsp_port,
                 p2p_channel=getattr(args, "wfd_p2p_channel", None),
+                on_group_interface=rtsp.set_group_interface,
             )
         else:
             # Lower our GO intent before negotiation so the TV becomes the group
@@ -186,7 +188,10 @@ def start_experimental_backend(args) -> None:
                 rtsp_port=rtsp_port,
             )
 
-            _wait_for_nm_activation(active_path)
+            _wait_for_nm_activation(
+                active_path,
+                on_group_interface=rtsp.set_group_interface,
+            )
 
         if not getattr(args, "wfd_no_firewall", False):
             uibc_enabled = getattr(args, "wfd_uibc", False)
