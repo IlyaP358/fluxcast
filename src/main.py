@@ -18,7 +18,7 @@ Streaming & Encoding Options:
     --bitrate Xm             Video bitrate (default: 4M)
 
 DLNA / Cast Options:
-    --host HOST              LAN IP to advertise in the stream URL (default: auto)
+    --host HOST              LAN IP/address to bind and advertise in the stream URL (default: auto)
     --port PORT              HTTP server port (default: 8080)
     --discover-timeout N     Discovery timeout in seconds (default: 5)
     --transport progressive-ts|hls|live-ts
@@ -115,7 +115,7 @@ def parse_args() -> argparse.Namespace:
     # DLNA / Cast Options
     dlna_cast = parser.add_argument_group("DLNA / Cast Options")
     dlna_cast.add_argument("--host", default=None,
-                           help="LAN IP to advertise in the stream URL (default: auto)")
+                           help="LAN IP/address to bind and advertise in the stream URL (default: auto)")
     dlna_cast.add_argument("--port", type=int, default=8080,
                            help="HTTP server port (default: 8080)")
     dlna_cast.add_argument("--discover-timeout", type=int, default=5,
@@ -371,7 +371,13 @@ def main() -> None:
         handler_class=handler_class,
         session_id=session_id,
     )
-    stream_server.start()
+    try:
+        stream_server.start()
+    except OSError as exc:
+        print(
+            f"[FluxCast] ERROR: Could not bind HTTP server to {host}:{args.port}: {exc}"
+        )
+        shutdown()
     print(f"[FluxCast] HTTP server: {stream_url}")
     print(f"[FluxCast] Session: {session_id}")
     print(f"[FluxCast] Transport: {args.transport}")
