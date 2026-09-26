@@ -3,6 +3,8 @@ import shutil
 import subprocess
 from typing import Optional
 
+from diagnostics import PORTAL_GST_AAC_ENCODERS
+
 from .config import WFDNotReady
 
 
@@ -140,18 +142,25 @@ def _pipewiresrc_selector_attempts(
         )
     return attempts
 
+
+# Raw-audio caps each encoder accepts. The preference order lives in
+# diagnostics.PORTAL_GST_AAC_ENCODERS so --doctor reports the same list (#129).
+_AAC_ENCODER_CAPS = {
+    "fdkaacenc": ["audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved"],
+    "avenc_aac": ["audio/x-raw,rate=48000,channels=2"],
+    "voaacenc": ["audio/x-raw,rate=48000,channels=2"],
+    "faac": ["audio/x-raw,rate=48000,channels=2"],
+}
+
+
 def _gst_pick_aac_encoder() -> tuple[str, list[str]]:
     """
     Pick a broadly available AAC encoder and a compatible raw-audio caps filter.
     """
-    if _gst_has_element("fdkaacenc"):
-        return "fdkaacenc", ["audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved"]
-    if _gst_has_element("avenc_aac"):
-        return "avenc_aac", ["audio/x-raw,rate=48000,channels=2"]
-    if _gst_has_element("voaacenc"):
-        return "voaacenc", ["audio/x-raw,rate=48000,channels=2"]
-    if _gst_has_element("faac"):
-        return "faac", ["audio/x-raw,rate=48000,channels=2"]
+    for encoder in PORTAL_GST_AAC_ENCODERS:
+        if _gst_has_element(encoder):
+            return encoder, _AAC_ENCODER_CAPS[encoder]
     raise WFDNotReady(
-        "No usable GStreamer AAC encoder found (tried fdkaacenc, avenc_aac, voaacenc, faac)."
+        "No usable GStreamer AAC encoder found (tried "
+        + ", ".join(PORTAL_GST_AAC_ENCODERS) + ")."
     )

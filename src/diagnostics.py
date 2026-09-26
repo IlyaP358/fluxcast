@@ -21,6 +21,56 @@ STATUS_WARN = "warn"
 STATUS_FAIL = "fail"
 STATUS_SKIP = "skip"
 
+_GST_BASE_PACKAGES = ("gstreamer1.0-plugins-base (Arch: gst-plugins-base; "
+                      "Fedora: gstreamer1-plugins-base)")
+_GST_GOOD_PACKAGES = ("gstreamer1.0-plugins-good (Arch: gst-plugins-good; "
+                      "Fedora: gstreamer1-plugins-good)")
+_GST_BAD_PACKAGES = ("gstreamer1.0-plugins-bad (Arch: gst-plugins-bad; "
+                     "Fedora: gstreamer1-plugins-bad-free)")
+
+# Elements the portal GStreamer backend links. wfd/media/portal.py imports these
+# rather than keeping its own copy: --doctor vouched for two of them while the
+# backend enforced twelve, so a user could install exactly what the report named
+# and still not start a session (#129). wfd imports diagnostics and never the
+# reverse, so the shared copy lives on this side.
+PORTAL_GST_VIDEO_ELEMENTS = (
+    "pipewiresrc", "videoconvert", "videoscale", "videorate",
+    "x264enc", "mpegtsmux", "rtpmp2tpay", "udpsink",
+)
+PORTAL_GST_AUDIO_ELEMENTS = (
+    "pulsesrc", "audioconvert", "audioresample", "aacparse",
+)
+# Tried in this order by _gst_pick_aac_encoder, which needs exactly one of them.
+PORTAL_GST_AAC_ENCODERS = ("fdkaacenc", "avenc_aac", "voaacenc", "faac")
+
+# What to install when an element is absent. Read off the apt indexes'
+# Gstreamer-Elements fields on Ubuntu 26.04 with GStreamer 1.28, because the
+# grouping is not guessable: fdkaacenc has a package of its own rather than
+# sitting in -plugins-bad, and faac is not packaged for Debian/Ubuntu at all.
+_GST_ELEMENT_PACKAGES = {
+    "pipewiresrc": "gstreamer1.0-pipewire (Arch: gst-plugin-pipewire; "
+                   "Fedora: pipewire-gstreamer)",
+    "videoconvert": _GST_BASE_PACKAGES,
+    "videoscale": _GST_BASE_PACKAGES,
+    "videorate": _GST_BASE_PACKAGES,
+    "audioconvert": _GST_BASE_PACKAGES,
+    "audioresample": _GST_BASE_PACKAGES,
+    "rtpmp2tpay": _GST_GOOD_PACKAGES,
+    "udpsink": _GST_GOOD_PACKAGES,
+    "pulsesrc": _GST_GOOD_PACKAGES,
+    "aacparse": _GST_GOOD_PACKAGES,
+    "mpegtsmux": _GST_BAD_PACKAGES,
+    "voaacenc": _GST_BAD_PACKAGES,
+    "x264enc": "gstreamer1.0-plugins-ugly (Arch: gst-plugins-ugly; "
+               "Fedora: gstreamer1-plugins-ugly, RPM Fusion)",
+    "avenc_aac": "gstreamer1.0-libav (Arch: gst-libav; "
+                 "Fedora: gstreamer1-libav, RPM Fusion)",
+    "fdkaacenc": "gstreamer1.0-fdkaac (Arch: gst-plugins-bad; "
+                 "Fedora: gstreamer1-plugins-bad-free)",
+    "faac": "not packaged for Debian/Ubuntu (Arch: gst-plugins-bad)",
+}
+
+
 # RTSP port advertised in the WFD IEs; must reach the receiver for streaming.
 WFD_RTSP_PORT = 7236
 
@@ -107,45 +157,98 @@ def _wf_recorder_check() -> Check:
     )
 
 
-def _gst_element_check(element: str, purpose: str, install_hint: str) -> Check:
+# Stands in for "any one of PORTAL_GST_AAC_ENCODERS" in the missing list.
+_AAC_ENCODER_LABEL = "an AAC encoder"
+
+
+def _gst_element_present(gst_inspect: str, element: str) -> Optional[bool]:
+    """Whether gst-inspect-1.0 can see the element. None means it could not say."""
+    try:
+        result = _run([gst_inspect, element], timeout=5.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.returncode == 0
+
+
+def _gst_install_hint(elements: list[str]) -> str:
+    """Name what to install, grouped so one package is named once."""
+    by_package: dict[str, list[str]] = {}
+    for element in elements:
+        if element == _AAC_ENCODER_LABEL:
+            package = (f"any of {', '.join(PORTAL_GST_AAC_ENCODERS)} - "
+                       f"{_GST_ELEMENT_PACKAGES['avenc_aac']} is the most widely available")
+        else:
+            package = _GST_ELEMENT_PACKAGES.get(element, "unknown package")
+        by_package.setdefault(package, []).append(element)
+    return "; ".join(f"{', '.join(names)}: install {package}"
+                     for package, names in by_package.items())
+
+
+def _portal_gst_elements_check(no_audio: bool = False) -> Check:
+    """Check every element the portal backend enforces, not a hand-picked pair.
+
+    The backend preflight reads the same tuples from this module, so the report
+    and the runtime requirement cannot drift apart again (#129). The AAC encoder
+    counts as one requirement satisfied by any of several elements, which is how
+    _gst_pick_aac_encoder resolves it.
+    """
+    name = "portal gst elements"
+    required = list(PORTAL_GST_VIDEO_ELEMENTS)
+    if not no_audio:
+        required += list(PORTAL_GST_AUDIO_ELEMENTS)
+    total = len(required) + (0 if no_audio else 1)
+
     gst_inspect = shutil.which("gst-inspect-1.0")
     if not gst_inspect:
         return Check(
-            f"gst element {element}",
-            STATUS_WARN,
-            f"{purpose} could not be verified",
-            f"gst-inspect-1.0 not found; {install_hint}",
+            name, STATUS_WARN,
+            f"none of the {total} elements the portal backend needs could be verified",
+            "gst-inspect-1.0 not found; install gstreamer1.0-tools "
+            "(Arch: gstreamer; Fedora: gstreamer1-plugins-base-tools)",
         )
 
-    try:
-        result = _run([gst_inspect, element], timeout=5.0)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    missing: list[str] = []
+    unverified: list[str] = []
+    for element in required:
+        present = _gst_element_present(gst_inspect, element)
+        if present is None:
+            unverified.append(element)
+        elif not present:
+            missing.append(element)
+
+    chosen_encoder = ""
+    if not no_audio:
+        for encoder in PORTAL_GST_AAC_ENCODERS:
+            if _gst_element_present(gst_inspect, encoder):
+                chosen_encoder = encoder
+                break
+        else:
+            missing.append(_AAC_ENCODER_LABEL)
+
+    if missing:
+        detail = _gst_install_hint(missing)
+        if unverified:
+            detail += f"; could not verify {', '.join(unverified)}"
         return Check(
-            f"gst element {element}",
-            STATUS_WARN,
-            f"{purpose} could not be verified",
-            str(exc),
+            name, STATUS_WARN,
+            f"portal backend is missing {len(missing)} of {total}: "
+            + ", ".join(missing),
+            detail,
         )
 
-    if result.returncode == 0:
+    if unverified:
         return Check(
-            f"gst element {element}",
-            STATUS_OK,
-            purpose,
-            element,
+            name, STATUS_WARN,
+            f"could not verify {len(unverified)} of {total}: "
+            + ", ".join(unverified),
+            "gst-inspect-1.0 did not answer; the portal backend may still fail to start",
         )
 
-    detail = (result.stderr or result.stdout).strip()
-    if detail:
-        detail = detail.replace("\n", " | ") + "; " + install_hint
-    else:
-        detail = install_hint
-    return Check(
-        f"gst element {element}",
-        STATUS_WARN,
-        f"{purpose} is missing",
-        detail,
-    )
+    detail = f"{total} of {total} present"
+    if chosen_encoder:
+        detail += f"; AAC encoder: {chosen_encoder}"
+    return Check(name, STATUS_OK, "Wayland portal GStreamer pipeline", detail)
+
 
 
 def _first_matching_command(commands: list[str]) -> Optional[str]:
@@ -833,18 +936,7 @@ def run_diagnostics(skip_firewall: bool = False) -> DiagnosticReport:
         _command_check("gdbus", "passive wpa_supplicant D-Bus capability checks"),
         _command_check("gst-launch-1.0", "optional future WFD GStreamer pipeline"),
         _command_check("gst-inspect-1.0", "optional future WFD codec inspection"),
-        _gst_element_check(
-            "pipewiresrc",
-            "Wayland portal GStreamer capture source",
-            "install the GStreamer PipeWire plugin "
-            "(Debian/Ubuntu: gstreamer1.0-pipewire; Arch/Fedora: gst-plugin-pipewire)",
-        ),
-        _gst_element_check(
-            "x264enc",
-            "Wayland portal GStreamer H.264 encoder",
-            "install the GStreamer x264 plugin "
-            "(Debian/Ubuntu: gstreamer1.0-plugins-ugly; Arch/Fedora: gst-plugins-ugly)",
-        ),
+        _portal_gst_elements_check(),
         _python_module_check("dbus_next", "WFD portal capture control plane for KDE/GNOME Wayland"),
         _ffmpeg_encoders(),
         _display_capture_check(),
