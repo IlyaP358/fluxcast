@@ -395,7 +395,13 @@ class PortalMixin:
                 f"fd={session.pw_fd}",
                 *pipewire_args,
                 "do-timestamp=true",
-                "always-copy=false",
+                # Hand PipeWire its buffer straight back. With always-copy=false
+                # the queue and x264enc hold the pool's own buffers until it
+                # drains and capture stops after a few seconds (#147). Excluding
+                # DMABuf with a capsfilter, the way the ffmpeg path above does,
+                # is not enough - the starvation is about holding the buffers,
+                # not about their memory type.
+                "always-copy=true",
                 "keepalive-time=33",
                 "!", "queue", "max-size-buffers=64", "max-size-time=1000000000", "leaky=downstream",
                 "!", "videorate", "skip-to-first=true",
