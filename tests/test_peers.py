@@ -409,5 +409,91 @@ class WpasPeerCapabilitiesTest(unittest.TestCase):
         self.assertIsNone(dbus._variant_number(""))
 
 
+    def test_config_method_is_read_once_and_never_the_plural(self):
+        """wpa_supplicant's D-Bus reference names the peer property
+        config_method, singular. An earlier version asked for both spellings,
+        which cost a second round trip per peer for a property that does not
+        exist.
+        """
+        _, calls = self._read({
+            "Interfaces": "(<['/fi/w1/wpa_supplicant1/Interfaces/0']>,)",
+            "Peers": "(<[objectpath '/fi/w1/wpa_supplicant1/Interfaces/0/Peers/aabbccddeeff']>,)",
+            "groupcapability": "(<byte 0x89>,)",
+            "config_method": "(<uint16 8>,)",
+        })
+        requested = [arg for args, _ in calls for arg in args]
+        self.assertEqual(requested.count("config_method"), 1)
+        self.assertNotIn("config_methods", requested)
+
+    def test_budget_stops_early_and_keeps_what_it_read(self):
+        """A supplicant that is slow but still answering never raises, so
+        nothing but this budget stops the per-peer reads accumulating. A
+        partial answer is correct: the peers it did not reach come back absent,
+        which reads as unknown rather than as reachable.
+        """
+        two_peers = (
+            "(<[objectpath '/fi/w1/wpa_supplicant1/Interfaces/0/Peers/aaaaaaaaaaaa', "
+            "objectpath '/fi/w1/wpa_supplicant1/Interfaces/0/Peers/bbbbbbbbbbbb']>,)"
+        )
+        # deadline, interface check, first peer check, second peer check
+        clock = iter([0.0, 0.1, 0.2, dbus._PEER_CAPABILITY_BUDGET + 1.0])
+        with mock.patch.object(dbus.time, "monotonic", lambda: next(clock)):
+            found, _ = self._read({
+                "Interfaces": "(<['/fi/w1/wpa_supplicant1/Interfaces/0']>,)",
+                "Peers": two_peers,
+                "groupcapability": "(<byte 0x89>,)",
+                "config_method": "(<uint16 8>,)",
+            })
+        self.assertEqual(found, {"aaaaaaaaaaaa": (True, False)})
+
+
+class PeerCapabilityMissTest(unittest.TestCase):
+    """The wpa map is keyed by wpa_supplicant's peer object path and looked up
+    with NetworkManager's HwAddress. Those are usually the same device address,
+    but not always - LG advertises one address during discovery and uses
+    another in the group (#135). A miss there is silent, and silence is
+    indistinguishable from "read it, learned nothing", so say it.
+    """
+
+    PEER_MAC = "aa:bb:cc:dd:ee:ff"
+
+    def _scan(self, capabilities):
+        def fake_get_property(path, interface, prop):
+            if prop == "Peers":
+                return "(<['/org/freedesktop/NetworkManager/WifiP2PPeer/1']>,)"
+            return ""
+
+        with mock.patch.object(nm, "_nm_p2p_device_path", return_value="/dev/0"), \
+             mock.patch.object(nm, "_nm_get_string", return_value=self.PEER_MAC), \
+             mock.patch.object(nm, "_nm_get_property", side_effect=fake_get_property), \
+             mock.patch.object(nm, "_nm_start_find"), \
+             mock.patch.object(nm, "_nm_stop_find"), \
+             mock.patch.object(nm, "_wpas_peer_capabilities", return_value=capabilities), \
+             mock.patch.object(nm.time, "sleep"):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                found = nm._nm_scan(None, 1)
+        return found, buf.getvalue()
+
+    def test_a_miss_against_a_populated_map_is_reported(self):
+        found, out = self._scan({"999999999999": (True, False)})
+        self.assertIn("No wpa_supplicant peer matched", out)
+        self.assertIsNone(found[0].is_group_owner)
+        self.assertIsNone(found[0].offers_push_button)
+
+    def test_a_match_says_nothing_and_carries_the_flags(self):
+        found, out = self._scan({"aabbccddeeff": (True, False)})
+        self.assertNotIn("No wpa_supplicant peer matched", out)
+        self.assertIs(found[0].is_group_owner, True)
+        self.assertIs(found[0].offers_push_button, False)
+
+    def test_an_empty_map_stays_quiet(self):
+        # The ordinary case on an iwd host, or where #104's policy denies the
+        # reads. A line per peer there is noise for users this cannot help.
+        found, out = self._scan({})
+        self.assertNotIn("No wpa_supplicant peer matched", out)
+        self.assertIsNone(found[0].is_group_owner)
+
+
 if __name__ == "__main__":
     unittest.main()

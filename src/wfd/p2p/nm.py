@@ -215,9 +215,20 @@ def _nm_scan(interface: Optional[str], timeout: int) -> list[WFDPeer]:
             if part
         )
         resolved = address or peer_path.rsplit("/", 1)[-1]
-        is_group_owner, offers_push_button = capabilities.get(
-            resolved.lower().replace(":", ""), (None, None)
-        )
+        wpa_key = resolved.lower().replace(":", "")
+        # Only worth saying when we actually read capabilities and this peer
+        # was not among them. An empty map is the ordinary case on an iwd host
+        # or where #104's policy denies the reads, and a line per peer there
+        # would be noise for users this cannot help anyway.
+        #
+        # A miss means NetworkManager and wpa_supplicant disagree about the
+        # peer's address, which is real: LG advertises one address during
+        # discovery and uses another in the group (#135). Silence would be
+        # indistinguishable from "read it, learned nothing".
+        if capabilities and wpa_key not in capabilities:
+            print(f"[FluxCast WFD] No wpa_supplicant peer matched {resolved}; "
+                  "reachability unknown for this one.")
+        is_group_owner, offers_push_button = capabilities.get(wpa_key, (None, None))
         peers.append(WFDPeer(
             address=resolved,
             name=name,
