@@ -85,6 +85,19 @@ def _quality_floor_kbits(width: int, height: int, fps: int) -> int:
     # 1200p+ at ultrafast needs headroom to avoid compression artifacts
     return 14000 if fps <= 30 else 20000
 
+def _effective_kbits(config: WFDMediaConfig, requested_kbits: int,
+                     width: int, height: int) -> int:
+    """Apply the desktop-readability floor, unless the user named a bitrate.
+
+    The floor exists so that someone who never passed --bitrate still gets a
+    legible desktop. It was also overriding people who did pass one, leaving no
+    way to ask for less than the floor (#80). Explicit intent wins; the five
+    call sites go through here so they cannot disagree about that.
+    """
+    if config.bitrate_explicit:
+        return requested_kbits
+    return max(requested_kbits, _quality_floor_kbits(width, height, config.fps))
+
 def _calculate_gop(config: WFDMediaConfig) -> int:
     """
     Calculate Group of Pictures (GOP) size.

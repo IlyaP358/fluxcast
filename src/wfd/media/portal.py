@@ -11,7 +11,7 @@ from ..config import WFDNotReady
 from ..dump import _process_written_bytes
 from ..encoding import (
     _bitrate_to_kbits, _calculate_gop, _fit_inside, _kbits_to_bitrate_text,
-    _parse_resolution, _quality_floor_kbits, _vbv_bufsize,
+    _effective_kbits, _parse_resolution, _vbv_bufsize,
 )
 from ..env import _detect_audio_monitor
 from ..gst import (
@@ -94,8 +94,8 @@ class PortalMixin:
         gop = _calculate_gop(self.config)
         out_w, out_h = _parse_resolution(out_res) or (1920, 1080)
         requested_kbits = _bitrate_to_kbits(self.config.bitrate)
-        effective_kbits = max(requested_kbits,
-                              _quality_floor_kbits(out_w, out_h, self.config.fps))
+        effective_kbits = _effective_kbits(
+            self.config, requested_kbits, out_w, out_h)
         if "LG" in self.config.peer_name.upper():
             effective_kbits = min(effective_kbits, 4000)
         effective_bitrate = _kbits_to_bitrate_text(effective_kbits)
@@ -280,8 +280,8 @@ class PortalMixin:
         gop = _calculate_gop(self.config)
         parsed_out = _parse_resolution(out_res) or (1920, 1080)
         requested_kbits = _bitrate_to_kbits(self.config.bitrate)
-        floor_kbits = _quality_floor_kbits(parsed_out[0], parsed_out[1], self.config.fps)
-        effective_kbits = max(requested_kbits, floor_kbits)
+        effective_kbits = _effective_kbits(
+            self.config, requested_kbits, parsed_out[0], parsed_out[1])
 
         is_lg = "LG" in self.config.peer_name.upper()
         if is_lg:

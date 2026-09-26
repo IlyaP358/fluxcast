@@ -46,7 +46,7 @@ from .modes import WFD_CEA_MODES, WFD_VESA_MODES, _parse_sink_video_format, _cho
 
 
 
-from .encoding import _parse_resolution, _fit_inside, _letterbox_vf, _vbv_bufsize, _bitrate_to_kbits, _kbits_to_bitrate_text, _quality_floor_kbits, _calculate_gop
+from .encoding import _parse_resolution, _fit_inside, _letterbox_vf, _vbv_bufsize, _bitrate_to_kbits, _kbits_to_bitrate_text, _quality_floor_kbits, _effective_kbits, _calculate_gop
 
 
 from .env import _detect_audio_monitor, _is_hyprland_session, _is_wayland_session, _is_x11_session, _wfd_capture_backend_order
