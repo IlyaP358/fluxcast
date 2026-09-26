@@ -419,6 +419,48 @@ def _sequence(values):
     return next_value
 
 
+class PortalPreflightTest(unittest.TestCase):
+    """The portal preflight must name every element its pipelines use."""
+
+    def _pipeline(self):
+        class Mon:
+            name, width, height, x, y, display = "eDP-1", 1080, 1920, 0, 0, ":0"
+
+        config = wfd.WFDMediaConfig(monitor=Mon(), output_resolution="1280x720", fps=30,
+                                    bitrate="4M", no_audio=True, peer_name="X")
+        pipeline = wfd.WFDMediaPipeline(config, tv_ip="10.42.0.2", local_ip="10.42.0.1",
+                                        sink_rtp_port=35034)
+        pipeline.tx_interface = "lo"
+        return pipeline
+
+    def test_missing_videorate_is_caught_before_the_pipeline_starts(self):
+        """Every portal pipeline goes through _gst_video_chain, which always links
+        videorate, so a host without that element has to fail the preflight rather
+        than at gst-launch time with a parse error."""
+        pipeline = self._pipeline()
+        with (
+            mock.patch.object(wfd.shutil, "which", side_effect=lambda n: "/usr/bin/" + n),
+            patch_all("_gst_has_element", side_effect=lambda name: name != "videorate"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(wfd.WFDNotReady) as raised:
+                pipeline._start_desktop_portal()
+        self.assertIn("videorate", str(raised.exception))
+
+    def test_preflight_passes_when_every_element_is_present(self):
+        """The same preflight must not block a host that does have videorate."""
+        pipeline = self._pipeline()
+        with (
+            mock.patch.object(wfd.shutil, "which", side_effect=lambda n: "/usr/bin/" + n),
+            patch_all("_gst_has_element", return_value=True),
+            patch_all("start_portal_capture", side_effect=RuntimeError("past the preflight")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                pipeline._start_desktop_portal()
+        self.assertIn("past the preflight", str(raised.exception))
+
+
 class CapturePipeTest(unittest.TestCase):
     """The portal->ffmpeg pipe must not report success on a silent capture."""
 
