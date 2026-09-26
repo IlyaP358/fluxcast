@@ -12,6 +12,7 @@ from .dbus import (
     NM_DEVICE_TYPE_WIFI_P2P,
     _gdbus_call, _nm_get_property, _nm_get_string, _object_paths,
     _variant_byte_array, _variant_uint, _variant_uint_tuple, _wfd_source_ie,
+    _wpas_peer_capabilities,
 )
 
 
@@ -210,6 +211,9 @@ def _nm_scan(interface: Optional[str], timeout: int) -> list[WFDPeer]:
     finally:
         _nm_stop_find(path)
 
+    # Different service, different objects, matched by MAC. Read once.
+    capabilities = _wpas_peer_capabilities()
+
     peers = []
     for peer_path in _object_paths(peers_raw):
         name = _nm_get_string(peer_path, "org.freedesktop.NetworkManager.WifiP2PPeer", "Name")
@@ -245,8 +249,23 @@ def _nm_scan(interface: Optional[str], timeout: int) -> list[WFDPeer]:
             ]
             if part
         )
+        resolved = address or peer_path.rsplit("/", 1)[-1]
+        wpa_key = resolved.lower().replace(":", "")
+        # Only worth saying when we actually read capabilities and this peer
+        # was not among them. An empty map is the ordinary case on an iwd host
+        # or where #104's policy denies the reads, and a line per peer there
+        # would be noise for users this cannot help anyway.
+        #
+        # A miss means NetworkManager and wpa_supplicant disagree about the
+        # peer's address, which is real: LG advertises one address during
+        # discovery and uses another in the group (#135). Silence would be
+        # indistinguishable from "read it, learned nothing".
+        if capabilities and wpa_key not in capabilities:
+            print(f"[FluxCast WFD] No wpa_supplicant peer matched {resolved}; "
+                  "reachability unknown for this one.")
+        is_group_owner, offers_push_button = capabilities.get(wpa_key, (None, None))
         peers.append(WFDPeer(
-            address=address or peer_path.rsplit("/", 1)[-1],
+            address=resolved,
             name=name,
             details=details,
             path=peer_path,
@@ -254,6 +273,8 @@ def _nm_scan(interface: Optional[str], timeout: int) -> list[WFDPeer]:
             rtsp_port=sink_rtsp_port,
             wfd_capable=wfd_capable,
             wfd_device_type=wfd_device_type,
+            is_group_owner=is_group_owner,
+            offers_push_button=offers_push_button,
         ))
     return peers
 

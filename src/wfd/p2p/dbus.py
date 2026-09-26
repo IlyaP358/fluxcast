@@ -1,6 +1,7 @@
 import re
 import shutil
 import subprocess
+import time
 from typing import Optional
 
 from ..config import WFDNotReady
@@ -38,7 +39,28 @@ def _variant_uint_tuple(text: str) -> tuple[Optional[int], Optional[int]]:
         return None, None
     return int(matches[-2]), int(matches[-1])
 
+def _variant_number(text: str) -> Optional[int]:
+    """Scalar variant, hex or decimal. _variant_uint reads <byte 0x8b> as 8."""
+    hexadecimal = re.search(r"0x([0-9a-fA-F]+)", text)
+    if hexadecimal:
+        return int(hexadecimal.group(1), 16)
+    decimal = re.search(r"(?:byte|u?int(?:16|32|64))\s+(\d+)", text)
+    return int(decimal.group(1)) if decimal else None
+
 NM_DEVICE_TYPE_WIFI_P2P = 30
+
+WPA_P2P_IFACE = "fi.w1.wpa_supplicant1.Interface.P2PDevice"
+WPA_PEER_IFACE = "fi.w1.wpa_supplicant1.Peer"
+
+P2P_GROUP_OWNER = 0x01    # group capability bit 0: peer already owns a group
+WPS_PUSH_BUTTON = 0x0080  # the only WPS method either backend uses
+
+# Whole-function budget for the wpa_supplicant cross-reference below. A hard
+# hung supplicant already aborts on the first read, because _gdbus_call raises
+# on timeout - but one that is slow and still answering never raises, and
+# nothing else caps the per-peer reads. The scan this decorates is 8s by
+# default and the activation timeout it exists to pre-empt is 35s.
+_PEER_CAPABILITY_BUDGET = 5.0
 
 
 NM_ACTIVE_STATE_NAMES = {
@@ -170,6 +192,70 @@ def _wpas_get_property(path: str, interface: str, prop: str,
 def _wpas_get_string(path: str, interface: str, prop: str,
                      privileged: bool = False) -> str:
     return _variant_string(_wpas_get_property(path, interface, prop, privileged=privileged))
+
+def _wpas_running() -> bool:
+    # wpa_supplicant is D-Bus activatable, so asking it anything would start
+    # it. Not something a scan should do on a host running iwd instead.
+    try:
+        owned = _run([
+            "gdbus", "call", "--system", "--dest", "org.freedesktop.DBus",
+            "--object-path", "/org/freedesktop/DBus",
+            "--method", "org.freedesktop.DBus.NameHasOwner", WPA_DEST,
+        ], timeout=3.0)
+    except Exception:
+        return False
+    return owned.returncode == 0 and "true" in owned.stdout
+
+def _wpas_peer_capabilities() -> dict[str, tuple[Optional[bool], Optional[bool]]]:
+    """MAC (lowercase, no separators) -> (is_group_owner, offers_push_button).
+
+    NetworkManager's peer objects carry neither, so the default backend cannot
+    see that a peer is unreachable until the connection has timed out (#137).
+    Never escalates: unreadable means unknown, not a password prompt (#104).
+
+    Returns whatever it finished within _PEER_CAPABILITY_BUDGET. A partial
+    answer is the right one: a peer it did not reach is simply absent, and an
+    absent peer reads back as unknown rather than as reachable.
+    """
+    if not _wpas_running():
+        return {}
+    deadline = time.monotonic() + _PEER_CAPABILITY_BUDGET
+    capabilities: dict[str, tuple[Optional[bool], Optional[bool]]] = {}
+    try:
+        listed = _gdbus_call([
+            "--dest", WPA_DEST,
+            "--object-path", "/fi/w1/wpa_supplicant1",
+            "--method", "org.freedesktop.DBus.Properties.Get",
+            WPA_DEST, "Interfaces",
+        ], timeout=3.0)
+        if listed.returncode != 0:
+            return {}
+        for iface_path in _object_paths(listed.stdout):
+            if time.monotonic() >= deadline:
+                break
+            peers_raw = _wpas_get_property(iface_path, WPA_P2P_IFACE, "Peers")
+            for peer_path in _object_paths(peers_raw):
+                if time.monotonic() >= deadline:
+                    break
+                group = _variant_number(
+                    _wpas_get_property(peer_path, WPA_PEER_IFACE, "groupcapability")
+                )
+                # Singular. wpa_supplicant's D-Bus reference names this peer
+                # property config_method, type q; the plural does not exist,
+                # and asking for it cost a second round trip per peer.
+                methods = _variant_number(
+                    _wpas_get_property(peer_path, WPA_PEER_IFACE, "config_method")
+                )
+                capabilities[peer_path.rsplit("/", 1)[-1].lower()] = (
+                    None if group is None else bool(group & P2P_GROUP_OWNER),
+                    None if methods is None else bool(methods & WPS_PUSH_BUTTON),
+                )
+    except Exception:
+        # A timeout here raises WFDNotReady, which _nm_scan's caller reads as
+        # "NetworkManager is unusable" and falls back to wpa_cli. Keep whatever
+        # was already read rather than discarding it with the exception.
+        return capabilities
+    return capabilities
 
 def _variant_byte_array(data: bytes) -> str:
     return "@ay [" + ", ".join(f"byte 0x{byte:02x}" for byte in data) + "]"
