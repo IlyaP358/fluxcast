@@ -125,6 +125,7 @@ def start_experimental_backend(args) -> None:
         monitor=monitor,
         fps=args.fps,
         bitrate=args.bitrate,
+        bitrate_explicit=getattr(args, "bitrate_explicit", False),
         output_resolution=args.output_res,
         audio_device=getattr(args, "wfd_audio_device", None),
         no_audio=no_audio,

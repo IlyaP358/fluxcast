@@ -108,7 +108,7 @@ def parse_args() -> argparse.Namespace:
                              help="Scale output to WxH, e.g. 1920x1080 (default: native)")
     stream_opts.add_argument("--fps", type=int, default=30,
                              help="Frames per second (default: 30)")
-    stream_opts.add_argument("--bitrate", default="4M",
+    stream_opts.add_argument("--bitrate", default=None,
                              help="Video bitrate (default: 4M)")
 
     # DLNA / Cast Options
@@ -218,7 +218,16 @@ def parse_args() -> argparse.Namespace:
                           "sink (TV/tablet) and inject it locally via uinput. "
                           "Off by default; requires access to /dev/uinput")
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # --bitrate defaults to None only so an explicit value can be told apart
+    # from the default (#80). None must not escape this function: the DLNA and
+    # Cast path hands args.bitrate straight to start_capture, which calls
+    # .upper() on it, so a None default would crash every non-WFD user.
+    args.bitrate_explicit = args.bitrate is not None
+    if args.bitrate is None:
+        args.bitrate = "4M"
+    return args
 
 
 # ── terminal helpers ──────────────────────────────────────────────────────────
