@@ -6,7 +6,7 @@ from ..config import WFDNotReady
 from ..wf_recorder import find_wf_recorder
 from ..encoding import (
     _bitrate_to_kbits, _calculate_gop, _kbits_to_bitrate_text, _letterbox_vf,
-    _parse_resolution, _quality_floor_kbits, _vbv_bufsize,
+    _effective_kbits, _parse_resolution, _vbv_bufsize,
 )
 from ..env import _detect_audio_monitor
 from ..modes import _h264_level_for_mode
@@ -28,8 +28,8 @@ class WlrootsMixin:
         gop = _calculate_gop(self.config)
         parsed_out = _parse_resolution(out_res) or (monitor.width, monitor.height)
         requested_kbits = _bitrate_to_kbits(self.config.bitrate)
-        floor_kbits = _quality_floor_kbits(parsed_out[0], parsed_out[1], self.config.fps)
-        effective_kbits = max(requested_kbits, floor_kbits)
+        effective_kbits = _effective_kbits(
+            self.config, requested_kbits, parsed_out[0], parsed_out[1])
         effective_bitrate = _kbits_to_bitrate_text(effective_kbits)
         if effective_kbits > requested_kbits:
             print(

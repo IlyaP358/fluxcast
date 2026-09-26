@@ -10,6 +10,9 @@ class WFDMediaConfig:
     monitor: Optional[object]
     fps: int = 30
     bitrate: str = "4M"
+    # True when the user passed --bitrate. The quality floor may raise the
+    # default for readability, but must not override an explicit request (#80).
+    bitrate_explicit: bool = False
     output_resolution: Optional[str] = None
     audio_device: Optional[str] = None
     no_audio: bool = False
