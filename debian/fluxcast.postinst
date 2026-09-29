@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # dbus-daemon only reads /usr/share/dbus-1/system.d at startup and on
+        # reload, so without this the Wi-Fi Direct policy stays inert until
+        # the next boot.
+        if [ -d /run/systemd/system ]; then
+            systemctl reload dbus.service >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

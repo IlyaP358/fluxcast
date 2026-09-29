@@ -87,6 +87,75 @@ class FfmpegProgressArgsTest(unittest.TestCase):
         self.assertIn("-stats", args)
 
 
+class UfwSessionHintTest(unittest.TestCase):
+    """On a ufw host the firewalld path opens nothing and used to print
+    nothing, so the user got a session that waits for an RTSP connection the
+    firewall is dropping, with no clue why (#98).
+    """
+
+    def _hint_output(self, ufw_enabled, ports=None, firewalld=False):
+        if ports is None:
+            ports = [(wfd.WFD_RTSP_PORT, "RTSP")]
+        buf = io.StringIO()
+        with (
+            patch_all("_firewalld_active", return_value=firewalld),
+            patch_all("_ufw_enabled", return_value=ufw_enabled),
+            contextlib.redirect_stdout(buf),
+        ):
+            wfd._warn_if_ufw_may_block(ports)
+        return buf.getvalue()
+
+    def test_enabled_ufw_prints_the_port_and_command(self):
+        out = self._hint_output(True)
+        self.assertIn(str(wfd.WFD_RTSP_PORT), out)
+        self.assertIn(f"ufw allow {wfd.WFD_RTSP_PORT}/tcp", out)
+
+    def test_disabled_ufw_stays_quiet(self):
+        self.assertEqual(self._hint_output(False), "")
+
+    def test_unknown_ufw_state_stays_quiet(self):
+        # Guessing out loud on a host we could not read is just noise.
+        self.assertEqual(self._hint_output(None), "")
+
+    def test_firewalld_host_stays_quiet(self):
+        # There the ports get opened for real; ufw is not in the picture.
+        self.assertEqual(self._hint_output(True, firewalld=True), "")
+
+    def test_uibc_port_is_named_as_uibc_not_rtsp(self):
+        """The hint used to be printed by _open_wfd_firewall_port, so
+        --wfd-uibc produced a second copy of it, and that copy read "if the
+        sink never opens its RTSP connection, allow port 7239/tcp" - which is
+        not what 7239 is. One hint, each port labelled.
+        """
+        out = self._hint_output(True, ports=[(wfd.WFD_RTSP_PORT, "RTSP"),
+                                             (wfd.WFD_UIBC_PORT, "UIBC")])
+        self.assertEqual(out.count("ufw is enabled"), 1)
+        self.assertIn(f"ufw allow {wfd.WFD_RTSP_PORT}/tcp    # RTSP", out)
+        self.assertIn(f"ufw allow {wfd.WFD_UIBC_PORT}/tcp    # UIBC", out)
+
+    def test_opening_a_port_prints_no_hint_of_its_own(self):
+        # The per-port call is what made it print twice.
+        buf = io.StringIO()
+        with (
+            patch_all("_firewalld_active", return_value=False),
+            patch_all("_ufw_enabled", return_value=True),
+            contextlib.redirect_stdout(buf),
+        ):
+            opened = wfd._open_wfd_firewall_port(wfd.WFD_RTSP_PORT)
+        self.assertFalse(opened)  # never claims to have opened anything
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_hint_runs_no_subprocess(self):
+        # The connect path must not block on a firewall probe (#114).
+        with (
+            patch_all("_firewalld_active", return_value=False),
+            patch_all("_ufw_enabled", return_value=True),
+            patch_all("_run", side_effect=AssertionError("no subprocess here")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            wfd._warn_if_ufw_may_block([(wfd.WFD_RTSP_PORT, "RTSP")])
+
+
 class FirewallPortTest(unittest.TestCase):
     def test_existing_port_skips_privileged_add(self):
         calls = []
@@ -125,6 +194,21 @@ class FirewallPortTest(unittest.TestCase):
         self.assertTrue(opened)
         self.assertIn(f"--query-port={port}/tcp", calls[0][0])
         self.assertIn(f"--add-port={port}/tcp", calls[1][0])
+        # Both calls can block on the same Polkit dialog (#114).
+        self.assertEqual(calls[0][1], calls[1][1])
+        self.assertEqual(calls[0][1], wfd._FIREWALL_AUTH_TIMEOUT)
+
+    def test_unknown_firewalld_state_skips_without_querying(self):
+        # None ("couldn't ask systemd") is treated like inactive here: no
+        # firewall-cmd call, no Polkit dialog, nothing to undo on exit.
+        with (
+            patch_all("_firewalld_active", return_value=None),
+            patch_all("_run") as run,
+        ):
+            opened = wfd._open_wfd_firewall_port(wfd.WFD_RTSP_PORT)
+
+        self.assertFalse(opened)
+        run.assert_not_called()
 
     def test_query_error_fails_closed_without_add(self):
         port = wfd.WFD_RTSP_PORT
@@ -333,6 +417,48 @@ def _sequence(values):
     def next_value(*_a, **_k):
         return state.pop(0) if len(state) > 1 else state[0]
     return next_value
+
+
+class PortalPreflightTest(unittest.TestCase):
+    """The portal preflight must name every element its pipelines use."""
+
+    def _pipeline(self):
+        class Mon:
+            name, width, height, x, y, display = "eDP-1", 1080, 1920, 0, 0, ":0"
+
+        config = wfd.WFDMediaConfig(monitor=Mon(), output_resolution="1280x720", fps=30,
+                                    bitrate="4M", no_audio=True, peer_name="X")
+        pipeline = wfd.WFDMediaPipeline(config, tv_ip="10.42.0.2", local_ip="10.42.0.1",
+                                        sink_rtp_port=35034)
+        pipeline.tx_interface = "lo"
+        return pipeline
+
+    def test_missing_videorate_is_caught_before_the_pipeline_starts(self):
+        """Every portal pipeline goes through _gst_video_chain, which always links
+        videorate, so a host without that element has to fail the preflight rather
+        than at gst-launch time with a parse error."""
+        pipeline = self._pipeline()
+        with (
+            mock.patch.object(wfd.shutil, "which", side_effect=lambda n: "/usr/bin/" + n),
+            patch_all("_gst_has_element", side_effect=lambda name: name != "videorate"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(wfd.WFDNotReady) as raised:
+                pipeline._start_desktop_portal()
+        self.assertIn("videorate", str(raised.exception))
+
+    def test_preflight_passes_when_every_element_is_present(self):
+        """The same preflight must not block a host that does have videorate."""
+        pipeline = self._pipeline()
+        with (
+            mock.patch.object(wfd.shutil, "which", side_effect=lambda n: "/usr/bin/" + n),
+            patch_all("_gst_has_element", return_value=True),
+            patch_all("start_portal_capture", side_effect=RuntimeError("past the preflight")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                pipeline._start_desktop_portal()
+        self.assertIn("past the preflight", str(raised.exception))
 
 
 class CapturePipeTest(unittest.TestCase):

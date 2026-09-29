@@ -1,3 +1,4 @@
+import re
 from typing import Optional
 
 from .config import WFDCEAMode, WFDMediaConfig, WFDVideoFormat
@@ -29,6 +30,10 @@ def _parse_sink_video_format(value: str) -> Optional[WFDVideoFormat]:
     tokens = first_codec.split()
     if len(tokens) < 11 or tokens[0].lower() == "none":
         return None
+    if any(re.fullmatch(r"[0-9a-fA-F]{2}", field) is None for field in tokens[:4]):
+        return None
+    if any(re.fullmatch(r"[0-9a-fA-F]{8}", field) is None for field in tokens[4:7]):
+        return None
     try:
         return WFDVideoFormat(
             native=tokens[0],
@@ -52,6 +57,8 @@ def _encoder_h264_profile(sink_format: Optional[WFDVideoFormat]) -> str:
     return "high" if _choose_profile(sink_format.profile) == "02" else "baseline"
 
 def _max_wfd_level(level_hex: str) -> Optional[int]:
+    if re.fullmatch(r"[0-9a-fA-F]{2}", level_hex) is None:
+        return None
     try:
         value = int(level_hex, 16)
     except ValueError:

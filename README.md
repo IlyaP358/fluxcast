@@ -44,6 +44,9 @@ The tray picks your language up from the system locale, no configuration needed.
 | Danish | [normann](https://github.com/peternormann) |
 | Deutsch | [therealresonix](https://github.com/therealresonix) |
 | Français | [t0mab](https://github.com/t0mab) |
+| Español | [Jemo121](https://github.com/Jemo121) |
+| Português (Brasil) | [Jemo121](https://github.com/Jemo121) |
+| Svenska | [Martan404](https://github.com/Martan404) |
 
 Adding your language means editing one JSON file and no code at all.
 See [CONTRIBUTING.md](CONTRIBUTING.md#translations).
@@ -83,6 +86,28 @@ python3 src/main.py --protocol wfd --wfd-capture-backend portal
 python3 src/main.py --protocol wfd --wfd-capture-backend wf-recorder
 python3 src/main.py --protocol wfd --wfd-capture-backend x11grab
 ```
+
+Android-based sinks (TV boxes, projectors) that connect but stay on a black
+screen:
+
+```bash
+python3 src/main.py --protocol wfd --wfd-aosp-pmt-pid
+```
+
+WFD P2P connection troubleshooting - talk to wpa_supplicant directly instead
+of going through NetworkManager, and optionally pin the group to a 2.4GHz
+channel for sinks that don't support Wi-Fi Direct on 5GHz:
+
+```bash
+python3 src/main.py --protocol wfd --wfd-p2p-backend wpas
+python3 src/main.py --protocol wfd --wfd-p2p-backend wpas --wfd-p2p-channel 6
+```
+
+Needs the D-Bus policy in `meta/zz-dev.fluxcast.wpa-supplicant.conf`
+installed to `/usr/share/dbus-1/system.d/`. On Debian/Ubuntu, a user in the
+`netdev` group can run it without sudo, courtesy of the `netdev` grant in
+the distro's own `wpa_supplicant.conf`; elsewhere (including Arch) it falls
+back to sudo - see the file for details.
 
 ## What Works Best
 
@@ -127,6 +152,57 @@ Depending on your desktop environment, you may need to install:
 - Hyprland / Sway: `wf-recorder`, `ffmpeg`
 - KDE / GNOME: `gst-plugins-ugly` (package name varies by distro)
 
+### Debian / Ubuntu - .deb
+
+Download the `.deb` matching your release from the [Releases](https://github.com/IlyaP358/fluxcast/releases) page and install it:
+
+```bash
+sudo apt install ./fluxcast_<version>~<codename>_amd64.deb
+```
+
+| Build | Release |
+|-------|---------|
+| `~bookworm` | Debian 12 |
+| `~trixie`   | Debian 13 |
+| `~noble`    | Ubuntu 24.04 |
+| `~resolute` | Ubuntu 26.04 |
+
+`amd64` only - there is no arm64 build. A release stays in the table for as long
+as it has upstream support, and its `.deb` stops being published once that ends.
+
+> [!NOTE]
+> Ubuntu builds cover **LTS releases only**. Interim releases are not supported
+> and never get their own package.
+>
+> They are not locked out, though: the builds are gated on the `python3` minor
+> version, so pick the one that matches yours and it will install.
+>
+> ```bash
+> python3 --version   # e.g. 3.13.7 on Ubuntu 25.10 -> use the ~trixie build
+> ```
+>
+> | Your `python3` | Build to use |
+> |---|---|
+> | 3.11 | `~bookworm` |
+> | 3.12 | `~noble` |
+> | 3.13 | `~trixie` |
+> | 3.14 | `~resolute` |
+>
+> This works because the virtualenv is tied to the Python version rather than
+> the distribution, but it is untested and unsupported - bug reports from an
+> interim release will most likely be closed as such.
+
+There is no separate privileged step: the package installs the D-Bus policy for
+Wi-Fi Direct and reloads dbus for you.
+
+The builds are not interchangeable. FluxCast bundles the Python dependencies
+apt does not carry at a usable version (`upnpclient` is absent from the archive,
+`python3-pychromecast` is 9.4.0 against a 14.0.5 requirement) in a virtualenv
+under `/opt/fluxcast`, and those wheels are tied to the Python version they were
+built against. Each package therefore declares the exact `python3` minor version
+it was built for, and apt refuses a package whose Python does not match rather
+than installing something that fails on first import.
+
 ### PyPI
 
 ```bash
@@ -140,10 +216,12 @@ sudo fluxcast-install-system
 ### Arch Linux - AUR
 
 ```bash
-yay -S fluxcast-git
+yay -S fluxcast
 # or
-paru -S fluxcast-git
+paru -S fluxcast
 ```
+
+`fluxcast` tracks the latest release. [`fluxcast-git`](https://aur.archlinux.org/packages/fluxcast-git) builds the current `main` instead, if you want to run ahead of a release.
 
 ### From source
 

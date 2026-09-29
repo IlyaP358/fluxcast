@@ -40,6 +40,9 @@ class PortalCaptureSession:
     stream_label: str = ""
     runtime: Optional["_PortalRuntime"] = None
     bus: Any = None
+    # Called when the compositor revokes the capture: the shared window was
+    # closed, or screen sharing was stopped from the desktop indicator (#62).
+    on_closed: Any = None
 
 
 class _PortalRuntime:
@@ -233,6 +236,8 @@ def _extract_stream_node(
             preview = preview[:220] + "..."
         raise PortalCaptureError(f"Portal returned malformed stream metadata: {preview}")
 
+    # Tiebreak only: with multiple=False the portal returns a single stream,
+    # so a picked window still wins by being the only candidate.
     monitor_candidates = []
     for candidate in candidates:
         source_type = _unwrap(candidate[1].get("source_type"))
@@ -260,6 +265,7 @@ async def _start_portal_capture_async(
     timeout: float,
     preferred_position: Optional[tuple[int, int]] = None,
     preferred_size: Optional[tuple[int, int]] = None,
+    allow_window: bool = False,
 ) -> PortalCaptureSession:
     create_opts = {
         "session_handle_token": Variant("s", "fluxcast_session_" + secrets.token_hex(4)),
@@ -277,9 +283,10 @@ async def _start_portal_capture_async(
     session_handle = _as_string(session_handle_var)
 
     select_opts = {
-        # 1=Monitor | 4=Virtual. Declaring both lets the compositor properly
-        # configure a virtual output stream when the user picks one.
-        "types": Variant("u", 5),
+        # 1=Monitor | 4=Virtual. 2=Window is added for callers that can
+        # letterbox an arbitrary window size, so the choice stays in the
+        # compositor's own dialog rather than behind a flag (#62).
+        "types": Variant("u", 7 if allow_window else 5),
         "multiple": Variant("b", False),
         # 2: Embedded cursor.
         "cursor_mode": Variant("u", 2),
@@ -292,6 +299,19 @@ async def _start_portal_capture_async(
         body=[session_handle, select_opts],
         timeout=timeout,
     )
+
+    # Registered before Start so a revoke that lands during setup is not missed.
+    opened: list[PortalCaptureSession] = []
+
+    def _closed_handler(msg) -> None:
+        if (msg.message_type != MessageType.SIGNAL or msg.path != session_handle
+                or msg.interface != SESSION_IFACE or msg.member != "Closed"):
+            return
+        callback = opened[0].on_closed if opened else None
+        if callback is not None:
+            callback()
+
+    bus.add_message_handler(_closed_handler)
 
     start_results = await _portal_call_with_response(
         bus,
@@ -336,7 +356,7 @@ async def _start_portal_capture_async(
     if not remote_reply.unix_fds or handle_index < 0 or handle_index >= len(remote_reply.unix_fds):
         raise PortalCaptureError("OpenPipeWireRemote did not include a usable PipeWire FD.")
     pw_fd = remote_reply.unix_fds[handle_index]
-    return PortalCaptureSession(
+    session = PortalCaptureSession(
         session_handle=session_handle,
         pw_node_id=node_id,
         pw_fd=pw_fd,
@@ -346,12 +366,15 @@ async def _start_portal_capture_async(
         size=size,
         stream_label=label,
     )
+    opened.append(session)
+    return session
 
 
 def start_portal_capture(
     timeout: float = 120.0,
     preferred_position: Optional[tuple[int, int]] = None,
     preferred_size: Optional[tuple[int, int]] = None,
+    allow_window: bool = False,
 ) -> PortalCaptureSession:
     if (os.environ.get("XDG_SESSION_TYPE") or "").lower() != "wayland" and not os.environ.get("WAYLAND_DISPLAY"):
         raise PortalCaptureError("Portal backend requires an active Wayland session.")
@@ -365,6 +388,7 @@ def start_portal_capture(
                 timeout=timeout,
                 preferred_position=preferred_position,
                 preferred_size=preferred_size,
+                allow_window=allow_window,
             ),
             timeout=timeout + 5.0,
         )
@@ -426,6 +450,8 @@ async def _close_portal_capture_async(session_handle: str, bus: Optional[Any] = 
 def close_portal_capture(session: Optional[PortalCaptureSession]) -> None:
     if session is None:
         return
+    # Our own Close() makes the portal emit Closed too; don't treat that as a revoke.
+    session.on_closed = None
     if session.runtime is not None and session.bus is not None:
         try:
             session.runtime.run(

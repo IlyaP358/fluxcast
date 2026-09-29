@@ -20,6 +20,18 @@ mkdir -p "$DESTDIR/opt/fluxcast"
 while IFS= read -r rel; do
     install -Dm644 "$SRCDIR/src/$rel" "$DESTDIR/opt/fluxcast/$rel"
 done < <(cd "$SRCDIR/src" && find . \( -name "*.py" -o -name "*.json" \) -not -path "*/__pycache__/*" | sed 's|^\./||' | sort)
+
+# Stamp the version so an installed copy, which has no .git to ask, can still
+STAMP="${FLUXCAST_VERSION:-}"
+if [[ -z "$STAMP" ]] && [[ -d "$SRCDIR/.git" ]] && command -v git >/dev/null 2>&1; then
+    REAL_VER=$(cd "$SRCDIR" && git describe --long --tags --always --abbrev=7 | sed 's/^v//')
+    REAL_BRANCH=$(cd "$SRCDIR" && git rev-parse --abbrev-ref HEAD)
+    STAMP="$REAL_VER (branch: $REAL_BRANCH)"
+fi
+if [[ -n "$STAMP" ]]; then
+    sed -i "s|^__installed_version__ = \"dev\"|__installed_version__ = \"$STAMP\"|" \
+        "$DESTDIR/opt/fluxcast/version.py" || true
+fi
 while IFS= read -r rel; do
     install -Dm644 "$SRCDIR/src/assets/$rel" "$DESTDIR/opt/fluxcast/assets/$rel"
 done < <(cd "$SRCDIR/src/assets" && find . -type f | sed 's|^\./||' | sort)

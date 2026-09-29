@@ -6,11 +6,18 @@ DBUS_CONF_NAME="zz-dev.fluxcast.wpa-supplicant.conf"
 DBUS_CONF_DEST="/usr/share/dbus-1/system.d/${DBUS_CONF_NAME}"
 DBUS_CONF_SRC="${APPDIR}/meta/${DBUS_CONF_NAME}"
 
-[ -f "${DBUS_CONF_DEST}" ] && exit 0   # already installed, nothing to do
 [ -f "${DBUS_CONF_SRC}" ]  || exit 0   # config missing from AppDir, skip
+# Refresh when missing or content changed (e.g. insecure default-context grant).
+if [ -f "${DBUS_CONF_DEST}" ] && cmp -s "${DBUS_CONF_SRC}" "${DBUS_CONF_DEST}"; then
+    exit 0
+fi
 
 echo ""
-echo "[FluxCast] First-time setup: installing DBus policy for Wi-Fi Direct..."
+if [ -f "${DBUS_CONF_DEST}" ]; then
+    echo "[FluxCast] Updating DBus policy for Wi-Fi Direct..."
+else
+    echo "[FluxCast] First-time setup: installing DBus policy for Wi-Fi Direct..."
+fi
 
 # FUSE mounts are not accessible by root. Copy to /tmp first so sudo can read it.
 TMP_CONF="$(mktemp /tmp/fluxcast-dbus-XXXXXX.conf)"

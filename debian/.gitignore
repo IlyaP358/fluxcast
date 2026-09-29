@@ -1,0 +1,8 @@
+# dpkg-buildpackage byproducts
+.debhelper/
+debhelper-build-stamp
+files
+fluxcast/
+*.debhelper.log
+*.substvars
+.requirements-venv

@@ -1,0 +1,13 @@
+fluxcast (0.1.5) unstable; urgency=medium
+
+  * Initial package, built per release for attachment to GitHub Releases.
+    Built separately for each supported Debian and Ubuntu release; the
+    version carries a ~codename suffix identifying which one.
+  * Ships the application under /opt/fluxcast with a private virtualenv for
+    the Python dependencies apt cannot satisfy (upnpclient is absent from the
+    archive, python3-pychromecast is 9.4.0 against a 14.0.5 requirement).
+  * Installs the wpa_supplicant D-Bus policy from meta/ and reloads dbus, so
+    Wi-Fi Direct works without the separate privileged step the PyPI path
+    needs (upstream issue #113).
+
+ -- Illia Pukalov <illia@fluxcast.dev>  Wed, 10 Sep 2026 12:00:00 +0000

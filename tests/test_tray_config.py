@@ -102,6 +102,36 @@ discover-timeout = 10
             ],
         )
 
+    def test_loads_sink_specific_wfd_options(self):
+        self._write(
+            """
+[wfd]
+wfd-aosp-pmt-pid = true
+wfd-uibc = false
+wfd-go-intent = 0
+"""
+        )
+        warnings = []
+
+        args = tray_config.load_profile(
+            "wfd", config_path=self.config_path, warn=warnings.append
+        )
+
+        self.assertEqual(args, ["--wfd-aosp-pmt-pid", "--wfd-go-intent", "0"])
+        self.assertEqual(warnings, [])
+
+    def test_go_intent_out_of_range_warns(self):
+        self._write("[wfd]\nwfd-go-intent = 16\n")
+        warnings = []
+
+        args = tray_config.load_profile(
+            "wfd", config_path=self.config_path, warn=warnings.append
+        )
+
+        self.assertEqual(args, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("invalid value for 'wfd-go-intent'", warnings[0])
+
     def test_invalid_and_unknown_options_warn_and_fall_back(self):
         self._write(
             """

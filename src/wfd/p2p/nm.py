@@ -1,11 +1,15 @@
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from ..config import WFDNotReady
 from ..constants import NM_DEST, NM_PATH, WFD_RTSP_PORT
-from ..ie import WFDPeer, _parse_gdbus_byte_array, _parse_wfd_ies_rtsp_port
+from ..ie import (
+    WFDPeer, _parse_gdbus_byte_array, _parse_wfd_ies_rtsp_port, _wfd_capability,
+)
+from .addressing import _is_p2p_group_iface, _valid_interface
 from .dbus import (
     NM_ACTIVE_STATE_NAMES, NM_DEVICE_REASON_NAMES, NM_DEVICE_STATE_NAMES,
+    NM_DEVICE_TYPE_WIFI_P2P,
     _gdbus_call, _nm_get_property, _nm_get_string, _object_paths,
     _variant_byte_array, _variant_uint, _variant_uint_tuple, _wfd_source_ie,
 )
@@ -32,10 +36,31 @@ def _nm_active_devices(active_path: str) -> list[str]:
     )
     return _object_paths(raw)
 
-def _wait_for_nm_activation(active_path: str, timeout: float = 35.0) -> None:
+
+def _nm_group_interface(device_paths: list[str]) -> Optional[str]:
+    """Return the exact P2P group interface attached to an active connection."""
+    for path in device_paths:
+        for prop in ("IpInterface", "Interface"):
+            interface = _nm_get_string(
+                path,
+                "org.freedesktop.NetworkManager.Device",
+                prop,
+            )
+            if _valid_interface(interface) and _is_p2p_group_iface(interface):
+                return interface
+    return None
+
+
+def _wait_for_nm_activation(
+    active_path: str,
+    timeout: float = 35.0,
+    *,
+    on_group_interface: Optional[Callable[[str], None]] = None,
+) -> None:
     print("[FluxCast WFD] Waiting for NetworkManager P2P activation...")
     deadline = time.monotonic() + timeout
     last_status = ""
+    state = None
 
     while time.monotonic() < deadline:
         state_raw = _nm_get_property(
@@ -46,14 +71,21 @@ def _wait_for_nm_activation(active_path: str, timeout: float = 35.0) -> None:
         state = _variant_uint(state_raw)
         state_text = NM_ACTIVE_STATE_NAMES.get(state or -1, str(state))
         devices = _nm_active_devices(active_path)
+        group_interface = _nm_group_interface(devices)
+        if group_interface and on_group_interface is not None:
+            on_group_interface(group_interface)
         device_status = ", ".join(_nm_device_summary(path) for path in devices) or "no-device"
         status = f"{state_text}; {device_status}"
+        if state == 2 and on_group_interface is not None and group_interface is None:
+            status += "; waiting for P2P group interface"
 
         if status != last_status:
             print(f"[FluxCast WFD] NM active connection: {status}")
             last_status = status
 
-        if state == 2:
+        if state == 2 and (
+            on_group_interface is None or group_interface is not None
+        ):
             print("[FluxCast WFD] P2P link is activated; waiting for RTSP session...")
             return
         if state == 4:
@@ -64,6 +96,12 @@ def _wait_for_nm_activation(active_path: str, timeout: float = 35.0) -> None:
 
         time.sleep(0.5)
 
+    if state == 2 and on_group_interface is not None:
+        raise WFDNotReady(
+            "NetworkManager activated the Wi-Fi Direct connection, but its "
+            "P2P group interface could not be determined. "
+            f"Last status: {last_status}"
+        )
     raise WFDNotReady(
         "Timed out waiting for NetworkManager Wi-Fi Direct activation. "
         f"Last status: {last_status or 'unknown'}"
@@ -81,14 +119,62 @@ def _nm_p2p_device_path(interface: Optional[str] = None) -> Optional[str]:
         raise WFDNotReady((result.stderr or result.stdout).strip())
 
     requested = interface or ""
+
     for path in _object_paths(result.stdout):
-        iface = _nm_get_string(path, "org.freedesktop.NetworkManager.Device", "Interface")
-        if not iface or "p2p" not in iface.lower():
+        iface = _nm_get_string(
+            path,
+            "org.freedesktop.NetworkManager.Device",
+            "Interface",
+        )
+
+        device_type = _variant_uint(
+            _nm_get_property(
+                path,
+                "org.freedesktop.NetworkManager.Device",
+                "DeviceType",
+            )
+        )
+
+        # Prefer NetworkManager's actual device classification.
+        # If DeviceType cannot be read, preserve the previous
+        # interface-name heuristic as a compatibility fallback.
+        if device_type is not None:
+            if device_type != NM_DEVICE_TYPE_WIFI_P2P:
+                continue
+        elif not iface or "p2p" not in iface.lower():
             continue
-        if requested and requested not in iface:
-            continue
+
+        if requested and requested not in (iface or ""):
+            is_iwd_virtual = bool(
+                iface
+                and iface.startswith("/net/connman/iwd/")
+            )
+
+            if not is_iwd_virtual:
+                continue
+
+            # With IWD, NetworkManager exposes a virtual P2P device such
+            # as /net/connman/iwd/0 rather than a p2p-wlan0-* interface.
+            # Do not silently pretend that --wfd-interface matched it.
+            print(
+                "[FluxCast WFD] "
+                f"--wfd-interface={requested!r} does not map directly "
+                f"to IWD's virtual P2P device {iface!r}; "
+                "using the NetworkManager/IWD P2P device."
+            )
+
         return path
+
     return None
+
+def _nm_p2p_uses_iwd(path: str) -> bool:
+    iface = _nm_get_string(
+        path,
+        "org.freedesktop.NetworkManager.Device",
+        "Interface",
+    )
+    return bool(iface and iface.startswith("/net/connman/iwd/"))
+
 
 def _nm_start_find(path: str, timeout: int) -> None:
     result = _gdbus_call([
@@ -137,11 +223,24 @@ def _nm_scan(interface: Optional[str], timeout: int) -> list[WFDPeer]:
         wfd_ies_list = _parse_gdbus_byte_array(wfd_ies_raw)
         sink_rtsp_port = _parse_wfd_ies_rtsp_port(wfd_ies_list)
 
+        # A peer with no Wi-Fi Display data still returns "(<@ay []>,)" here:
+        # an empty array, but a non-empty string. Gate on the parsed bytes, or
+        # printers and every other P2P device get reported as valid sinks.
+        #
+        # An empty string is a different thing again: _nm_get_property returns
+        # "" when the gdbus call fails, which happens for a peer that ages out
+        # mid-scan. That is unknown, not incapable - calling it False steers
+        # the user away from a device that would have worked.
+        if wfd_ies_raw:
+            wfd_capable, wfd_device_type = _wfd_capability(wfd_ies_list)
+        else:
+            wfd_capable, wfd_device_type = None, None
+
         details = "; ".join(
             part for part in [
                 f"model={model}" if model else "",
                 f"manufacturer={manufacturer}" if manufacturer else "",
-                f"wfd_ies={wfd_ies_raw}" if wfd_ies_raw else "",
+                f"wfd_ies={wfd_ies_raw}" if wfd_ies_list else "",
                 f"sink_rtsp_port={sink_rtsp_port}",
             ]
             if part
@@ -153,6 +252,8 @@ def _nm_scan(interface: Optional[str], timeout: int) -> list[WFDPeer]:
             path=peer_path,
             source="NetworkManager",
             rtsp_port=sink_rtsp_port,
+            wfd_capable=wfd_capable,
+            wfd_device_type=wfd_device_type,
         ))
     return peers
 

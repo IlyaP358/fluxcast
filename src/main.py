@@ -74,6 +74,7 @@ from server import (
     new_session_id,
     prepare_hls_dir,
 )
+from version import get_fluxcast_version
 
 
 def get_local_ip() -> str:
@@ -86,12 +87,18 @@ def get_local_ip() -> str:
 
 
 def parse_args() -> argparse.Namespace:
+    version = get_fluxcast_version()
     parser = argparse.ArgumentParser(
-        description="FluxCast — stream your Linux desktop to a Smart TV"
+        description=f"FluxCast — stream your Linux desktop to a Smart TV (version: {version})"
     )
 
     # General Options
     general = parser.add_argument_group("General Options")
+
+    general.add_argument("--version", action="version",
+                         version=f"FluxCast {version}",
+                         help="Show program's version number and exit")
+
     general.add_argument("--protocol", default="wfd",
                          choices=["dlna", "cast", "wfd"],
                          help="Connection protocol: wfd (Miracast, default), "
@@ -109,7 +116,7 @@ def parse_args() -> argparse.Namespace:
                              help="Scale output to WxH, e.g. 1920x1080 (default: native)")
     stream_opts.add_argument("--fps", type=int, default=30,
                              help="Frames per second (default: 30)")
-    stream_opts.add_argument("--bitrate", default="4M",
+    stream_opts.add_argument("--bitrate", default=None,
                              help="Video bitrate (default: 4M)")
 
     # DLNA / Cast Options
@@ -191,14 +198,44 @@ def parse_args() -> argparse.Namespace:
                      help="P2P group-owner intent (0-15); 0 forces the TV to be "
                           "the group owner, which most Miracast TVs require to "
                           "start the session (default: 0)")
+    wfd.add_argument("--wfd-p2p-channel", type=int, default=None, dest="wfd_p2p_channel",
+                     choices=[1, 6, 11],
+                     help="Force the P2P group onto this 2.4GHz channel instead of "
+                          "letting the driver pick (only used by --wfd-p2p-backend "
+                          "wpas). Some WFD sinks only support Wi-Fi Direct on "
+                          "2.4GHz, and silently never associate if the group forms "
+                          "on 5GHz - GO Negotiation completes fine, but the sink "
+                          "never shows up at the 802.11 level. Default: unset "
+                          "(driver picks the channel).")
     wfd.add_argument("--wfd-monitor", default=None, dest="monitor_name",
                      help="Deprecated alias for --monitor, kept for compatibility")
+    wfd.add_argument("--wfd-p2p-backend", default="nm", dest="wfd_p2p_backend",
+                     choices=["nm", "wpas"],
+                     help="How to bring up the P2P link: 'nm' uses "
+                          "NetworkManager (default); 'wpas' talks to "
+                          "wpa_supplicant directly instead, which exposes "
+                          "controls NetworkManager's own P2P API doesn't - "
+                          "notably --wfd-p2p-channel below. Also useful for "
+                          "debugging P2P/WPS negotiation issues, since it "
+                          "logs each step of the raw exchange. Needs the "
+                          "D-Bus policy in "
+                          "meta/zz-dev.fluxcast.wpa-supplicant.conf, and "
+                          "falls back to sudo where the bus denies a call.")
     wfd.add_argument("--wfd-uibc", action="store_true", dest="wfd_uibc",
                      help="Experimental: accept touch/mouse input back from the "
                           "sink (TV/tablet) and inject it locally via uinput. "
                           "Off by default; requires access to /dev/uinput")
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # --bitrate defaults to None only so an explicit value can be told apart
+    # from the default (#80). None must not escape this function: the DLNA and
+    # Cast path hands args.bitrate straight to start_capture, which calls
+    # .upper() on it, so a None default would crash every non-WFD user.
+    args.bitrate_explicit = args.bitrate is not None
+    if args.bitrate is None:
+        args.bitrate = "4M"
+    return args
 
 
 # ── terminal helpers ──────────────────────────────────────────────────────────
@@ -257,6 +294,8 @@ def _wait_for_hls_segments(required_segments: int = 2, timeout: float = 15.0) ->
 
 def main() -> None:
     args = parse_args()
+
+    print(f"[FluxCast] Version: {get_fluxcast_version()}")
 
     if args.transport is None:
         args.transport = "hls" if args.protocol == "cast" else "progressive-ts"

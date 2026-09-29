@@ -1,4 +1,6 @@
+import os
 import shutil
+import signal
 import subprocess
 import time
 
@@ -9,7 +11,7 @@ from ..config import WFDNotReady
 from ..dump import _process_written_bytes
 from ..encoding import (
     _bitrate_to_kbits, _calculate_gop, _fit_inside, _kbits_to_bitrate_text,
-    _parse_resolution, _quality_floor_kbits, _vbv_bufsize,
+    _effective_kbits, _parse_resolution, _vbv_bufsize,
 )
 from ..env import _detect_audio_monitor
 from ..gst import (
@@ -21,6 +23,18 @@ from ..modes import _h264_level_for_mode
 from ..net import _ffmpeg_sender_args
 
 
+def _end_session_on_portal_revoke() -> None:
+    """Stop the cast the same way Ctrl+C does.
+
+    Fired from the D-Bus thread, so it raises SIGINT rather than tearing
+    anything down here: session.py's loop already runs the full cleanup on
+    KeyboardInterrupt, and reusing it keeps one teardown path.
+    """
+    print("\n[FluxCast WFD Media] The desktop portal ended the screen share "
+          "(window closed or sharing stopped); stopping the cast.")
+    os.kill(os.getpid(), signal.SIGINT)
+
+
 class PortalMixin:
     def _open_portal_session(self, monitor):
         print("[FluxCast WFD Media] Opening portal screen-share dialog (KDE/GNOME Wayland)...")
@@ -29,19 +43,25 @@ class PortalMixin:
                 timeout=120.0,
                 preferred_position=(monitor.x, monitor.y) if monitor is not None else None,
                 preferred_size=(monitor.width, monitor.height) if monitor is not None else None,
+                # This pipeline letterboxes with videoscale add-borders, so a
+                # window of any shape is safe to accept here (#62).
+                allow_window=True,
             )
         except PortalCaptureError as exc:
             raise WFDNotReady(f"portal capture setup failed: {exc}") from exc
 
         session = self.portal_session
         # source_type: 1=MONITOR, 2=WINDOW, 4=VIRTUAL ("Share virtual screen")
-        if session.source_type is not None and session.source_type not in (1, 4):
+        if session.source_type is not None and session.source_type not in (1, 2, 4):
             close_portal_capture(self.portal_session)
             self.portal_session = None
             raise WFDNotReady(
-                "Portal returned a window or camera source. "
-                "In the portal picker choose a full monitor or 'Share virtual screen'."
+                "Portal returned an unsupported source. In the portal picker choose "
+                "a monitor, a window, or 'Share virtual screen'."
             )
+        # Without this the pipeline keeps pushing the last captured frame, so a
+        # closed window stays on the TV until the user notices (#62).
+        session.on_closed = _end_session_on_portal_revoke
         return session
     def _start_desktop_portal_ffmpeg(self) -> None:
         """
@@ -74,8 +94,8 @@ class PortalMixin:
         gop = _calculate_gop(self.config)
         out_w, out_h = _parse_resolution(out_res) or (1920, 1080)
         requested_kbits = _bitrate_to_kbits(self.config.bitrate)
-        effective_kbits = max(requested_kbits,
-                              _quality_floor_kbits(out_w, out_h, self.config.fps))
+        effective_kbits = _effective_kbits(
+            self.config, requested_kbits, out_w, out_h)
         if "LG" in self.config.peer_name.upper():
             effective_kbits = min(effective_kbits, 4000)
         effective_bitrate = _kbits_to_bitrate_text(effective_kbits)
@@ -236,7 +256,7 @@ class PortalMixin:
         if not shutil.which("gst-launch-1.0"):
             raise WFDNotReady("Portal backend requires gst-launch-1.0 (pipewiresrc pipeline).")
         required = (
-            "pipewiresrc", "videoconvert", "videoscale",
+            "pipewiresrc", "videoconvert", "videoscale", "videorate",
             "x264enc", "mpegtsmux", "rtpmp2tpay", "udpsink",
         )
         if not self.config.no_audio:
@@ -260,8 +280,8 @@ class PortalMixin:
         gop = _calculate_gop(self.config)
         parsed_out = _parse_resolution(out_res) or (1920, 1080)
         requested_kbits = _bitrate_to_kbits(self.config.bitrate)
-        floor_kbits = _quality_floor_kbits(parsed_out[0], parsed_out[1], self.config.fps)
-        effective_kbits = max(requested_kbits, floor_kbits)
+        effective_kbits = _effective_kbits(
+            self.config, requested_kbits, parsed_out[0], parsed_out[1])
 
         is_lg = "LG" in self.config.peer_name.upper()
         if is_lg:

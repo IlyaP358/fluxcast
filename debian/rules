@@ -1,0 +1,77 @@
+#!/usr/bin/make -f
+
+DESTDIR := debian/fluxcast
+APPDIR  := $(DESTDIR)/opt/fluxcast
+VENV    := $(APPDIR)/venv
+REQS    := debian/.requirements-venv
+
+# Strip any Debian revision: this is the version the app reports, not the
+# package version.
+VERSION := $(shell dpkg-parsechangelog -SVersion | sed -E 's/-[^-]+$$//')
+
+# The venv's bin/python3 is a symlink to the system interpreter, and the wheels
+# inside it are ABI-tagged for one Python minor version. Installed on a release
+# with a different python3 the venv resolves to a site-packages directory that
+# is not there, and every dependency import fails at runtime. Pin the package to
+# the minor version it was built against so apt refuses the install instead.
+PYVER  := $(shell python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+PYNEXT := $(shell python3 -c 'import sys; print("%d.%d" % (sys.version_info[0], sys.version_info[1] + 1))')
+
+%:
+	dh $@
+
+# pyproject.toml would otherwise make dh pick pybuild and try to build a wheel.
+# The package ships the source tree plus a venv, not an installed distribution.
+override_dh_auto_configure:
+override_dh_auto_build:
+override_dh_auto_test:
+override_dh_auto_clean:
+
+override_dh_auto_install:
+	# Reuse the from-source installer rather than restating the file list,
+	# the /opt layout and the D-Bus policy path here. It is the same script
+	# meta/install.sh users run, so the three install paths cannot drift.
+	DESTDIR=$(CURDIR)/$(DESTDIR) SRCDIR=$(CURDIR) bash meta/install.sh
+	# install.sh stamps a git describe when it finds a .git; overwrite it with
+	# the changelog version so the package reports what apt actually installed.
+	sed -i -E 's|^__installed_version__ = ".*"|__installed_version__ = "$(VERSION)"|' \
+		$(APPDIR)/version.py
+	$(MAKE) -f debian/rules build-venv
+
+build-venv:
+	# --system-site-packages so PyGObject comes from python3-gi. It has no
+	# usable wheel and building it here would drag the whole GNOME toolchain
+	# into Build-Depends.
+	python3 -m venv --system-site-packages $(VENV)
+	grep -v -i '^pygobject' requirements.txt > $(REQS)
+	$(VENV)/bin/pip install --no-cache-dir --no-compile -r $(REQS)
+	rm -f $(REQS)
+	$(MAKE) -f debian/rules relocate-venv
+
+relocate-venv:
+	# The venv is built under debian/fluxcast but runs from /opt/fluxcast, so
+	# every absolute path baked in at creation time has to be rewritten.
+	# -type f skips bin/python*, which are symlinks to the interpreter itself.
+	find $(VENV)/bin -maxdepth 1 -type f -exec \
+		sed -i '1s|^#!.*python.*|#!/opt/fluxcast/venv/bin/python3|' {} +
+	find $(VENV)/bin $(VENV)/pyvenv.cfg -maxdepth 1 -type f -exec \
+		sed -i 's|$(CURDIR)/$(DESTDIR)/opt/fluxcast|/opt/fluxcast|g' {} +
+	find $(VENV) -depth -name '__pycache__' -type d -exec rm -rf {} +
+
+override_dh_gencontrol:
+	dh_gencontrol -- \
+		-V'fluxcast:PythonBound=python3 (>= $(PYVER)), python3 (<< $(PYNEXT))'
+
+override_dh_clean:
+	dh_clean
+	rm -rf $(DESTDIR) $(REQS)
+
+# The venv holds manylinux wheels that bundle their own shared libraries.
+# dh_shlibdeps resolves those to dependencies apt cannot satisfy, and dh_strip
+# and dh_dwz rewrite prebuilt binaries this package has no debug symbols for.
+override_dh_shlibdeps:
+override_dh_strip:
+override_dh_dwz:
+override_dh_strip_nondeterminism:
+
+.PHONY: build-venv relocate-venv

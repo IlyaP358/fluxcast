@@ -1,0 +1,26 @@
+#!/bin/sh
+set -e
+
+APPDIR=/opt/fluxcast
+
+case "$1" in
+    install|upgrade)
+        # meta/install.sh writes this tree directly and the AppImage's
+        # first-run setup writes the D-Bus policy, both without dpkg knowing.
+        # dpkg overwrites the files it also ships, but modules that only the
+        # older layout had would survive and shadow the packaged ones on
+        # sys.path. Nothing under here is user data, so clear it.
+        if [ -d "$APPDIR" ] && ! dpkg-query -S "$APPDIR/main.py" >/dev/null 2>&1; then
+            echo "fluxcast: replacing a non-packaged install in $APPDIR"
+            rm -rf "$APPDIR"
+        fi
+        # Same reasoning for the venv on a package upgrade: it is shipped
+        # whole and unpacked immediately after this, so removing it first
+        # stops a previous version's site-packages from lingering.
+        rm -rf "$APPDIR/venv"
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

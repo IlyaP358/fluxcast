@@ -1,6 +1,7 @@
 import json
 import importlib.util
 import ipaddress
+import grp
 import os
 import platform
 import re
@@ -8,6 +9,11 @@ import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from typing import Optional
+
+# Admin groups that may receive the FluxCast wpa_supplicant Properties.Set grant.
+# wheel: Arch/Fedora; sudo: Debian/Ubuntu. Desktop users who can already elevate
+# are typically in one of these.
+WPA_DBUS_ADMIN_GROUPS = ("wheel", "sudo")
 
 
 STATUS_OK = "ok"
@@ -210,6 +216,7 @@ _PORTAL_BACKENDS = [
     "xdg-desktop-portal-gnome",
     "xdg-desktop-portal-wlr",
     "xdg-desktop-portal-lxqt",
+    "xdg-desktop-portal-cosmic",
 ]
 
 
@@ -506,6 +513,71 @@ def _subnet_conflict_check() -> Check:
     )
 
 
+def _user_admin_groups() -> list[str]:
+    """Return which of WPA_DBUS_ADMIN_GROUPS the current user belongs to."""
+    gids = set(os.getgroups())
+    gids.add(os.getgid())
+    names: set[str] = set()
+    for gid in gids:
+        try:
+            names.add(grp.getgrgid(gid).gr_name)
+        except KeyError:
+            continue
+    return [name for name in WPA_DBUS_ADMIN_GROUPS if name in names]
+
+
+def _wpa_dbus_set_check() -> Check:
+    """Probe whether Properties.Set on wpa_supplicant is permitted for this user.
+
+    FluxCast's system.d policy grants Properties.Set only to wheel/sudo so
+    unprivileged accounts cannot write supplicant properties. A Set on a
+    non-existent property is authoritative: AccessDenied means the bus policy
+    blocks the call; InvalidArgs / No such property means the grant is live.
+    """
+    name = "wpa D-Bus Set"
+    if not shutil.which("gdbus"):
+        return Check(name, STATUS_WARN, "gdbus was not found", "cannot probe wpa_supplicant D-Bus policy")
+
+    args = [
+        "gdbus", "call", "--system",
+        "--dest", "fi.w1.wpa_supplicant1",
+        "--object-path", "/fi/w1/wpa_supplicant1",
+        "--method", "org.freedesktop.DBus.Properties.Set",
+        "fi.w1.wpa_supplicant1",
+        "FluxCastDoctorProbe",
+        "<'probe'>",
+    ]
+    try:
+        result = _run(args, timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return Check(name, STATUS_WARN, "could not probe wpa_supplicant D-Bus policy", str(exc))
+
+    text = (result.stdout + result.stderr).strip()
+    if "AccessDenied" in text:
+        membership = _user_admin_groups()
+        if membership:
+            detail = (
+                "Properties.Set is blocked despite admin group membership; "
+                "install meta/zz-dev.fluxcast.wpa-supplicant.conf and reload dbus"
+            )
+        else:
+            detail = (
+                f"add your user to {' or '.join(WPA_DBUS_ADMIN_GROUPS)} "
+                "(or re-login after usermod), then install the FluxCast D-Bus policy"
+            )
+        return Check(
+            name,
+            STATUS_WARN,
+            "Properties.Set on wpa_supplicant is denied",
+            detail,
+        )
+    if "No such property" in text or "InvalidArgs" in text:
+        return Check(name, STATUS_OK, "Properties.Set on wpa_supplicant is permitted", text)
+    if result.returncode != 0:
+        return Check(name, STATUS_WARN, "wpa_supplicant D-Bus probe failed", text)
+    return Check(name, STATUS_OK, "Properties.Set on wpa_supplicant is permitted", text)
+
+
 def _supplicant_capability_check() -> Check:
     if not shutil.which("gdbus"):
         return Check("wpa_supplicant P2P", STATUS_WARN, "gdbus was not found", "cannot query system D-Bus")
@@ -559,6 +631,22 @@ def _supplicant_wfd_check() -> Check:
     )
 
 
+def _ufw_enabled() -> Optional[bool]:
+    """Whether ufw is switched on, without needing root. None if unreadable.
+
+    `ufw status` refuses to run as a normal user, so read the ENABLED line
+    from ufw.conf, which ships world-readable. Not `systemctl is-active ufw`:
+    the unit can be active while ufw itself is disabled.
+    """
+    try:
+        with open("/etc/ufw/ufw.conf") as conf:
+            match = re.search(r"^\s*ENABLED\s*=\s*(\w+)", conf.read(),
+                              re.MULTILINE | re.IGNORECASE)
+    except OSError:
+        return None
+    return match.group(1).lower() == "yes" if match else None
+
+
 def _ufw_check() -> Optional[Check]:
     if not shutil.which("ufw"):
         return None
@@ -569,10 +657,27 @@ def _ufw_check() -> Optional[Check]:
         return Check("firewall (ufw)", STATUS_WARN, "could not query ufw status", str(exc))
 
     output = (result.stdout + result.stderr).strip()
+    # ufw prints the root error and still exits 0, so match the text rather
+    # than trusting the return code.
+    if re.search(r"need to be root|permission denied", output, re.IGNORECASE):
+        # Returning None here is what let #98 happen: --doctor is normally run
+        # unprivileged, so the one line that would have named port 7236 left
+        # the report entirely and the session just hung with no explanation.
+        enabled = _ufw_enabled()
+        if enabled is False:
+            return Check("firewall (ufw)", STATUS_OK,
+                         "ufw is installed but disabled; port not blocked",
+                         "read from /etc/ufw/ufw.conf; ufw status needs root")
+        detail = (f"open it with: sudo ufw allow {WFD_RTSP_PORT}/tcp\n"
+                  "  or check the current rules with: sudo ufw status")
+        if enabled is None:
+            return Check("firewall (ufw)", STATUS_WARN,
+                         f"could not verify whether ufw allows port {WFD_RTSP_PORT}",
+                         detail)
+        return Check("firewall (ufw)", STATUS_WARN,
+                     f"ufw is enabled; port {WFD_RTSP_PORT} needs root to verify",
+                     detail)
     if result.returncode != 0:
-        # ufw status needs root; skip rather than warn when privileges are missing.
-        if re.search(r"need to be root|permission denied", output, re.IGNORECASE):
-            return None
         return Check("firewall (ufw)", STATUS_WARN, "ufw status query failed", output)
 
     if re.search(r"Status:\s*inactive", output, re.IGNORECASE):
@@ -595,44 +700,64 @@ def _ufw_check() -> Optional[Check]:
     )
 
 
+def _firewalld_active() -> Optional[bool]:
+    """True/False when systemd reports firewalld active/inactive, None when it
+    could not be asked (no systemctl, no systemd, timeout).
+
+    `firewall-cmd --state` goes through Polkit too; asking systemd does not.
+    """
+    if not shutil.which("firewall-cmd"):
+        return False
+    try:
+        result = _run(["systemctl", "is-active", "firewalld"], timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    state = result.stdout.strip()
+    if result.returncode == 0 and state == "active":
+        return True
+    if state in ("inactive", "failed"):
+        return False
+    return None  # e.g. "System has not been booted with systemd" on stderr
+
+
 def _firewalld_check() -> Optional[Check]:
     if not shutil.which("firewall-cmd"):
         return None
 
-    try:
-        state = _run(["firewall-cmd", "--state"], timeout=3.0)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return Check("firewall (firewalld)", STATUS_WARN, "could not query firewalld state", str(exc))
-
-    # firewalld gates firewall-cmd through polkit, so on a headless/gated host
-    # `--state` and `--query-port` can fail with an authorization error rather
-    # than a real answer. Trust only what firewall-cmd literally prints: a
-    # non-zero exit is not proof the firewall is down, so an auth failure must
-    # never become a definitive OK-or-closed. Report "couldn't verify" instead.
-    state_out = state.stdout.strip()
-    state_all = (state.stdout + state.stderr).strip()
-    if state_out != "running":
-        if "not running" in state_all.lower():
-            return Check(
-                "firewall (firewalld)",
-                STATUS_OK,
-                "firewalld is not running; port not blocked",
-                state_all,
-            )
+    active = _firewalld_active()
+    if active is None:
+        # Without systemd's answer we do not know; firewalld may well be up and
+        # blocking, so this must not read as a definitive "not running".
         return Check(
             "firewall (firewalld)",
             STATUS_WARN,
-            "could not verify firewalld state (firewall-cmd did not report running/not running)",
-            state_all,
+            "could not verify whether firewalld is running (systemctl gave no answer)",
+        )
+    if not active:
+        return Check(
+            "firewall (firewalld)",
+            STATUS_OK,
+            "firewalld is not running; port not blocked",
         )
 
+    # This runs at every session start, so keep the short probe budget: a
+    # Polkit-gated query just becomes "could not verify" rather than a dialog
+    # the startup waits on. The session path in wfd/firewall.py, where the
+    # port actually matters, waits for the prompt.
     try:
         query = _run(["firewall-cmd", f"--query-port={WFD_RTSP_PORT}/tcp"], timeout=3.0)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return Check("firewall (firewalld)", STATUS_WARN, "could not query firewalld port", str(exc))
+        return Check(
+            "firewall (firewalld)",
+            STATUS_WARN,
+            f"could not verify whether firewalld allows port {WFD_RTSP_PORT}/tcp",
+            str(exc),
+        )
 
     # `--query-port` prints `yes`/`no` (exit 0/1) for a real answer; anything
     # else — empty output, an auth error — means we could not check the port.
+    # A non-zero exit is not proof the port is closed, so an auth failure must
+    # never become a definitive OK-or-closed. Report "couldn't verify" instead.
     query_out = query.stdout.strip()
     if query_out == "yes":
         return Check(
@@ -729,6 +854,7 @@ def run_diagnostics(skip_firewall: bool = False) -> DiagnosticReport:
         _iw_p2p_check(),
         _supplicant_capability_check(),
         _supplicant_wfd_check(),
+        _wpa_dbus_set_check(),
         firewall_check,
     ]
 
