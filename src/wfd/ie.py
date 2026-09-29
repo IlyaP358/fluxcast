@@ -53,6 +53,9 @@ class WFDPeer:
     # wfd_capable can be False: a printer that never mentions Wi-Fi Display,
     # and another source - another laptop, or another FluxCast - that does.
     wfd_device_type: Optional[int] = None
+    # Unreachable whatever it advertises over Wi-Fi Display; None = unknown.
+    is_group_owner: Optional[bool] = None
+    offers_push_button: Optional[bool] = None
 
 def _parse_gdbus_byte_array(raw: str) -> list[int]:
     """Parse a gdbus @ay variant string into a list of integer byte values.
