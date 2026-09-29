@@ -392,6 +392,7 @@ def _show_about() -> None:
     def _run():
         try:
             import tkinter as tk
+            from tkinter import font as tkfont
             from PIL import ImageTk
         except ImportError as exc:
             _log(f"About window unavailable: {exc}")
@@ -475,8 +476,17 @@ def _show_about() -> None:
         KOFI_W, KOFI_H, KOFI_R = 300, 60, 13
         KOFI_GLOW_PAD = 27
         KOFI_FONT = 11
+        KOFI_TEXT_PAD = 16  # breathing room per side when a label outgrows KOFI_W
 
-        btn_w, btn_h = int(KOFI_W * _scale), int(KOFI_H * _scale)
+        # Size the button to the rendered label so no translation gets
+        # truncated or spills past the button shape (#156); the 300px design
+        # width stays the floor for languages where the label already fits.
+        kofi_font = tkfont.Font(family="sans-serif",
+                                size=int(KOFI_FONT * _scale), weight="bold")
+        kofi_label = _l("Help continue FluxCast development")
+        btn_w = max(int(KOFI_W * _scale),
+                    kofi_font.measure(kofi_label) + int(2 * KOFI_TEXT_PAD * _scale))
+        btn_h = int(KOFI_H * _scale)
         pad = int(KOFI_GLOW_PAD * _scale)
         kofi_w, kofi_h = btn_w + pad * 2, btn_h + pad * 2
         kofi_canvas = tk.Canvas(
@@ -501,9 +511,9 @@ def _show_about() -> None:
             kofi_w // 2, kofi_h // 2, image=kofi_frames[KOFI])
         kofi_canvas.create_text(
             kofi_w // 2, kofi_h // 2,
-            text=_l("Help continue FluxCast development"),
+            text=kofi_label,
             fill="#ffffff",
-            font=("sans-serif", int(KOFI_FONT * _scale), "bold"))
+            font=kofi_font)
 
         def on_enter(e): kofi_canvas.itemconfig(btn_image, image=kofi_frames["#ff4a47"])
         def on_leave(e): kofi_canvas.itemconfig(btn_image, image=kofi_frames[KOFI])
