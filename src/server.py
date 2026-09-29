@@ -1,5 +1,7 @@
 import http.server
 import os
+import secrets
+import shutil
 import socketserver
 import threading
 import time
@@ -7,7 +9,8 @@ from typing import Optional
 from urllib.parse import unquote, urlsplit
 
 
-HLS_DIR = "/tmp/fluxcast"
+HLS_BASE = "/tmp/fluxcast"
+HLS_DIR = HLS_BASE
 HLS_SEGMENT_SECONDS = 1.0
 LIVE_TS_SIZE = 1_000_000_000_000
 LIVE_TS_PREROLL_SEGMENTS = 1
@@ -28,6 +31,37 @@ TS_CONTENT_FEATURES = (
     "DLNA.ORG_CI=0;"
     f"DLNA.ORG_FLAGS={DLNA_FLAGS}"
 )
+
+
+def new_session_id() -> str:
+    return f"session-{secrets.token_urlsafe(16)}"
+
+
+def prepare_hls_dir(session_id: str) -> str:
+    """Create a per-session segment directory with mode 0700."""
+    global HLS_DIR, PROGRESSIVE_TS_PATH
+    session_dir = os.path.join(HLS_BASE, session_id)
+    if os.path.isdir(HLS_BASE):
+        shutil.rmtree(HLS_BASE)
+    # makedirs only applies mode to the leaf; chmod both base and session dir.
+    os.makedirs(session_dir, mode=0o700)
+    os.chmod(HLS_BASE, 0o700)
+    os.chmod(session_dir, 0o700)
+    HLS_DIR = session_dir
+    PROGRESSIVE_TS_PATH = os.path.join(HLS_DIR, "progressive.ts")
+    return HLS_DIR
+
+
+def device_client_ip(device, protocol: str) -> str:
+    if protocol == "cast":
+        return device.cast_info.host
+    if protocol == "dlna":
+        location = getattr(device, "location", None) or ""
+        host = urlsplit(location).hostname
+        if not host:
+            raise ValueError("DLNA device has no location host")
+        return host
+    raise ValueError(f"unsupported protocol for client ACL: {protocol}")
 
 
 def _url_path(raw_path: str) -> str:
@@ -173,7 +207,11 @@ class ProgressiveTS:
             return self._started and self._generation == generation
 
     def _run(self, generation: int) -> None:
-        os.makedirs(HLS_DIR, exist_ok=True)
+        os.makedirs(HLS_DIR, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(HLS_DIR, 0o700)
+        except OSError:
+            pass
         try:
             open(PROGRESSIVE_TS_PATH, "wb").close()
         except OSError:
@@ -215,10 +253,25 @@ class HLSRequestHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
+    def _authorize(self) -> bool:
+        allowed = getattr(self.server, "allowed_client", None)
+        if not allowed or self.client_address[0] != allowed:
+            self._send_empty(403)
+            return False
+
+        session_id = getattr(self.server, "session_id", None)
+        if session_id:
+            path = _url_path(self.path)
+            prefix = f"/{session_id}/"
+            if not path.startswith(prefix):
+                self._send_empty(404)
+                return False
+        return True
+
     def _local_path(self) -> Optional[str]:
         path = _url_path(self.path).lstrip("/")
         if not path:
-            path = "stream.m3u8"
+            return None
         normalized = os.path.normpath(path)
         if normalized.startswith("..") or os.path.isabs(normalized):
             return None
@@ -241,6 +294,8 @@ class HLSRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _send_empty(self, status: int) -> None:
         self.close_connection = True
+        if status in (403, 404):
+            print(f"[FluxCast Server] {status} {self.client_address[0]} -> {self.path}")
         self.send_response(status)
         self.send_header("Content-Length", "0")
         self.send_header("Connection", "close")
@@ -674,6 +729,8 @@ class HLSRequestHandler(http.server.BaseHTTPRequestHandler):
             pass
 
     def do_HEAD(self):
+        if not self._authorize():
+            return
         path = _url_path(self.path)
         if path.endswith("/progressive.ts"):
             self._serve_progressive_ts(send_body=False)
@@ -684,6 +741,8 @@ class HLSRequestHandler(http.server.BaseHTTPRequestHandler):
         self._serve_file(send_body=False)
 
     def do_GET(self):
+        if not self._authorize():
+            return
         path = _url_path(self.path)
         if path.endswith("/progressive.ts"):
             self._serve_progressive_ts(send_body=True)
@@ -709,33 +768,49 @@ class CorsHLSRequestHandler(HLSRequestHandler):
         super().end_headers()
 
     def do_OPTIONS(self):
+        if not self._authorize():
+            return
         self.close_connection = True
         self.send_response(200)
         self.send_header("Content-Length", "0")
         self.send_header("Connection", "close")
         self.end_headers()
 
-    def _send_empty(self, status: int) -> None:
-        if status == 404:
-            print(f"[FluxCast Server] 404 {self.client_address[0]} -> {self.path}")
-        super()._send_empty(status)
-
 
 class StreamServer:
-    def __init__(self, host: str = "0.0.0.0", port: int = 8080,
-                 handler_class=HLSRequestHandler):
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8080,
+        handler_class=HLSRequestHandler,
+        session_id: Optional[str] = None,
+        allowed_client: Optional[str] = None,
+    ):
         self.host = host
         self.port = port
         self.handler_class = handler_class
+        self.session_id = session_id
+        self.allowed_client = allowed_client
         self._server: Optional[socketserver.TCPServer] = None
         self._thread: Optional[threading.Thread] = None
 
+    def allow_client(self, client_ip: str) -> None:
+        self.allowed_client = client_ip
+        if self._server is not None:
+            self._server.allowed_client = client_ip
+
     def start(self, capture_process=None) -> None:
-        os.makedirs(HLS_DIR, exist_ok=True)
+        os.makedirs(HLS_DIR, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(HLS_DIR, 0o700)
+        except OSError:
+            pass
         _progressive_ts.reset()
         self._server = http.server.ThreadingHTTPServer(
             (self.host, self.port), self.handler_class
         )
+        self._server.session_id = self.session_id
+        self._server.allowed_client = self.allowed_client
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
 

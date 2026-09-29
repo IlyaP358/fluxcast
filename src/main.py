@@ -18,7 +18,7 @@ Streaming & Encoding Options:
     --bitrate Xm             Video bitrate (default: 4M)
 
 DLNA / Cast Options:
-    --host HOST              LAN IP to advertise in the stream URL (default: auto)
+    --host HOST              LAN IP/address to bind and advertise in the stream URL (default: auto)
     --port PORT              HTTP server port (default: 8080)
     --discover-timeout N     Discovery timeout in seconds (default: 5)
     --transport progressive-ts|hls|live-ts
@@ -65,7 +65,15 @@ import sys
 import termios
 
 from capture import prompt_monitor, start_capture, stop_capture
-from server import HLS_DIR, CorsHLSRequestHandler, HLSRequestHandler, StreamServer
+import server
+from server import (
+    CorsHLSRequestHandler,
+    HLSRequestHandler,
+    StreamServer,
+    device_client_ip,
+    new_session_id,
+    prepare_hls_dir,
+)
 from version import get_fluxcast_version
 
 
@@ -114,7 +122,7 @@ def parse_args() -> argparse.Namespace:
     # DLNA / Cast Options
     dlna_cast = parser.add_argument_group("DLNA / Cast Options")
     dlna_cast.add_argument("--host", default=None,
-                           help="LAN IP to advertise in the stream URL (default: auto)")
+                           help="LAN IP/address to bind and advertise in the stream URL (default: auto)")
     dlna_cast.add_argument("--port", type=int, default=8080,
                            help="HTTP server port (default: 8080)")
     dlna_cast.add_argument("--discover-timeout", type=int, default=5,
@@ -252,12 +260,14 @@ def _restore_term(saved) -> None:
 
 
 def _wait_for_hls_segments(required_segments: int = 2, timeout: float = 15.0) -> bool:
-    playlist = os.path.join(HLS_DIR, "stream.m3u8")
+    # Read dynamically — prepare_hls_dir() reassigns server.HLS_DIR per session.
+    hls_dir = server.HLS_DIR
+    playlist = os.path.join(hls_dir, "stream.m3u8")
     start = time.monotonic()
 
     while time.monotonic() - start < timeout:
         segments = []
-        for path in glob.glob(os.path.join(HLS_DIR, "stream*.ts")):
+        for path in glob.glob(os.path.join(hls_dir, "stream*.ts")):
             try:
                 if os.path.getsize(path) > 0:
                     segments.append(path)
@@ -324,7 +334,8 @@ def main() -> None:
         return
 
     host = args.host or get_local_ip()
-    session_id = f"session-{int(time.time())}"
+    session_id = new_session_id()
+    prepare_hls_dir(session_id)
     if args.transport == "live-ts":
         stream_name = "live.ts"
     elif args.transport == "progressive-ts":
@@ -387,12 +398,25 @@ def main() -> None:
     )
     print("[FluxCast] Screen capture started.")
 
-    # HTTP server serves the HLS playlist and MPEG-TS segments from /tmp/fluxcast.
+    # HTTP server serves the HLS playlist and MPEG-TS segments from the
+    # per-session directory under /tmp/fluxcast. Bind only to the advertised
+    # LAN address; session prefix + client ACL are enforced in the handler.
     # Cast uses a CORS-enabled handler (Chromecast needs it for HLS); dlna keeps
     # the plain handler so its responses stay byte-identical to before.
     handler_class = CorsHLSRequestHandler if args.protocol == "cast" else HLSRequestHandler
-    stream_server = StreamServer(host="0.0.0.0", port=args.port, handler_class=handler_class)
-    stream_server.start()
+    stream_server = StreamServer(
+        host=host,
+        port=args.port,
+        handler_class=handler_class,
+        session_id=session_id,
+    )
+    try:
+        stream_server.start()
+    except OSError as exc:
+        print(
+            f"[FluxCast] ERROR: Could not bind HTTP server to {host}:{args.port}: {exc}"
+        )
+        shutdown()
     print(f"[FluxCast] HTTP server: {stream_url}")
     print(f"[FluxCast] Session: {session_id}")
     print(f"[FluxCast] Transport: {args.transport}")
@@ -407,17 +431,20 @@ def main() -> None:
         from dlna import discover_devices, prompt_device, start_cast
         devices = discover_devices(timeout=args.discover_timeout)
         tv = prompt_device(devices, args.device_name)
+        stream_server.allow_client(device_client_ip(tv, "dlna"))
         start_cast(tv, stream_url)
 
     else:  # cast protocol
         from cast import discover_devices, connect_by_ip, prompt_device, start_cast
         if args.tv_ip:
             tv = connect_by_ip(args.tv_ip)
+            stream_server.allow_client(device_client_ip(tv, "cast"))
             start_cast(tv, stream_url)
         else:
             devices = discover_devices(timeout=args.discover_timeout)
             tv = prompt_device(devices, args.device_name)
             print(f"[FluxCast] Found: {tv.cast_info.friendly_name}")
+            stream_server.allow_client(device_client_ip(tv, "cast"))
             start_cast(tv, stream_url)
 
     print("[FluxCast] Casting started. Press Ctrl+C to stop.")
