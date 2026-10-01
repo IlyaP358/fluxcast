@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 import subprocess
@@ -372,3 +373,127 @@ class SubnetConflictCheckTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PortalGstElementsCheckTest(unittest.TestCase):
+    """--doctor vouched for 2 of the 12 elements the portal backend enforces, so
+    users installed exactly what it named and still could not start a session
+    (#129). The list is now shared with the backend preflight."""
+
+    def _check(self, present, no_audio=False, timeout_on=()):
+        """Run the check with `present` the set of elements gst-inspect can see."""
+        def fake_run(argv, timeout=None):
+            element = argv[1]
+            if element in timeout_on:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            return _completed(returncode=0 if element in present else 1)
+
+        with mock.patch("diagnostics.shutil.which", return_value="/usr/bin/gst-inspect-1.0"), \
+                mock.patch("diagnostics._run", side_effect=fake_run):
+            return diagnostics._portal_gst_elements_check(no_audio=no_audio)
+
+    def _everything(self):
+        return (set(diagnostics.PORTAL_GST_VIDEO_ELEMENTS)
+                | set(diagnostics.PORTAL_GST_AUDIO_ELEMENTS)
+                | {"avenc_aac"})
+
+    def test_reports_ok_and_names_the_chosen_aac_encoder(self):
+        check = self._check(self._everything())
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+        self.assertIn("13 of 13 present", check.detail)
+        self.assertIn("AAC encoder: avenc_aac", check.detail)
+
+    def test_audio_elements_and_the_encoder_drop_out_without_audio(self):
+        check = self._check(set(diagnostics.PORTAL_GST_VIDEO_ELEMENTS), no_audio=True)
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+        self.assertIn("8 of 8 present", check.detail)
+        self.assertNotIn("AAC", check.detail)
+
+    def test_names_every_missing_element_not_just_the_two_it_used_to_know(self):
+        present = self._everything() - {"mpegtsmux", "rtpmp2tpay", "videorate"}
+        check = self._check(present)
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        for element in ("mpegtsmux", "rtpmp2tpay", "videorate"):
+            self.assertIn(element, check.message)
+        self.assertIn("missing 3 of 13", check.message)
+
+    def test_install_hint_names_each_package_once(self):
+        check = self._check(self._everything() - {"udpsink", "rtpmp2tpay"})
+        self.assertIn("rtpmp2tpay, udpsink: install gstreamer1.0-plugins-good",
+                      check.detail)
+        self.assertEqual(check.detail.count("gstreamer1.0-plugins-good"), 1)
+
+    def test_a_missing_aac_encoder_is_one_requirement_not_four(self):
+        check = self._check(self._everything() - {"avenc_aac"})
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("an AAC encoder", check.message)
+        self.assertIn("missing 1 of 13", check.message)
+        self.assertIn("gstreamer1.0-libav", check.detail)
+        for encoder in diagnostics.PORTAL_GST_AAC_ENCODERS:
+            self.assertIn(encoder, check.detail)
+
+    def test_the_encoder_reported_is_the_one_the_picker_would_choose(self):
+        present = (self._everything() - {"avenc_aac"}) | {"voaacenc", "fdkaacenc"}
+        check = self._check(present)
+        self.assertIn("AAC encoder: fdkaacenc", check.detail)
+
+    def test_unverifiable_elements_are_not_reported_as_missing(self):
+        """A gst-inspect timeout must not tell users to install something they
+        may already have."""
+        check = self._check(self._everything(), timeout_on={"mpegtsmux"})
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("could not verify", check.message)
+        self.assertIn("mpegtsmux", check.message)
+        self.assertNotIn("install", check.detail)
+
+    def test_missing_gst_inspect_still_names_the_whole_requirement(self):
+        with mock.patch("diagnostics.shutil.which", return_value=None):
+            check = diagnostics._portal_gst_elements_check()
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("13", check.message)
+        self.assertIn("gstreamer1.0-tools", check.detail)
+
+    def test_every_element_has_an_install_hint(self):
+        for element in (diagnostics.PORTAL_GST_VIDEO_ELEMENTS
+                        + diagnostics.PORTAL_GST_AUDIO_ELEMENTS
+                        + diagnostics.PORTAL_GST_AAC_ENCODERS):
+            self.assertIn(element, diagnostics._GST_ELEMENT_PACKAGES,
+                          f"{element} would report 'unknown package'")
+
+    def test_the_check_is_registered_in_the_report(self):
+        with mock.patch("diagnostics._firewall_check"):
+            report = diagnostics.run_diagnostics(skip_firewall=True)
+        self.assertTrue(any(check.name == "portal gst elements"
+                            for check in report.checks))
+
+
+class PortalPreflightSharesTheDoctorListTest(unittest.TestCase):
+    """The report and the backend requirement drifted apart once (#129); this
+    fails if either grows its own copy of the list again."""
+
+    def test_portal_preflight_uses_the_shared_constants(self):
+        """Scoped to the preflight: the pipeline argv further down the same
+        function names elements legitimately."""
+        from wfd.media import portal
+        source = inspect.getsource(portal.PortalMixin._start_desktop_portal)
+        self.assertIn("required = PORTAL_GST_VIDEO_ELEMENTS", source)
+        self.assertIn("required += PORTAL_GST_AUDIO_ELEMENTS", source)
+        self.assertNotIn("required = (", source,
+                         "preflight is building its own element tuple again")
+
+    def test_the_backend_enforces_exactly_what_the_doctor_checks(self):
+        """Both sides resolve to the same set, whatever the tuples contain."""
+        from wfd.media import portal
+        source = inspect.getsource(portal.PortalMixin._start_desktop_portal)
+        preflight = source.split("monitor = self.config.monitor")[0]
+        for element in (diagnostics.PORTAL_GST_VIDEO_ELEMENTS
+                        + diagnostics.PORTAL_GST_AUDIO_ELEMENTS):
+            self.assertNotIn(f'"{element}"', preflight,
+                             f"{element} is hardcoded in the preflight")
+
+    def test_aac_picker_uses_the_shared_order(self):
+        from wfd import gst
+        source = inspect.getsource(gst._gst_pick_aac_encoder)
+        self.assertIn("PORTAL_GST_AAC_ENCODERS", source)
+        self.assertEqual(set(gst._AAC_ENCODER_CAPS),
+                         set(diagnostics.PORTAL_GST_AAC_ENCODERS))

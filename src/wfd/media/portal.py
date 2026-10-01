@@ -7,6 +7,7 @@ import time
 from capture.portal_capture import (
     PortalCaptureError, close_portal_capture, start_portal_capture,
 )
+from diagnostics import PORTAL_GST_AUDIO_ELEMENTS, PORTAL_GST_VIDEO_ELEMENTS
 from ..config import WFDNotReady
 from ..dump import _process_written_bytes
 from ..encoding import (
@@ -255,12 +256,9 @@ class PortalMixin:
     def _start_desktop_portal(self) -> None:
         if not shutil.which("gst-launch-1.0"):
             raise WFDNotReady("Portal backend requires gst-launch-1.0 (pipewiresrc pipeline).")
-        required = (
-            "pipewiresrc", "videoconvert", "videoscale", "videorate",
-            "x264enc", "mpegtsmux", "rtpmp2tpay", "udpsink",
-        )
+        required = PORTAL_GST_VIDEO_ELEMENTS
         if not self.config.no_audio:
-            required += ("pulsesrc", "audioconvert", "audioresample", "aacparse")
+            required += PORTAL_GST_AUDIO_ELEMENTS
         missing = [name for name in required
                    if not _gst_has_element(name)]
         if missing:
