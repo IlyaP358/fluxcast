@@ -1,8 +1,9 @@
 import re
-import shutil
 import subprocess
 import time
 from typing import Optional
+
+from diagnostics import IW_PATHS, WPA_CLI_PATHS, _find_binary
 
 from ..config import WFDNotReady
 from ..constants import _DEVICE_NAME
@@ -61,11 +62,12 @@ def _scan_and_select(interface: Optional[str], selector: Optional[str],
     raise last_error
 
 def _default_wifi_interface() -> Optional[str]:
-    if not shutil.which("iw"):
+    iw = _find_binary("iw", IW_PATHS)
+    if not iw:
         return None
 
     try:
-        result = _run(["iw", "dev"], timeout=3.0)
+        result = _run([iw, "dev"], timeout=3.0)
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -110,7 +112,8 @@ def active_scan(interface: Optional[str] = None, timeout: int = 8) -> list[WFDPe
     except WFDNotReady as nm_error:
         print(f"[FluxCast WFD] NetworkManager scan unavailable: {nm_error}")
 
-    if not shutil.which("wpa_cli"):
+    wpa_cli = _find_binary("wpa_cli", WPA_CLI_PATHS)
+    if not wpa_cli:
         raise WFDNotReady("wpa_cli is required for active Wi-Fi Direct scans.")
 
     iface = interface or _default_wifi_interface()
@@ -119,7 +122,7 @@ def active_scan(interface: Optional[str] = None, timeout: int = 8) -> list[WFDPe
 
     print(f"[FluxCast WFD] Starting Wi-Fi Direct scan on {iface} for {timeout}s...")
     try:
-        start = _run(["wpa_cli", "-i", iface, "p2p_find", str(timeout)], timeout=5.0)
+        start = _run([wpa_cli, "-i", iface, "p2p_find", str(timeout)], timeout=5.0)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise WFDNotReady(f"Could not start p2p_find: {exc}") from exc
     if start.returncode != 0:
@@ -135,10 +138,10 @@ def active_scan(interface: Optional[str] = None, timeout: int = 8) -> list[WFDPe
     time.sleep(max(1, timeout))
 
     try:
-        peers_result = _run(["wpa_cli", "-i", iface, "p2p_peers"], timeout=5.0)
+        peers_result = _run([wpa_cli, "-i", iface, "p2p_peers"], timeout=5.0)
     finally:
         try:
-            _run(["wpa_cli", "-i", iface, "p2p_stop_find"], timeout=3.0)
+            _run([wpa_cli, "-i", iface, "p2p_stop_find"], timeout=3.0)
         except Exception:
             pass
 
@@ -153,7 +156,7 @@ def active_scan(interface: Optional[str] = None, timeout: int = 8) -> list[WFDPe
 
         details = ""
         try:
-            details_result = _run(["wpa_cli", "-i", iface, "p2p_peer", address], timeout=5.0)
+            details_result = _run([wpa_cli, "-i", iface, "p2p_peer", address], timeout=5.0)
             if details_result.returncode == 0:
                 details = details_result.stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
