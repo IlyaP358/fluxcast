@@ -299,6 +299,12 @@ class PortalMixin:
         parsed_src = _parse_resolution(src_res) or (1920, 1080)
         out_dims = _parse_resolution(out_res) or parsed_src
         out_w, out_h = out_dims
+        # A single videoscale to the WFD mode stretches: pipewiresrc can
+        # renegotiate its size, so the compositor gets asked for the 16:9
+        # mode directly and add-borders never applies. Pin the aspect-correct
+        # size first, then pad it into the mode as a separate step.
+        fit_w, fit_h = _fit_inside(parsed_src[0], parsed_src[1], out_w, out_h)
+        letterbox = (fit_w, fit_h) != (out_w, out_h)
         selector_attempts = _pipewiresrc_selector_attempts(
             session.pw_node_id,
             stream_label=session.stream_label,
@@ -406,6 +412,8 @@ class PortalMixin:
                 "!", f"video/x-raw,framerate={self.config.fps}/1",
                 "!", "videoconvert",
                 "!", "videoscale",
+                *(["!", f"video/x-raw,width={fit_w},height={fit_h},pixel-aspect-ratio=1/1",
+                   "!", "videoscale", "add-borders=true"] if letterbox else []),
                 "!", video_caps,
                 "!", "videoconvert",
                 "!", "video/x-raw,format=I420",
@@ -453,8 +461,8 @@ class PortalMixin:
                 *_gst_dump_branch(self.config.dump_ts_path),
             ]
 
-        # pixel-aspect-ratio=1/1 lets videoscale add-borders letterbox
-        # instead of stretching a non-16:9 monitor (#84).
+        # pixel-aspect-ratio=1/1 keeps videoscale from encoding the aspect
+        # ratio as PAR instead of padding the fitted frame (#84).
         caps_strict = (
             f"video/x-raw,width={out_w},height={out_h},"
             f"framerate={self.config.fps}/1,pixel-aspect-ratio=1/1"
@@ -485,7 +493,10 @@ class PortalMixin:
             print(f"[FluxCast WFD Media] Portal source id       : {session.stream_label}")
         if not self.config.no_audio:
             print(f"[FluxCast WFD Media] Capturing audio       : {audio_monitor}")
-        if out_dims != parsed_src:
+        if letterbox:
+            print(f"[FluxCast WFD Media] Scaling output       : {fit_w}x{fit_h} "
+                  f"letterboxed to {out_w}x{out_h}")
+        elif out_dims != parsed_src:
             print(f"[FluxCast WFD Media] Scaling output       : {out_res}")
         print(
             f"[FluxCast WFD Media] RTP target           : "
