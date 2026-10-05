@@ -96,7 +96,10 @@ def _choose_cea_mode(
     vesa_supported = sink_format.vesa_mask if sink_format else 0
     max_level = _max_wfd_level(sink_format.level) if sink_format else WFD_LEVEL_42
     resolution = _desired_resolution(config)
-    wants_720 = resolution is None or (resolution[0] <= 1280 and resolution[1] <= 720)
+    # Portal capture learns the source size only after negotiation, so an
+    # unknown size should not fall back to 720p outside test-pattern mode.
+    wants_720 = (resolution is None and config.test_pattern) or (
+        resolution is not None and resolution[0] <= 1280 and resolution[1] <= 720)
     wants_1200 = resolution is not None and resolution[0] >= 1920 and resolution[1] > 1080
     wants_60 = config.fps > 30
     wants_480 = resolution is not None and resolution[0] <= 640 and resolution[1] <= 480
