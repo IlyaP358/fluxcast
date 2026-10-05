@@ -97,7 +97,7 @@ class PortalMixin:
         requested_kbits = _bitrate_to_kbits(self.config.bitrate)
         effective_kbits = _effective_kbits(
             self.config, requested_kbits, out_w, out_h)
-        if "LG" in self.config.peer_name.upper():
+        if "LG" in self.config.peer_name.upper() and not self.config.bitrate_explicit:
             effective_kbits = min(effective_kbits, 4000)
         effective_bitrate = _kbits_to_bitrate_text(effective_kbits)
         if effective_kbits > requested_kbits:
@@ -282,7 +282,7 @@ class PortalMixin:
             self.config, requested_kbits, parsed_out[0], parsed_out[1])
 
         is_lg = "LG" in self.config.peer_name.upper()
-        if is_lg:
+        if is_lg and not self.config.bitrate_explicit:
             effective_kbits = min(effective_kbits, 4000)
 
         effective_bitrate = _kbits_to_bitrate_text(effective_kbits)
@@ -365,9 +365,9 @@ class PortalMixin:
                     opt_parts.append(f"vbv-maxrate={bitrate_kbits}")
 
                 if "vbv-buf-capacity" in x264_props:
-                    lg_vbv.append("vbv-buf-capacity=100")
+                    lg_vbv.append("vbv-buf-capacity=500")
                 elif "option-string" in x264_props:
-                    opt_parts.append(f"vbv-bufsize={bitrate_kbits // 10}")
+                    opt_parts.append(f"vbv-bufsize={bitrate_kbits // 2}")
 
                 encoder_args += lg_vbv
                 if "vbv-maxrate" not in x264_props and "option-string" not in x264_props:
