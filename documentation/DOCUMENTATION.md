@@ -61,6 +61,7 @@ python3 src/main.py --protocol cast
 - `--wfd-capture-backend auto|portal|wf-recorder|x11grab|gst-x11`
   - `auto` uses `portal` first on KDE/GNOME Wayland, then `wf-recorder` fallback.
 - `--wfd-encoder x264|va`
+- `--wfd-rate-control vbr|cbr|qvbr`
 - `--wfd-latency-log [PATH]`
 - `--wfd-aosp-pmt-pid` write MPEG-TS tables the way Android (AOSP) sinks expect them
 - `--wfd-no-audio`
@@ -254,6 +255,11 @@ and protocol selection remain controlled by the tray and cannot be set here.
   - H.264 encoder for the `portal` backend. Other backends ignore it.
   - `x264` (default): software `x264enc`.
   - `va`: GPU encoding through VA-API `vah264enc` (gst-plugins-bad), which uses far less CPU. Needs a VA-API driver with H.264 encode; on Fedora that is RPM Fusion's `intel-media-driver`, since Fedora's `libva-intel-media-driver` has no H.264. Falls back to `x264` when `vah264enc` is not available.
+- `--wfd-rate-control`
+  - Rate control for `--wfd-encoder va`. Ignored by `x264`.
+  - `qvbr` (default): constant quality, up to `--bitrate`. Keeps keyframes close to x264's size; falls back to `vbr` when the VA driver does not offer it.
+  - `vbr`: sends only what the picture needs, up to `--bitrate`. On Intel, keyframes of a static desktop can grow to ~300 KiB, which a weak Wi-Fi Direct link may drop, leaving the TV loading.
+  - `cbr`: always sends the full `--bitrate`, padding frames that need less.
 - `--wfd-aosp-pmt-pid`
   - Writes the MPEG-TS PAT/PMT the way Android (AOSP) Miracast sinks expect
     them (PMT on PID `0x0100`, table version `1`). Use it when the session

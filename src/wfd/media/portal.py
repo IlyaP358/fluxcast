@@ -17,8 +17,8 @@ from ..encoding import (
 from ..env import _detect_audio_monitor
 from ..gst import (
     _gst_dump_branch, _gst_has_element, _gst_pick_aac_encoder,
-    _gst_pipewiresrc_properties, _gst_rtp_link, _gst_x264enc_properties,
-    _pipewiresrc_selector_attempts, _wfd_gst_prog_map,
+    _gst_pipewiresrc_properties, _gst_rtp_link, _gst_vah264enc_rate_controls,
+    _gst_x264enc_properties, _pipewiresrc_selector_attempts, _wfd_gst_prog_map,
 )
 from ..modes import _h264_level_for_mode
 from ..net import _ffmpeg_sender_args
@@ -317,6 +317,10 @@ class PortalMixin:
         use_va = self.config.encoder == "va" and _gst_has_element("vah264enc")
         if self.config.encoder == "va" and not use_va:
             print("[FluxCast WFD Media] vah264enc not available; falling back to x264enc.")
+        rate_control = self.config.rate_control
+        if use_va and rate_control not in _gst_vah264enc_rate_controls():
+            print(f"[FluxCast WFD Media] vah264enc does not offer {rate_control} on this driver; using vbr.")
+            rate_control = "vbr"
 
         def _gst_video_chain(video_caps: str, selector_args: list[str]) -> list[str]:
             # Use more buffers for high-res 1440p capture and move videorate early
@@ -399,10 +403,16 @@ class PortalMixin:
 
             if use_va:
                 # CPB of 500 ms for LG and 200 ms otherwise, matching the x264enc VBV above.
+                # VBR caps nothing per frame on Intel: on a still desktop every keyframe
+                # grows to ~300 KiB, a burst a weak link loses and the sink never starts.
+                # QVBR (the default) keeps them near x264's size; CBR pads every frame.
+                # One reference
+                # frame keeps the sink's decode buffer small (max_dec_frame_buffering).
                 encoder_chain = [
                     "!", "video/x-raw,format=NV12",
                     "!", "vah264enc",
-                    "rate-control=cbr",
+                    f"rate-control={rate_control}",
+                    "ref-frames=1",
                     f"bitrate={bitrate_kbits}",
                     f"cpb-size={bitrate_kbits // 2 if is_lg else bitrate_kbits // 5}",
                     f"key-int-max={gop}",

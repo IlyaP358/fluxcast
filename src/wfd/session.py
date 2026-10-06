@@ -136,6 +136,7 @@ def start_experimental_backend(args) -> None:
         latency_log_path=getattr(args, "wfd_latency_log", None),
         capture_backend=getattr(args, "wfd_capture_backend", "auto"),
         encoder=getattr(args, "wfd_encoder", "x264"),
+        rate_control=getattr(args, "wfd_rate_control", "qvbr"),
         peer_name=peer.name,
         uibc=getattr(args, "wfd_uibc", False),
         aosp_pmt_pid=getattr(args, "wfd_aosp_pmt_pid", False),
