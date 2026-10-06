@@ -55,6 +55,19 @@ def _gst_wfd_sender_available() -> bool:
         and _gst_has_element("x264enc")
     )
 
+def _gst_vah264enc_rate_controls() -> set[str]:
+    """Enum values vah264enc offers; rate-control modes depend on the VA driver."""
+    try:
+        result = subprocess.run(
+            ["gst-inspect-1.0", "vah264enc"],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    return set(re.findall(r"^\s+\(\d+\): ([a-z]+)\s+-", result.stdout, re.M))
+
 def _gst_pipewiresrc_properties() -> set[str]:
     if not shutil.which("gst-inspect-1.0"):
         return set()
