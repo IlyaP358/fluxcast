@@ -408,11 +408,13 @@ class PortalMixin:
                 # QVBR (the default) keeps them near x264's size; CBR pads every frame.
                 # One reference
                 # frame keeps the sink's decode buffer small (max_dec_frame_buffering).
+                # Slices confine a lost packet to a band instead of the rest of the frame.
                 encoder_chain = [
                     "!", "video/x-raw,format=NV12",
                     "!", "vah264enc",
                     f"rate-control={rate_control}",
                     "ref-frames=1",
+                    "num-slices=8",
                     f"bitrate={bitrate_kbits}",
                     f"cpb-size={bitrate_kbits // 2 if is_lg else bitrate_kbits // 5}",
                     f"key-int-max={gop}",
