@@ -34,6 +34,10 @@ def _parse_sink_video_format(value: str) -> Optional[WFDVideoFormat]:
         return None
     if any(re.fullmatch(r"[0-9a-fA-F]{8}", field) is None for field in tokens[4:7]):
         return None
+    # Optional trailing max-hres/max-vres: 4 hex digits each, or "none".
+    max_hres = max_vres = None
+    if len(tokens) >= 13 and all(re.fullmatch(r"[0-9a-fA-F]{4}", f) for f in tokens[11:13]):
+        max_hres, max_vres = int(tokens[11], 16) or None, int(tokens[12], 16) or None
     try:
         return WFDVideoFormat(
             native=tokens[0],
@@ -43,6 +47,8 @@ def _parse_sink_video_format(value: str) -> Optional[WFDVideoFormat]:
             cea_mask=int(tokens[4], 16),
             vesa_mask=int(tokens[5], 16),
             hh_mask=int(tokens[6], 16),
+            max_hres=max_hres,
+            max_vres=max_vres,
         )
     except ValueError:
         return None
@@ -95,6 +101,8 @@ def _choose_cea_mode(
     )
     vesa_supported = sink_format.vesa_mask if sink_format else 0
     max_level = _max_wfd_level(sink_format.level) if sink_format else WFD_LEVEL_42
+    max_hres = sink_format.max_hres if sink_format else None
+    max_vres = sink_format.max_vres if sink_format else None
     resolution = _desired_resolution(config)
     # Portal capture learns the source size only after negotiation, so an
     # unknown size should not fall back to 720p outside test-pattern mode.
@@ -106,6 +114,10 @@ def _choose_cea_mode(
 
     all_modes = {**WFD_CEA_MODES, **WFD_VESA_MODES}
 
+    def fits(mode: WFDCEAMode) -> bool:
+        return ((max_hres is None or mode.width <= max_hres)
+                and (max_vres is None or mode.height <= max_vres))
+
     def supports(bit: int) -> bool:
         mode = all_modes[bit]
         if mode.table == "vesa":
@@ -114,6 +126,8 @@ def _choose_cea_mode(
         else:
             if not (cea_supported & bit):
                 return False
+        if not fits(mode):
+            return False
         return max_level is None or _wfd_level_for_mode(mode) <= max_level
 
     # Build preference order: if monitor is 1200p, prefer VESA 1200p modes first
@@ -184,6 +198,8 @@ def _choose_cea_mode(
                 WFD_CEA_720P30, WFD_CEA_720P60,
             ]
         )
+    forced = [bit for bit in forced + [WFD_CEA_720P30, WFD_CEA_640P60]
+              if fits(all_modes[bit])] or forced
     mode = all_modes[forced[0]]
     global _mode_force_warned
     if not _mode_force_warned:
