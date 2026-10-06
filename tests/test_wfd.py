@@ -353,8 +353,8 @@ class AspectRatioTest(unittest.TestCase):
         portal = next(c for c in _gst_commands(size=(2880, 1920))
                       if "pipewiresrc" in c and "mpegtsmux" in c)
         fitted = portal.index("video/x-raw,width=1080,height=720,pixel-aspect-ratio=1/1")
-        self.assertEqual(portal[fitted + 2:fitted + 4], ["videoscale", "add-borders=true"])
-        self.assertTrue(portal[fitted + 5].startswith("video/x-raw,width=1280,height=720,"))
+        self.assertEqual(portal[fitted + 2:fitted + 5], ["videoscale", "add-borders=true", "n-threads=0"])
+        self.assertTrue(portal[fitted + 6].startswith("video/x-raw,width=1280,height=720,"))
 
     def test_portal_gst_pipeline_skips_padding_for_a_matching_ratio(self):
         portal = next(c for c in _gst_commands(size=(1920, 1080))
