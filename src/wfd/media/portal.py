@@ -314,6 +314,9 @@ class PortalMixin:
             not self.config.no_audio, self.config.aosp_pmt_pid
         )
         has_h264parse = _gst_has_element("h264parse")
+        use_va = self.config.encoder == "va" and _gst_has_element("vah264enc")
+        if self.config.encoder == "va" and not use_va:
+            print("[FluxCast WFD Media] vah264enc not available; falling back to x264enc.")
 
         def _gst_video_chain(video_caps: str, selector_args: list[str]) -> list[str]:
             # Use more buffers for high-res 1440p capture and move videorate early
@@ -394,6 +397,26 @@ class PortalMixin:
             # Inject in-band SPS/PPS before every IDR (mirrors ffmpeg repeat-headers=1).
             h264_parse_chain = ["!", "h264parse", "config-interval=-1"] if has_h264parse else []
 
+            if use_va:
+                # CPB of 500 ms for LG and 200 ms otherwise, matching the x264enc VBV above.
+                encoder_chain = [
+                    "!", "video/x-raw,format=NV12",
+                    "!", "vah264enc",
+                    "rate-control=cbr",
+                    f"bitrate={bitrate_kbits}",
+                    f"cpb-size={bitrate_kbits // 2 if is_lg else bitrate_kbits // 5}",
+                    f"key-int-max={gop}",
+                    "b-frames=0",
+                    "aud=true",
+                ]
+            else:
+                encoder_chain = ["!", "video/x-raw,format=I420", "!", "x264enc", *encoder_args]
+            # x264enc's "baseline" output is Constrained Baseline; vah264enc
+            # only negotiates that profile under its exact name.
+            caps_profile = self.config.h264_profile
+            if use_va and caps_profile == "baseline":
+                caps_profile = "constrained-baseline"
+
             return [
                 "pipewiresrc",
                 f"fd={session.pw_fd}",
@@ -416,11 +439,9 @@ class PortalMixin:
                    "!", "videoscale", "add-borders=true", "n-threads=0"] if letterbox else []),
                 "!", video_caps,
                 "!", "videoconvert", "n-threads=0",
-                "!", "video/x-raw,format=I420",
-                "!", "x264enc",
-                *encoder_args,
+                *encoder_chain,
                 *h264_parse_chain,
-                "!", f"video/x-h264,stream-format=byte-stream,alignment=au,profile={self.config.h264_profile}",
+                "!", f"video/x-h264,stream-format=byte-stream,alignment=au,profile={caps_profile}",
                 "!", "queue",
                 "!", "mux.sink_4113",
             ]
@@ -482,6 +503,7 @@ class PortalMixin:
             + ", ".join(name for name, _ in selector_attempts)
         )
         print("[FluxCast WFD Media] Pipeline             : gstreamer (portal->rtp)")
+        print(f"[FluxCast WFD Media] Video encoder        : {'vah264enc (VA-API)' if use_va else 'x264enc'}")
         print(f"[FluxCast WFD Media] Portal source type      : {session.source_type}")
         if session.position and session.size:
             print(

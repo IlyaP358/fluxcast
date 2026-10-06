@@ -363,7 +363,7 @@ class AspectRatioTest(unittest.TestCase):
         self.assertEqual(portal.count("videoscale"), 1)
 
 
-def _gst_commands(size=(1080, 1920)):
+def _gst_commands(size=(1080, 1920), encoder="x264", has_va=True):
     """Generated gst argv for every WFD pipeline that scales."""
     class Mon:
         name, width, height, x, y, display = "eDP-1", size[0], size[1], 0, 0, ":0"
@@ -403,13 +403,13 @@ def _gst_commands(size=(1080, 1920)):
             return False
 
     config = wfd.WFDMediaConfig(monitor=Mon(), output_resolution="1280x720", fps=30,
-                                bitrate="4M", no_audio=True, peer_name="X")
+                                bitrate="4M", no_audio=True, peer_name="X", encoder=encoder)
     pipeline = wfd.WFDMediaPipeline(config, tv_ip="10.42.0.2", local_ip="10.42.0.1",
                                     sink_rtp_port=35034)
     pipeline.tx_interface = "lo"
     with (
         mock.patch.object(wfd.shutil, "which", side_effect=lambda n: "/usr/bin/" + n),
-        patch_all("_gst_has_element", return_value=True),
+        patch_all("_gst_has_element", side_effect=lambda n: has_va or n != "vah264enc"),
         patch_all("_detect_audio_monitor", return_value="m"),
         patch_all("_gst_pipewiresrc_properties", return_value=set()),
         patch_all("_gst_x264enc_properties", return_value=set()),
@@ -445,6 +445,34 @@ class PipewireBufferHandbackTest(unittest.TestCase):
         property unset rather than setting it either way."""
         for cmd in _gst_commands():
             self.assertNotIn("always-copy=false", cmd)
+
+
+class PortalVaEncoderTest(unittest.TestCase):
+    def _portal(self, **kwargs):
+        return next(c for c in _gst_commands(**kwargs)
+                    if "pipewiresrc" in c and "mpegtsmux" in c)
+
+    def test_default_encoder_is_x264enc(self):
+        portal = self._portal()
+        self.assertIn("x264enc", portal)
+        self.assertNotIn("vah264enc", portal)
+
+    def test_va_encoder_replaces_x264enc(self):
+        portal = self._portal(encoder="va")
+        self.assertNotIn("x264enc", portal)
+        enc = portal.index("vah264enc")
+        self.assertEqual(portal[enc - 2], "video/x-raw,format=NV12")
+        bitrate = int(next(a for a in portal[enc:] if a.startswith("bitrate=")).split("=")[1])
+        for arg in ("rate-control=cbr", f"cpb-size={bitrate // 5}",
+                    "key-int-max=30", "b-frames=0", "aud=true"):
+            self.assertIn(arg, portal[enc:])
+        caps = next(a for a in portal[enc:] if a.startswith("video/x-h264"))
+        self.assertIn("profile=constrained-baseline", caps)
+
+    def test_va_encoder_falls_back_to_x264enc_when_missing(self):
+        portal = self._portal(encoder="va", has_va=False)
+        self.assertIn("x264enc", portal)
+        self.assertNotIn("vah264enc", portal)
 
 
 def _sequence(values):
