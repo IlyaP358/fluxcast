@@ -364,7 +364,7 @@ class AspectRatioTest(unittest.TestCase):
 
 
 def _gst_commands(size=(1080, 1920), encoder="x264", has_va=True, rate_control="qvbr",
-                  va_rate_controls=("cbr", "vbr", "qvbr")):
+                  dmabuf_fails=False, va_rate_controls=("cbr", "vbr", "qvbr")):
     """Generated gst argv for every WFD pipeline that scales."""
     class Mon:
         name, width, height, x, y, display = "eDP-1", size[0], size[1], 0, 0, ":0"
@@ -382,11 +382,12 @@ def _gst_commands(size=(1080, 1920), encoder="x264", has_va=True, rate_control="
         returncode = 0
         pid = 4242
 
-        def __init__(self):
+        def __init__(self, cmd=()):
             self.stdout = io.BytesIO()
+            self.failed = dmabuf_fails and "video/x-raw(memory:DMABuf)" in cmd
 
         def poll(self):
-            return None
+            return 1 if self.failed else None
 
         def terminate(self):
             pass
@@ -423,7 +424,7 @@ def _gst_commands(size=(1080, 1920), encoder="x264", has_va=True, rate_control="
         patch_all("_process_written_bytes", return_value=None),
         mock.patch.object(wfd.subprocess, "Popen",
                           side_effect=lambda cmd, *a, **k: (captured.append(list(cmd)),
-                                                            Proc())[1]),
+                                                            Proc(cmd))[1]),
         mock.patch.object(wfd.time, "sleep"),
         contextlib.redirect_stdout(io.StringIO()),
     ):
@@ -465,13 +466,33 @@ class PortalVaEncoderTest(unittest.TestCase):
         self.assertNotIn("x264enc", portal)
         enc = portal.index("vah264enc")
         self.assertTrue(portal[enc - 2].startswith("video/x-raw(memory:VAMemory),format=NV12,"))
-        self.assertEqual(portal[enc - 7:enc - 4], ["video/x-raw,format=NV12", "!", "vacompositor"])
+        self.assertEqual(portal[enc - 7], "vacompositor")
         bitrate = int(next(a for a in portal[enc:] if a.startswith("bitrate=")).split("=")[1])
         for arg in ("rate-control=qvbr", "ref-frames=1", "num-slices=8", f"cpb-size={bitrate // 5}",
                     "key-int-max=30", "b-frames=0", "aud=true"):
             self.assertIn(arg, portal[enc:])
         caps = next(a for a in portal[enc:] if a.startswith("video/x-h264"))
         self.assertIn("profile=constrained-baseline", caps)
+
+    def test_va_tries_dmabuf_first(self):
+        portal = self._portal(encoder="va")
+        self.assertIn("video/x-raw(memory:DMABuf)", portal)
+        self.assertNotIn("always-copy=true", portal)
+        self.assertNotIn("videoconvert", portal)
+        post = portal.index("vapostproc")
+        self.assertTrue(portal[post + 2].startswith("video/x-raw(memory:VAMemory),format=NV12,width=400,height=710"))
+        comp = portal.index("vacompositor")
+        self.assertEqual(portal[comp + 2:comp + 4], ["sink_0::xpos=440", "sink_0::ypos=5"])
+        self.assertTrue(portal[comp + 5].startswith("video/x-raw(memory:VAMemory),format=NV12,width=1280,height=720"))
+
+    def test_va_falls_back_to_the_cpu_chain_without_dmabuf(self):
+        portals = [c for c in _gst_commands(encoder="va", dmabuf_fails=True)
+                   if "pipewiresrc" in c and "mpegtsmux" in c]
+        self.assertIn("video/x-raw(memory:DMABuf)", portals[0])
+        fallback = portals[1]
+        self.assertIn("always-copy=true", fallback)
+        enc = fallback.index("vacompositor")
+        self.assertEqual(fallback[enc - 2], "video/x-raw,format=NV12")
 
     def test_va_rate_control_can_be_cbr(self):
         portal = self._portal(encoder="va", rate_control="cbr")

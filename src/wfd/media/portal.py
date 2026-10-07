@@ -323,7 +323,8 @@ class PortalMixin:
             print(f"[FluxCast WFD Media] vah264enc does not offer {rate_control} on this driver; using vbr.")
             rate_control = "vbr"
 
-        def _gst_video_chain(video_caps: str, selector_args: list[str]) -> list[str]:
+        def _gst_video_chain(video_caps: str, selector_args: list[str],
+                             dmabuf: bool = False) -> list[str]:
             # Use more buffers for high-res 1440p capture and move videorate early
             props = _gst_pipewiresrc_properties()
             pipewire_args = [*selector_args]
@@ -413,8 +414,10 @@ class PortalMixin:
                 # vacompositor repeats the last frame on the GPU like imagefreeze does
                 # below, but passes a new frame on at once instead of on the next tick.
                 encoder_chain = [
-                    "!", "video/x-raw,format=NV12",
+                    *([] if dmabuf else ["!", "video/x-raw,format=NV12"]),
                     "!", "vacompositor", "force-live=true",
+                    *([f"sink_0::xpos={(out_w - fit_w) // 2}",
+                       f"sink_0::ypos={(out_h - fit_h) // 2}"] if dmabuf else []),
                     "!", f"video/x-raw(memory:VAMemory),format=NV12,width={out_w},height={out_h},"
                           f"framerate={self.config.fps}/1",
                     "!", "vah264enc",
@@ -438,6 +441,33 @@ class PortalMixin:
             caps_profile = self.config.h264_profile
             if use_va and caps_profile == "baseline":
                 caps_profile = "constrained-baseline"
+
+            if dmabuf:
+                # Zero-copy: vapostproc converts and scales KWin's DMABuf on the
+                # GPU and lets go of the PipeWire buffer straight away; the queue
+                # only holds our own VA surfaces (#147). KWin's DMABuf caps carry
+                # pixel-aspect-ratio=1/2147483647, which makes add-borders stretch,
+                # so the fitted size is pinned and vacompositor centres it on a
+                # black canvas of the WFD mode.
+                # BGRx in system memory must never reach vapostproc: on Intel
+                # it comes out sheared for widths that are not a multiple of 128.
+                return [
+                    "pipewiresrc",
+                    f"fd={session.pw_fd}",
+                    *pipewire_args,
+                    "do-timestamp=true",
+                    "!", "video/x-raw(memory:DMABuf)",
+                    "!", "videorate", "drop-only=true", f"max-rate={self.config.fps}",
+                    "!", "vapostproc",
+                    "!", f"video/x-raw(memory:VAMemory),format=NV12,width={fit_w},height={fit_h},"
+                          "pixel-aspect-ratio=1/1",
+                    "!", "queue", "max-size-buffers=8", "leaky=downstream",
+                    *encoder_chain,
+                    *h264_parse_chain,
+                    "!", f"video/x-h264,stream-format=byte-stream,alignment=au,profile={caps_profile}",
+                    "!", "queue",
+                    "!", "mux.sink_4113",
+                ]
 
             return [
                 "pipewiresrc",
@@ -483,7 +513,8 @@ class PortalMixin:
                 "!", "mux.sink_4352",
             ]
 
-        def _gst_cmd_for_caps(video_caps: str, selector_args: list[str]) -> list[str]:
+        def _gst_cmd_for_caps(video_caps: str, selector_args: list[str],
+                              dmabuf: bool = False) -> list[str]:
             return [
                 "gst-launch-1.0", "-e", "-q",
                 "mpegtsmux", "name=mux",
@@ -500,7 +531,7 @@ class PortalMixin:
                 f"bind-port={self.config.source_port}",
                 "sync=false",
                 "async=false",
-                *_gst_video_chain(video_caps, selector_args),
+                *_gst_video_chain(video_caps, selector_args, dmabuf),
                 *gst_audio_chain,
                 *_gst_dump_branch(self.config.dump_ts_path),
             ]
@@ -618,13 +649,16 @@ class PortalMixin:
 
         gst_proc = None
         probe_alive_seconds = 3.0
+        gst_attempts = [(name, caps, False) for name, caps in caps_attempts]
+        if use_va:
+            gst_attempts.insert(0, ("dmabuf", caps_strict, True))
         for selector_name, selector_args in selector_attempts:
-            for attempt_name, attempt_caps in caps_attempts:
+            for attempt_name, attempt_caps, dmabuf in gst_attempts:
                 print(
                     f"[FluxCast WFD Media] Portal attempt       : "
                     f"selector={selector_name}, caps={attempt_name}"
                 )
-                gst_cmd = _gst_cmd_for_caps(attempt_caps, selector_args)
+                gst_cmd = _gst_cmd_for_caps(attempt_caps, selector_args, dmabuf)
                 gst_proc = subprocess.Popen(gst_cmd, stderr=None, pass_fds=(session.pw_fd,))
                 time.sleep(2.5)
                 if gst_proc.poll() is not None:
