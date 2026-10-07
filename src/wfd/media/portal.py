@@ -314,9 +314,10 @@ class PortalMixin:
             not self.config.no_audio, self.config.aosp_pmt_pid
         )
         has_h264parse = _gst_has_element("h264parse")
-        use_va = self.config.encoder == "va" and _gst_has_element("vah264enc")
+        use_va = (self.config.encoder == "va" and _gst_has_element("vah264enc")
+                  and _gst_has_element("vacompositor"))
         if self.config.encoder == "va" and not use_va:
-            print("[FluxCast WFD Media] vah264enc not available; falling back to x264enc.")
+            print("[FluxCast WFD Media] vah264enc/vacompositor not available; falling back to x264enc.")
         rate_control = self.config.rate_control
         if use_va and rate_control not in _gst_vah264enc_rate_controls():
             print(f"[FluxCast WFD Media] vah264enc does not offer {rate_control} on this driver; using vbr.")
@@ -409,8 +410,13 @@ class PortalMixin:
                 # One reference
                 # frame keeps the sink's decode buffer small (max_dec_frame_buffering).
                 # Slices confine a lost packet to a band instead of the rest of the frame.
+                # vacompositor repeats the last frame on the GPU like imagefreeze does
+                # below, but passes a new frame on at once instead of on the next tick.
                 encoder_chain = [
                     "!", "video/x-raw,format=NV12",
+                    "!", "vacompositor", "force-live=true",
+                    "!", f"video/x-raw(memory:VAMemory),format=NV12,width={out_w},height={out_h},"
+                          f"framerate={self.config.fps}/1",
                     "!", "vah264enc",
                     f"rate-control={rate_control}",
                     "ref-frames=1",
@@ -422,7 +428,11 @@ class PortalMixin:
                     "aud=true",
                 ]
             else:
-                encoder_chain = ["!", "video/x-raw,format=I420", "!", "x264enc", *encoder_args]
+                encoder_chain = [
+                    "!", "imagefreeze", "is-live=true", "allow-replace=true",
+                    "!", "capsfilter", f"caps=video/x-raw,framerate={self.config.fps}/1",
+                    "!", "video/x-raw,format=I420", "!", "x264enc", *encoder_args,
+                ]
             # x264enc's "baseline" output is Constrained Baseline; vah264enc
             # only negotiates that profile under its exact name.
             caps_profile = self.config.h264_profile
@@ -441,10 +451,11 @@ class PortalMixin:
                 # is not enough - the starvation is about holding the buffers,
                 # not about their memory type.
                 "always-copy=true",
-                "keepalive-time=33",
                 "!", "queue", "max-size-buffers=64", "max-size-time=1000000000", "leaky=downstream",
-                "!", "videorate", "skip-to-first=true",
-                "!", f"video/x-raw,framerate={self.config.fps}/1",
+                # KWin only sends a frame on damage. Thin bursts here and repeat the
+                # last frame after the conversion (see encoder_chain), so a static
+                # screen is not converted and scaled 30 times a second.
+                "!", "videorate", "drop-only=true", f"max-rate={self.config.fps}",
                 "!", "videoconvert", "n-threads=0",
                 "!", "videoscale", "n-threads=0",
                 *(["!", f"video/x-raw,width={fit_w},height={fit_h},pixel-aspect-ratio=1/1",

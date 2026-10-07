@@ -400,13 +400,13 @@ class PortalGstElementsCheckTest(unittest.TestCase):
     def test_reports_ok_and_names_the_chosen_aac_encoder(self):
         check = self._check(self._everything())
         self.assertEqual(check.status, diagnostics.STATUS_OK)
-        self.assertIn("13 of 13 present", check.detail)
+        self.assertIn("14 of 14 present", check.detail)
         self.assertIn("AAC encoder: avenc_aac", check.detail)
 
     def test_audio_elements_and_the_encoder_drop_out_without_audio(self):
         check = self._check(set(diagnostics.PORTAL_GST_VIDEO_ELEMENTS), no_audio=True)
         self.assertEqual(check.status, diagnostics.STATUS_OK)
-        self.assertIn("8 of 8 present", check.detail)
+        self.assertIn("9 of 9 present", check.detail)
         self.assertNotIn("AAC", check.detail)
 
     def test_names_every_missing_element_not_just_the_two_it_used_to_know(self):
@@ -415,7 +415,7 @@ class PortalGstElementsCheckTest(unittest.TestCase):
         self.assertEqual(check.status, diagnostics.STATUS_WARN)
         for element in ("mpegtsmux", "rtpmp2tpay", "videorate"):
             self.assertIn(element, check.message)
-        self.assertIn("missing 3 of 13", check.message)
+        self.assertIn("missing 3 of 14", check.message)
 
     def test_install_hint_names_each_package_once(self):
         check = self._check(self._everything() - {"udpsink", "rtpmp2tpay"})
@@ -427,7 +427,7 @@ class PortalGstElementsCheckTest(unittest.TestCase):
         check = self._check(self._everything() - {"avenc_aac"})
         self.assertEqual(check.status, diagnostics.STATUS_WARN)
         self.assertIn("an AAC encoder", check.message)
-        self.assertIn("missing 1 of 13", check.message)
+        self.assertIn("missing 1 of 14", check.message)
         self.assertIn("gstreamer1.0-libav", check.detail)
         for encoder in diagnostics.PORTAL_GST_AAC_ENCODERS:
             self.assertIn(encoder, check.detail)
@@ -450,7 +450,7 @@ class PortalGstElementsCheckTest(unittest.TestCase):
         with mock.patch("diagnostics.shutil.which", return_value=None):
             check = diagnostics._portal_gst_elements_check()
         self.assertEqual(check.status, diagnostics.STATUS_WARN)
-        self.assertIn("13", check.message)
+        self.assertIn("14", check.message)
         self.assertIn("gstreamer1.0-tools", check.detail)
 
     def test_every_element_has_an_install_hint(self):

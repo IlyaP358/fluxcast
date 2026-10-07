@@ -34,7 +34,7 @@ _GST_BAD_PACKAGES = ("gstreamer1.0-plugins-bad (Arch: gst-plugins-bad; "
 # and still not start a session (#129). wfd imports diagnostics and never the
 # reverse, so the shared copy lives on this side.
 PORTAL_GST_VIDEO_ELEMENTS = (
-    "pipewiresrc", "videoconvert", "videoscale", "videorate",
+    "pipewiresrc", "videoconvert", "videoscale", "videorate", "imagefreeze",
     "x264enc", "mpegtsmux", "rtpmp2tpay", "udpsink",
 )
 PORTAL_GST_AUDIO_ELEMENTS = (
@@ -55,6 +55,7 @@ _GST_ELEMENT_PACKAGES = {
     "videorate": _GST_BASE_PACKAGES,
     "audioconvert": _GST_BASE_PACKAGES,
     "audioresample": _GST_BASE_PACKAGES,
+    "imagefreeze": _GST_GOOD_PACKAGES,
     "rtpmp2tpay": _GST_GOOD_PACKAGES,
     "udpsink": _GST_GOOD_PACKAGES,
     "pulsesrc": _GST_GOOD_PACKAGES,

@@ -464,7 +464,8 @@ class PortalVaEncoderTest(unittest.TestCase):
         portal = self._portal(encoder="va")
         self.assertNotIn("x264enc", portal)
         enc = portal.index("vah264enc")
-        self.assertEqual(portal[enc - 2], "video/x-raw,format=NV12")
+        self.assertTrue(portal[enc - 2].startswith("video/x-raw(memory:VAMemory),format=NV12,"))
+        self.assertEqual(portal[enc - 7:enc - 4], ["video/x-raw,format=NV12", "!", "vacompositor"])
         bitrate = int(next(a for a in portal[enc:] if a.startswith("bitrate=")).split("=")[1])
         for arg in ("rate-control=qvbr", "ref-frames=1", "num-slices=8", f"cpb-size={bitrate // 5}",
                     "key-int-max=30", "b-frames=0", "aud=true"):
