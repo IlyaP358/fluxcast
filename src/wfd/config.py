@@ -38,6 +38,8 @@ class WFDVideoFormat:
     cea_mask: int
     vesa_mask: int
     hh_mask: int
+    max_hres: Optional[int] = None
+    max_vres: Optional[int] = None
 
 @dataclass(frozen=True)
 class WFDCEAMode:
