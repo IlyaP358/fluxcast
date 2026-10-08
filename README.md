@@ -10,7 +10,7 @@ FluxCast streams a Linux desktop to a TV.
 [![Issues](https://img.shields.io/github/issues/IlyaP358/fluxcast?style=flat-square&color=red)](https://github.com/IlyaP358/fluxcast/issues)
 [![PRs](https://img.shields.io/github/issues-pr/IlyaP358/fluxcast?style=flat-square)](https://github.com/IlyaP358/fluxcast/pulls)
 
-> 🌐 **Need a free subdomain for your project?** Check out [sub.fluxcast.dev](https://sub.fluxcast.dev) ([GitHub repo](https://github.com/IlyaP358/fluxcast-domains)) — a free GitOps subdomain registry for developers!
+> 🌐 **Need a free subdomain for your project?** Check out [sub.fluxcast.dev](https://sub.fluxcast.dev) ([GitHub repo](https://github.com/IlyaP358/fluxcast-domains)), a free GitOps subdomain registry for developers!
 
 ## Demo
 
@@ -285,6 +285,8 @@ Detailed flags, modes, and usage examples:
 | LG webOS UN8000PTA | WFD | [#10](https://github.com/IlyaP358/fluxcast/issues/10) |
 | LG webOS SM8100PTA | WFD | [#30](https://github.com/IlyaP358/fluxcast/issues/30) |
 | LG LED-43UD81 | WFD | [#44](https://github.com/IlyaP358/fluxcast/issues/44) |
+| LG OLED65G5SUB | WFD | [#147](https://github.com/IlyaP358/fluxcast/issues/147) |
+| LG OLED55C2 | WFD | [#162](https://github.com/IlyaP358/fluxcast/pull/162) |
 | Hisense VIDAA 32A5NQ | WFD | [#56](https://github.com/IlyaP358/fluxcast/issues/56) |
 | X1BQ-8461 projector | WFD | [#84](https://github.com/IlyaP358/fluxcast/issues/84) |
 | Samsung UN55DU8000GXZD | WFD | [#12](https://github.com/IlyaP358/fluxcast/issues/12) |
@@ -314,7 +316,7 @@ Detailed flags, modes, and usage examples:
 </details>
 
 <details>
-<summary>Dell XPS 13 Plus — @alba4k</summary>
+<summary>Dell XPS 13 Plus (@alba4k)</summary>
 
 - CPU: Intel i5-1260P (16 threads) up to 4.70 GHz
 - GPU: Intel Iris Xe Graphics
@@ -332,49 +334,64 @@ Detailed flags, modes, and usage examples:
 </details>
 
 <details>
-<summary>HP ZBook Fury G8, i9 and i5 — #72, #87</summary>
+<summary>HP ZBook Fury G8, i9 and i5</summary>
 
 - Wi-Fi: Intel AX210
 - OS: EndeavourOS, KDE Plasma (X11)
+- Source: [#72](https://github.com/IlyaP358/fluxcast/issues/72), [#87](https://github.com/IlyaP358/fluxcast/issues/87)
 
 </details>
 
 <details>
-<summary>Lenovo ThinkBook 16 G6 ABP — #40</summary>
+<summary>Lenovo ThinkBook 16 G6 ABP</summary>
 
 - CPU: AMD Ryzen 5 7530U
 - OS: Fedora Linux 44
+- Source: [#40](https://github.com/IlyaP358/fluxcast/issues/40)
 
 </details>
 
 <details>
-<summary>Lenovo IdeaPad Slim 7 Pro 14IHUS — #53</summary>
+<summary>Lenovo IdeaPad Slim 7 Pro 14IHUS</summary>
 
 - CPU: Intel i7-11370H (8 threads) 3.30 GHz
 - OS: Arch Linux
+- Source: [#53](https://github.com/IlyaP358/fluxcast/issues/53)
 
 </details>
 
 <details>
-<summary>ASUS VivoBook X515JF — #44</summary>
+<summary>ASUS VivoBook X515JF</summary>
 
 - OS: Arch Linux (zen kernel)
+- Source: [#44](https://github.com/IlyaP358/fluxcast/issues/44)
 
 </details>
 
 <details>
-<summary>Desktop PC — #12</summary>
+<summary>Framework Laptop 13 Pro</summary>
+
+- Display: 2880x1920 (3:2)
+- OS: Fedora Linux 44, KDE Plasma (Wayland)
+- Source: [#161](https://github.com/IlyaP358/fluxcast/pull/161), [#162](https://github.com/IlyaP358/fluxcast/pull/162)
+
+</details>
+
+<details>
+<summary>Desktop PC</summary>
 
 - Wi-Fi: Intel AX201
 - OS: EndeavourOS
+- Source: [#12](https://github.com/IlyaP358/fluxcast/issues/12)
 
 </details>
 
 <details>
-<summary>Steam Deck — #45</summary>
+<summary>Steam Deck</summary>
 
 - Wi-Fi: Realtek RTL8822CE
 - OS: SteamOS Holo 3.7.25
+- Source: [#45](https://github.com/IlyaP358/fluxcast/issues/45)
 
 </details>
 
@@ -405,46 +422,52 @@ Detailed flags, modes, and usage examples:
 </details>
 
 <details>
-<summary>EndeavourOS — #12, #72, #87</summary>
+<summary>EndeavourOS</summary>
 
 - Kernels: 7.0.5-arch1-1, 6.18.38-3-lts
 - DEs: KDE Plasma (X11)
+- Source: [#12](https://github.com/IlyaP358/fluxcast/issues/12), [#72](https://github.com/IlyaP358/fluxcast/issues/72), [#87](https://github.com/IlyaP358/fluxcast/issues/87)
 
 </details>
 
 <details>
-<summary>Fedora Linux 44 — #40</summary>
+<summary>Fedora Linux 44</summary>
 
 - Kernels: 7.0.11-200.fc44
+- Source: [#40](https://github.com/IlyaP358/fluxcast/issues/40)
 
 </details>
 
 <details>
-<summary>Manjaro Linux — #84</summary>
+<summary>Manjaro Linux</summary>
 
 - Kernels: 6.18.39-1-MANJARO
 - DEs: GNOME (50.3)
+- Source: [#84](https://github.com/IlyaP358/fluxcast/issues/84)
 
 </details>
 
 <details>
-<summary>Linux Mint 22.3 — #56</summary>
+<summary>Linux Mint 22.3</summary>
 
 - Kernels: 6.17.0-35-generic
+- Source: [#56](https://github.com/IlyaP358/fluxcast/issues/56)
 
 </details>
 
 <details>
-<summary>Xubuntu — #51</summary>
+<summary>Xubuntu</summary>
 
 - Kernels: 6.17.0-7-generic
 - DEs: XFCE (X11)
+- Source: [#51](https://github.com/IlyaP358/fluxcast/issues/51)
 
 </details>
 
 <details>
-<summary>SteamOS Holo 3.7.25 — #45</summary>
+<summary>SteamOS Holo 3.7.25</summary>
 
 - Kernels: 6.11.11-valve27
+- Source: [#45](https://github.com/IlyaP358/fluxcast/issues/45)
 
 </details>

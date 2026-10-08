@@ -22,6 +22,26 @@ If you're adding support for a different TV or compositor,
 please attach a session log or short video showing it works. 
 I don't have the hardware to verify it myself.
 
+## Pull Request Size
+
+Two rules, both about keeping review honest rather than keeping the tree tidy.
+
+**One feature per pull request.** A branch that does several unrelated things
+cannot be reviewed as a whole, only spot-checked, and it cannot be reverted
+later without taking the good parts with it. If yours has grown past one
+change, split it. Three small PRs get read the same week; one large one sits
+for weeks and then gets declined for its shape rather than its content.
+
+**No file may exceed 500 lines after your change, unless it was already over
+500 before it.** A file you can read start to finish in one sitting is one you
+can reason about as a whole; past that, review turns into reading the diff and
+trusting the rest. The handful of files already over the limit are
+grandfathered, so this never asks you to split something you did not write.
+Files under `tests/` are exempt.
+
+Both rules have real exceptions. If yours is one, say so in the pull request
+description rather than hoping it goes unnoticed.
+
 ## What's Most Needed Right Now
 
 - Testing on non-Samsung TVs (LG, Sony, Philips)
