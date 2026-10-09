@@ -249,7 +249,7 @@ class WpaCliScanCapabilityTest(unittest.TestCase):
         with mock.patch.object(peers, "_nm_scan",
                                side_effect=WFDNotReady("no NM in this test")), \
              mock.patch.object(peers, "_run", side_effect=fake_run), \
-             mock.patch.object(peers.shutil, "which", return_value="/usr/bin/wpa_cli"), \
+             mock.patch.object(peers, "_find_binary", return_value="/usr/bin/wpa_cli"), \
              mock.patch.object(peers.time, "sleep"):
             return peers.active_scan(interface="wlan0", timeout=1)
 

@@ -24,6 +24,8 @@ import subprocess
 import time
 from typing import Optional
 
+from diagnostics import IW_PATHS, _find_binary
+
 from ..config import WFDNotReady
 
 # Standard Wi-Fi Direct convention subnet (matches diagnostics.py's own
@@ -46,7 +48,8 @@ def _sudo_run(args: list[str], timeout: float) -> subprocess.CompletedProcess[st
 
 def get_p2p_role(iface: str) -> str:
     """Returns 'P2P-GO', 'P2P-client', or 'unknown'."""
-    result = subprocess.run(["iw", "dev", iface, "info"],
+    iw = _find_binary("iw", IW_PATHS) or "iw"
+    result = subprocess.run([iw, "dev", iface, "info"],
                              capture_output=True, text=True, timeout=5.0)
     for line in result.stdout.splitlines():
         line = line.strip()

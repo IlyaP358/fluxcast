@@ -114,6 +114,12 @@ def _run(args: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess[s
     )
 
 
+# iw and wpa_cli install to /usr/sbin, which is not on a normal user's PATH on
+# Debian and Ubuntu (on Arch it is a symlink to /usr/bin). Look there too.
+IW_PATHS = ["/usr/sbin/iw", "/sbin/iw"]
+WPA_CLI_PATHS = ["/usr/sbin/wpa_cli", "/sbin/wpa_cli"]
+
+
 def _find_binary(binary: str, extra_paths: Optional[list[str]] = None) -> Optional[str]:
     path = shutil.which(binary)
     if path:
@@ -481,10 +487,11 @@ def _iw_phy_p2p_facts() -> tuple[Optional[bool], Optional[bool]]:
     Gets P2P capability and STA/P2P concurrency via `iw phy` (no root).
     Returns (bool/None, bool/None); both are None if parsing fails.
     """
-    if not shutil.which("iw"):
+    iw = _find_binary("iw", IW_PATHS)
+    if not iw:
         return (None, None)
     try:
-        result = _run(["iw", "phy"], timeout=4.0)
+        result = _run([iw, "phy"], timeout=4.0)
     except (OSError, subprocess.TimeoutExpired):
         return (None, None)
     if result.returncode != 0:
@@ -519,11 +526,12 @@ def _iw_phy_p2p_facts() -> tuple[Optional[bool], Optional[bool]]:
 
 
 def _iw_p2p_check() -> Check:
-    if not shutil.which("iw"):
+    iw = _find_binary("iw", IW_PATHS)
+    if not iw:
         return Check("iw P2P", STATUS_WARN, "iw was not found", "cannot inspect kernel Wi-Fi interfaces")
 
     try:
-        result = _run(["iw", "dev"], timeout=3.0)
+        result = _run([iw, "dev"], timeout=3.0)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return Check("iw P2P", STATUS_WARN, "could not query iw dev", str(exc))
 
@@ -931,8 +939,8 @@ def run_diagnostics(skip_firewall: bool = False) -> DiagnosticReport:
             "NetworkManager P2P DHCP server",
             extra_paths=["/usr/sbin/dnsmasq"],
         ),
-        _command_check("iw", "kernel Wi-Fi interface inspection"),
-        _command_check("wpa_cli", "active Wi-Fi Direct scan/control"),
+        _command_check("iw", "kernel Wi-Fi interface inspection", extra_paths=IW_PATHS),
+        _command_check("wpa_cli", "active Wi-Fi Direct scan/control", extra_paths=WPA_CLI_PATHS),
         _command_check("gdbus", "passive wpa_supplicant D-Bus capability checks"),
         _command_check("gst-launch-1.0", "optional future WFD GStreamer pipeline"),
         _command_check("gst-inspect-1.0", "optional future WFD codec inspection"),
