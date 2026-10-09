@@ -41,6 +41,9 @@ Wi-Fi Display (Miracast) Options:
                              RTP media sender (default: auto)
     --wfd-capture-backend auto|portal|wf-recorder|x11grab
                              Desktop capture backend for wfd (default: auto)
+    --wfd-encoder x264|va    H.264 encoder for the portal backend (default: x264)
+    --wfd-rate-control vbr|cbr|qvbr
+                             Rate control for --wfd-encoder va (default: qvbr)
     --wfd-latency-log PATH   Write latency/session events to JSONL log file
     --wfd-no-audio           Stream video only
     --wfd-aosp-pmt-pid       MPEG-TS tables as Android sinks expect them; for a sink
@@ -163,6 +166,17 @@ def parse_args() -> argparse.Namespace:
                      help="Desktop capture backend for --protocol wfd: auto (default), portal, "
                           "wf-recorder, x11grab, or gst-x11 (X11 capture through the GStreamer "
                           "MPEG-TS pipeline, for sinks that black-screen on the ffmpeg path)")
+    wfd.add_argument("--wfd-encoder", default="x264", dest="wfd_encoder",
+                     choices=["x264", "va"],
+                     help="For --protocol wfd, H.264 encoder used by the portal capture "
+                          "backend: x264 (default, software) or va (GPU through VA-API "
+                          "vah264enc; falls back to x264 when it is not available)")
+    wfd.add_argument("--wfd-rate-control", default="qvbr", dest="wfd_rate_control",
+                     choices=["vbr", "cbr", "qvbr"],
+                     help="For --wfd-encoder va, vah264enc rate control: qvbr (default, "
+                          "constant quality up to --bitrate; keeps keyframes small), vbr "
+                          "(sends only what the picture needs, up to --bitrate) or cbr "
+                          "(always sends the full --bitrate)")
     wfd.add_argument("--wfd-latency-log", nargs="?", const="/tmp/fluxcast-wfd-latency.jsonl",
                      default=None, dest="wfd_latency_log",
                      help="For --protocol wfd, JSONL file path for latency/session logging "

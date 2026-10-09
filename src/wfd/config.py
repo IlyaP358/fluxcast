@@ -22,6 +22,8 @@ class WFDMediaConfig:
     media_pipeline: str = "auto"
     latency_log_path: Optional[str] = None
     capture_backend: str = "auto"
+    encoder: str = "x264"  # portal backend H.264 encoder: x264 or va (vah264enc)
+    rate_control: str = "qvbr"  # vah264enc rate control: qvbr, vbr or cbr
     peer_name: str = ""
     uibc: bool = False  # opt-in: accept touch/mouse input back from the sink (issue #37)
     # H.264 profile the encoders emit; must match the profile sent in M4 (#84).
