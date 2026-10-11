@@ -525,6 +525,27 @@ def _iw_phy_p2p_facts() -> tuple[Optional[bool], Optional[bool]]:
     return (p2p_capable, concurrent)
 
 
+def _iw_p2p_group_interfaces(output: str) -> list[str]:
+    """Names of P2P group netdevs (P2P-client/P2P-GO) in `iw dev` output.
+
+    The adapter's own control interface shows up as `type P2P-device` once the
+    driver supports P2P, and is expected whenever hardware is ready. A
+    `P2P-client` or `P2P-GO` netdev only exists while a Wi-Fi Direct group is
+    up, so one present while --doctor runs (before a session starts) is left
+    over from an earlier interrupted session (#166).
+    """
+    groups: list[str] = []
+    current: Optional[str] = None
+    for line in output.splitlines():
+        interface = re.match(r"\s*Interface\s+(\S+)", line)
+        if interface:
+            current = interface.group(1)
+            continue
+        if current and re.match(r"\s*type\s+(P2P-client|P2P-GO)\b", line):
+            groups.append(current)
+    return groups
+
+
 def _iw_p2p_check() -> Check:
     iw = _find_binary("iw", IW_PATHS)
     if not iw:
@@ -538,6 +559,21 @@ def _iw_p2p_check() -> Check:
     output = result.stdout.strip()
     if result.returncode != 0:
         return Check("iw P2P", STATUS_WARN, "iw dev failed", result.stderr.strip())
+
+    # A leftover group interface means the adapter is still (or looks) attached
+    # to a group from a previous session; report it before the P2P-device check
+    # below, which would otherwise call the whole row ok.
+    leftover = _iw_p2p_group_interfaces(output)
+    if leftover:
+        names = ", ".join(leftover)
+        return Check(
+            "iw P2P", STATUS_WARN,
+            f"leftover Wi-Fi Direct group interface present: {names}",
+            f"{names} looks left over from a previous session and can leave the "
+            f"adapter stuck as a client of a group that no longer exists; "
+            f"remove it with `sudo iw dev {leftover[0]} del` before starting a new session",
+        )
+
     if re.search(r"\btype\s+P2P-device\b", output):
         return Check("iw P2P", STATUS_OK, "kernel exposes a P2P-device interface", output)
     if "Interface" in output:

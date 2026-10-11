@@ -497,3 +497,82 @@ class PortalPreflightSharesTheDoctorListTest(unittest.TestCase):
         self.assertIn("PORTAL_GST_AAC_ENCODERS", source)
         self.assertEqual(set(gst._AAC_ENCODER_CAPS),
                          set(diagnostics.PORTAL_GST_AAC_ENCODERS))
+
+
+class IwP2pCheckTest(unittest.TestCase):
+    """A leftover Wi-Fi Direct group netdev must not be reported ok (#166).
+
+    --doctor runs before a session starts, so a P2P-client/P2P-GO interface at
+    that point is left over from an earlier interrupted session. The old check
+    returned ok as soon as any P2P-device interface was present, which hid the
+    leftover inside the raw iw dev output.
+    """
+
+    IW_DEV_LEFTOVER_CLIENT = "\n".join([
+        "phy#0",
+        "\tInterface wlo1",
+        "\t\tifindex 3",
+        "\t\twdev 0x1",
+        "\t\taddr aa:bb:cc:dd:ee:ff",
+        "\t\ttype managed",
+        "\tInterface p2p-dev-wlo1",
+        "\t\tifindex 11",
+        "\t\twdev 0x2",
+        "\t\ttype P2P-device",
+        "\tInterface p2p-wlo1-7",
+        "\t\tifindex 12",
+        "\t\twdev 0x3",
+        "\t\taddr aa:bb:cc:dd:ee:00",
+        "\t\ttype P2P-client",
+    ])
+
+    IW_DEV_CLEAN = "\n".join([
+        "phy#0",
+        "\tInterface wlo1",
+        "\t\tifindex 3",
+        "\t\ttype managed",
+        "\tInterface p2p-dev-wlo1",
+        "\t\tifindex 11",
+        "\t\ttype P2P-device",
+    ])
+
+    def _run_iw(self, output, returncode=0):
+        with (
+            mock.patch("diagnostics._find_binary", return_value="/usr/sbin/iw"),
+            mock.patch(
+                "diagnostics._run",
+                return_value=_completed(output, returncode=returncode),
+            ),
+        ):
+            return diagnostics._iw_p2p_check()
+
+    def test_leftover_group_interface_is_warned_not_ok(self):
+        check = self._run_iw(self.IW_DEV_LEFTOVER_CLIENT)
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        # Names the interface and gives the removal command.
+        self.assertIn("p2p-wlo1-7", check.message)
+        self.assertIn("sudo iw dev p2p-wlo1-7 del", check.detail)
+
+    def test_p2p_go_group_interface_is_also_warned(self):
+        output = self.IW_DEV_CLEAN + "\n" + "\n".join([
+            "\tInterface p2p-wlo1-9",
+            "\t\tifindex 13",
+            "\t\ttype P2P-GO",
+        ])
+        check = self._run_iw(output)
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("p2p-wlo1-9", check.message)
+
+    def test_clean_adapter_with_only_p2p_device_is_ok(self):
+        check = self._run_iw(self.IW_DEV_CLEAN)
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+        self.assertIn("P2P-device", check.message)
+
+    def test_group_detection_does_not_use_the_managed_interface(self):
+        # The managed interface name must never be reported as a leftover group.
+        from diagnostics import _iw_p2p_group_interfaces
+
+        self.assertEqual(
+            _iw_p2p_group_interfaces(self.IW_DEV_LEFTOVER_CLIENT),
+            ["p2p-wlo1-7"],
+        )
