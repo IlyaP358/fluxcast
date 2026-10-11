@@ -28,3 +28,7 @@ tests:
 documentation:
   - changed-files:
       - any-glob-to-any-file: ['**/*.md', 'documentation/**']
+diagnostics:
+  - changed-files:
+      - any-glob-to-any-file: 'src/diagnostics.py'
+
