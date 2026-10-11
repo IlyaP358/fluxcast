@@ -346,16 +346,34 @@ class AspectRatioTest(unittest.TestCase):
             caps = next(a for a in cmd[index:] if a.startswith("video/x-raw") and "width=" in a)
             self.assertIn("pixel-aspect-ratio=1/1", caps)
 
+    def test_portal_gst_pipeline_letterboxes_a_2880x1920_screen(self):
+        """pipewiresrc can renegotiate its size, so a lone videoscale to the
+        16:9 mode makes the compositor squeeze a 3:2 screen into it. The
+        portal chain must pin the fitted size, then pad it into the mode."""
+        portal = next(c for c in _gst_commands(size=(2880, 1920))
+                      if "pipewiresrc" in c and "mpegtsmux" in c)
+        fitted = portal.index("video/x-raw,width=1080,height=720,pixel-aspect-ratio=1/1")
+        self.assertEqual(portal[fitted + 2:fitted + 5], ["videoscale", "add-borders=true", "n-threads=0"])
+        self.assertTrue(portal[fitted + 6].startswith("video/x-raw,width=1280,height=720,"))
 
-def _gst_commands():
+    def test_portal_gst_pipeline_skips_padding_for_a_matching_ratio(self):
+        portal = next(c for c in _gst_commands(size=(1920, 1080))
+                      if "pipewiresrc" in c and "mpegtsmux" in c)
+        self.assertNotIn("add-borders=true", portal)
+        self.assertEqual(portal.count("videoscale"), 1)
+
+
+def _gst_commands(size=(1080, 1920)):
     """Generated gst argv for every WFD pipeline that scales."""
     class Mon:
-        name, width, height, x, y, display = "eDP-1", 1080, 1920, 0, 0, ":0"
+        name, width, height, x, y, display = "eDP-1", size[0], size[1], 0, 0, ":0"
 
     class Sess:
         session_handle, pw_node_id, pw_fd, restore_token = "/h", 7, 42, None
-        source_type, position, size = 1, (0, 0), (1080, 1920)
+        source_type, position = 1, (0, 0)
         stream_label, runtime, bus = "m", None, None
+
+    Sess.size = size
 
     captured = []
 
