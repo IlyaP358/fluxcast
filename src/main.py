@@ -33,7 +33,9 @@ DLNA / Cast Options:
 
 Wi-Fi Display (Miracast) Options:
     --wfd-scan               Run active Wi-Fi Direct discovery and exit
-    --wfd-peer PEER          Peer selector: index, MAC, or name
+    --wfd-peer PEER          Peer selector: index, MAC, or name (also picks the MICE sink)
+    --wfd-mice [HOST]        Cast over the LAN (Miracast over Infrastructure) to HOST;
+                             without HOST, find the sink on the LAN
     --wfd-dry-run            Print D-Bus call without activating connection
     --wfd-test-pattern       Stream generated test video instead of the desktop
     --wfd-ffmpeg-stats       Show ffmpeg progress statistics for WFD streams
@@ -152,6 +154,12 @@ def parse_args() -> argparse.Namespace:
                      help="Run active Wi-Fi Direct discovery and exit")
     wfd.add_argument("--wfd-peer", default=None, dest="wfd_peer",
                      help="WFD peer selector for --protocol wfd: index, MAC, or name")
+    wfd.add_argument("--wfd-mice", nargs="?", const="auto", default=None, dest="wfd_mice",
+                     metavar="HOST",
+                     help="For --protocol wfd, cast over the LAN to this sink IP or "
+                          "hostname using Miracast over Infrastructure (MS-MICE) "
+                          "instead of Wi-Fi Direct. Without HOST, find the sink via "
+                          "mDNS and pick it with --wfd-peer when there are several")
     wfd.add_argument("--wfd-dry-run", action="store_true", dest="wfd_dry_run",
                      help="Print WFD connection D-Bus call without activating it")
     wfd.add_argument("--wfd-test-pattern", action="store_true", dest="wfd_test_pattern",
