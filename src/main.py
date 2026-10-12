@@ -44,6 +44,7 @@ Wi-Fi Display (Miracast) Options:
     --wfd-encoder x264|va    H.264 encoder for the portal backend (default: x264)
     --wfd-rate-control vbr|cbr|qvbr
                              Rate control for --wfd-encoder va (default: qvbr)
+    --wfd-r2                 Try WFD R2 (wfd2_video_formats) for a better mode, e.g. 1080p60
     --wfd-latency-log PATH   Write latency/session events to JSONL log file
     --wfd-no-audio           Stream video only
     --wfd-aosp-pmt-pid       MPEG-TS tables as Android sinks expect them; for a sink
@@ -177,6 +178,11 @@ def parse_args() -> argparse.Namespace:
                           "constant quality up to --bitrate; keeps keyframes small), vbr "
                           "(sends only what the picture needs, up to --bitrate) or cbr "
                           "(always sends the full --bitrate)")
+    wfd.add_argument("--wfd-r2", action="store_true", dest="wfd_r2",
+                     help="For --protocol wfd, also ask the sink for WFD R2 formats and "
+                          "negotiate H.264 through wfd2_video_formats when that unlocks a "
+                          "better mode (such as 1080p60 on LG C2); otherwise stay on R1. "
+                          "Off by default")
     wfd.add_argument("--wfd-latency-log", nargs="?", const="/tmp/fluxcast-wfd-latency.jsonl",
                      default=None, dest="wfd_latency_log",
                      help="For --protocol wfd, JSONL file path for latency/session logging "

@@ -13,8 +13,9 @@ from ..encoding import _parse_resolution
 from ..latency import _append_latency_log
 from ..media.pipeline import WFDMediaPipeline
 from ..modes import (
-    _choose_cea_mode, _encoder_h264_profile, _parse_sink_video_format,
-    _selected_video_format,
+    _choose_cea_mode, _encoder_h264_profile, _parse_sink_r2_video_formats,
+    _parse_sink_video_format, _selected_r2_video_format, _selected_video_format,
+    _use_r2_format,
 )
 from ..net import _netdev_tx_bytes, _safe_source_port
 from .message import (
@@ -78,6 +79,8 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         self.sink_rtcp_port: int = 0
         self.source_rtp_port = self.media_config.source_port
         self.sink_video_format: Optional[WFDVideoFormat] = None
+        self.sink_r2 = False
+        self.m3_r2 = self.media_config.r2
         self.negotiated_no_audio = False
         self.m3_sent = False
         self.media: Optional[WFDMediaPipeline] = None
@@ -137,6 +140,8 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         return _choose_cea_mode(self.media_config, self.sink_video_format)
 
     def _video_format(self) -> str:
+        if self.sink_r2:
+            return _selected_r2_video_format(self.media_config, self.sink_video_format)
         return _selected_video_format(self.media_config, self.sink_video_format)
 
     def _audio_codecs(self) -> str:
@@ -191,7 +196,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         print(f"[FluxCast WFD RTSP] -> {name}: {method} (CSeq {cseq})")
         if body:
             for line in body.splitlines():
-                if line.startswith("wfd_"):
+                if line.startswith("wfd"):
                     print(f"[FluxCast WFD RTSP]   {line}")
 
     def _send_response(
@@ -240,6 +245,8 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         )
         if self.media_config.uibc:
             body += "wfd_uibc_capability\r\n"
+        if self.m3_r2:
+            body += "wfd2_video_formats\r\nwfd2_audio_codecs\r\n"
         self._send_request(
             "M3_GET_PARAMETER",
             "GET_PARAMETER",
@@ -251,10 +258,12 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         if not self.sink_rtp_port:
             raise WFDNotReady("TV did not provide a valid RTP port in M3.")
         sink_rtcp_port = self.sink_rtcp_port if self.sink_rtcp_port > 0 else 0
+        # An R2 source sends only the wfd2_ format parameters in M4 (WFD v2.1, 6.1.21/22).
+        prefix = "wfd2" if self.sink_r2 else "wfd"
         body = (
             "wfd_content_protection: none\r\n"
-            f"wfd_video_formats: {self._video_format()}\r\n"
-            f"wfd_audio_codecs: {self._audio_codecs()}\r\n"
+            f"{prefix}_video_formats: {self._video_format()}\r\n"
+            f"{prefix}_audio_codecs: {self._audio_codecs()}\r\n"
             f"wfd_presentation_URL: {self._rtsp_presentation_uri()}/streamid=0 none\r\n"
             "wfd_client_rtp_ports: RTP/AVP/UDP;unicast "
             f"{self.sink_rtp_port} {sink_rtcp_port} mode=play\r\n"
@@ -294,6 +303,15 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 )
                 self._keepalive_active = False
                 return
+            if name == "M3_GET_PARAMETER" and self.m3_r2:
+                print(
+                    f"[FluxCast WFD RTSP] Sink rejected M3 with WFD R2 parameters "
+                    f"({msg.status}); retrying with R1 only."
+                )
+                self.m3_r2 = False
+                self.m3_sent = False
+                self._send_m3_get_parameters()
+                return
             raise WFDNotReady(f"RTSP {name} failed: {msg.start}")
 
         print(f"[FluxCast WFD RTSP] <- response for {name}: {msg.status}")
@@ -310,9 +328,20 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 self.sink_rtp_port,
                 self.sink_rtcp_port,
             )
-            self.sink_video_format = _parse_sink_video_format(
-                params.get("wfd_video_formats", "")
-            )
+            r1_format = _parse_sink_video_format(params.get("wfd_video_formats", ""))
+            r2_format = (_parse_sink_r2_video_formats(params.get("wfd2_video_formats", ""))
+                         if self.m3_r2 else None)
+            if _use_r2_format(self.media_config, r1_format, r2_format):
+                self.sink_r2 = True
+                self.sink_video_format = r2_format
+                print("[FluxCast WFD RTSP] Sink answered WFD R2 with a better mode; "
+                      "negotiating H.264 through wfd2_video_formats.")
+            else:
+                self.sink_video_format = r1_format
+                if r2_format is not None:
+                    print("[FluxCast WFD RTSP] Sink answered WFD R2, but R1 gives the same mode; using R1.")
+                elif self.m3_r2:
+                    print("[FluxCast WFD RTSP] Sink did not answer wfd2_video_formats; using R1.")
             if self.media_config.uibc:
                 self.sink_supports_uibc = _sink_advertises_uibc(params)
                 if not self.sink_supports_uibc:
@@ -320,7 +349,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                         "[FluxCast WFD RTSP] TV did not advertise UIBC support; "
                         "input back-channel stays disabled for this session."
                     )
-            audio = params.get("wfd_audio_codecs", "")
+            audio = (params.get("wfd2_audio_codecs", "") if self.sink_r2 else "") or params.get("wfd_audio_codecs", "")
             _is_microsoft = "microsoft" in self.media_config.peer_name.lower()
             if (
                 audio
@@ -483,7 +512,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 )
             print(
                 f"[FluxCast WFD RTSP] Starting media as {mode.name} "
-                f"(H.264 {effective_config.h264_profile}); "
+                f"(H.264 {effective_config.h264_profile}{', WFD R2' if self.sink_r2 else ''}); "
                 f"RTP source port {self.source_rtp_port}"
             )
             if effective_config.aosp_pmt_pid:
@@ -685,5 +714,5 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                 print(f"[FluxCast WFD RTSP]   {line}")
         if msg.body:
             for line in msg.body.splitlines():
-                if line.startswith("wfd_"):
+                if line.startswith("wfd"):
                     print(f"[FluxCast WFD RTSP]   {line}")
