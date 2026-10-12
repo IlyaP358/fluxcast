@@ -79,6 +79,11 @@ WFD_RTSP_PORT = 7236
 # in a way that is hard to diagnose, so --doctor surfaces the clash.
 WFD_P2P_SUBNET = "192.168.49.0/24"
 
+# Prefix of the `iw P2P` warning raised for stale Wi-Fi Direct group netdevs.
+# run_diagnostics matches on it so such a row still counts as proof the kernel
+# exposes Wi-Fi Direct (see _p2p_row_is_evidence).
+_LEFTOVER_GROUP_MSG = "stale Wi-Fi Direct group"
+
 
 @dataclass
 class Check:
@@ -525,24 +530,27 @@ def _iw_phy_p2p_facts() -> tuple[Optional[bool], Optional[bool]]:
     return (p2p_capable, concurrent)
 
 
-def _iw_p2p_group_interfaces(output: str) -> list[str]:
-    """Names of P2P group netdevs (P2P-client/P2P-GO) in `iw dev` output.
+def _iw_p2p_group_interfaces(output: str) -> list[tuple[str, str]]:
+    """(name, kind) of every P2P group netdev in `iw dev` output.
 
     The adapter's own control interface shows up as `type P2P-device` once the
     driver supports P2P, and is expected whenever hardware is ready. A
     `P2P-client` or `P2P-GO` netdev only exists while a Wi-Fi Direct group is
     up, so one present while --doctor runs (before a session starts) is left
-    over from an earlier interrupted session (#166).
+    over from an earlier interrupted session (#166). Every such interface is
+    returned with its kind so the advice can name each one and describe it by
+    the role it played (group owner vs. client).
     """
-    groups: list[str] = []
+    groups: list[tuple[str, str]] = []
     current: Optional[str] = None
     for line in output.splitlines():
         interface = re.match(r"\s*Interface\s+(\S+)", line)
         if interface:
             current = interface.group(1)
             continue
-        if current and re.match(r"\s*type\s+(P2P-client|P2P-GO)\b", line):
-            groups.append(current)
+        kind = re.match(r"\s*type\s+(P2P-client|P2P-GO)\b", line)
+        if current and kind:
+            groups.append((current, kind.group(1)))
     return groups
 
 
@@ -560,18 +568,36 @@ def _iw_p2p_check() -> Check:
     if result.returncode != 0:
         return Check("iw P2P", STATUS_WARN, "iw dev failed", result.stderr.strip())
 
-    # A leftover group interface means the adapter is still (or looks) attached
-    # to a group from a previous session; report it before the P2P-device check
-    # below, which would otherwise call the whole row ok.
+    # Any leftover group interface means the adapter is still (or looks)
+    # attached to a group from a previous session; report it before the
+    # P2P-device check below, which would otherwise call the whole row ok.
     leftover = _iw_p2p_group_interfaces(output)
     if leftover:
-        names = ", ".join(leftover)
+        names = [name for name, _ in leftover]
+        kinds = {kind for _, kind in leftover}
+        # #127's leftovers are all group owners; describe the netdevs by the
+        # role they played so the advice stays accurate for a stale group owner
+        # or a stale client alike.
+        if kinds == {"P2P-GO"}:
+            role = "group-owner"
+        elif kinds == {"P2P-client"}:
+            role = "client"
+        else:
+            role = "group-owner/client"
+        plural = "s" if len(names) > 1 else ""
+        listing = ", ".join(names)
+        # One explicit removal command per interface: removing only the first
+        # one leaves the rest behind and the next --doctor reports them again.
+        removals = "\n".join(f"  sudo iw dev {name} del" for name in names)
         return Check(
             "iw P2P", STATUS_WARN,
-            f"leftover Wi-Fi Direct group interface present: {names}",
-            f"{names} looks left over from a previous session and can leave the "
-            f"adapter stuck as a client of a group that no longer exists; "
-            f"remove it with `sudo iw dev {leftover[0]} del` before starting a new session",
+            f"{_LEFTOVER_GROUP_MSG}-{role} interface{plural} left over from a "
+            f"previous session: {listing}",
+            f"{listing} {'are' if plural else 'is'} a stale {role} "
+            f"interface{plural} left over from a previous session, which keeps "
+            f"the adapter attached to a Wi-Fi Direct group that no longer "
+            f"exists. Remove {'them' if plural else 'it'} before starting a new "
+            f"session:\n{removals}\n\nRaw `iw dev` output:\n{output}",
         )
 
     if re.search(r"\btype\s+P2P-device\b", output):
@@ -956,6 +982,18 @@ def _python_check() -> Check:
     )
 
 
+def _p2p_row_is_evidence(check: Check) -> bool:
+    """Whether the `iw P2P` row proves the kernel exposes Wi-Fi Direct.
+
+    An ok row obviously does. A warn raised for stale group interfaces does
+    too: P2P-client/P2P-GO netdevs only exist on a P2P-capable kernel, so a
+    leftover one still shows Wi-Fi Direct is supported (#166). Other warnings
+    (iw missing, no P2P-device shown, unsupported driver) are not evidence, and
+    leaving them out keeps the backend refusal behaviour unchanged.
+    """
+    return check.status == STATUS_OK or check.message.startswith(_LEFTOVER_GROUP_MSG)
+
+
 def run_diagnostics(skip_firewall: bool = False) -> DiagnosticReport:
     firewall_check = (
         Check("firewall", STATUS_SKIP, "disabled by --wfd-no-firewall")
@@ -997,7 +1035,7 @@ def run_diagnostics(skip_firewall: bool = False) -> DiagnosticReport:
     by_name = {check.name: check for check in checks}
     network_hw_ok = (
         by_name.get("NetworkManager", Check("", STATUS_SKIP, "")).status == STATUS_OK
-        or by_name.get("iw P2P", Check("", STATUS_SKIP, "")).status == STATUS_OK
+        or _p2p_row_is_evidence(by_name.get("iw P2P", Check("", STATUS_SKIP, "")))
     )
     media_ok = (
         by_name.get("ffmpeg encoders", Check("", STATUS_SKIP, "")).status == STATUS_OK

@@ -536,6 +536,26 @@ class IwP2pCheckTest(unittest.TestCase):
         "\t\ttype P2P-device",
     ])
 
+    # Three stale group-owner interfaces, mirroring issue #127.
+    IW_DEV_LEFTOVER_GO_MULTI = "\n".join([
+        "phy#0",
+        "\tInterface wlan0",
+        "\t\tifindex 3",
+        "\t\ttype managed",
+        "\tInterface p2p-dev-wlan0",
+        "\t\tifindex 11",
+        "\t\ttype P2P-device",
+        "\tInterface p2p-wlan0-1",
+        "\t\tifindex 12",
+        "\t\ttype P2P-GO",
+        "\tInterface p2p-wlan0-15",
+        "\t\tifindex 16",
+        "\t\ttype P2P-GO",
+        "\tInterface p2p-wlan0-26",
+        "\t\tifindex 27",
+        "\t\ttype P2P-GO",
+    ])
+
     def _run_iw(self, output, returncode=0):
         with (
             mock.patch("diagnostics._find_binary", return_value="/usr/sbin/iw"),
@@ -552,6 +572,10 @@ class IwP2pCheckTest(unittest.TestCase):
         # Names the interface and gives the removal command.
         self.assertIn("p2p-wlo1-7", check.message)
         self.assertIn("sudo iw dev p2p-wlo1-7 del", check.detail)
+        # The raw dump is kept on the warn branch too, appended after the
+        # advice (review feedback).
+        self.assertIn("type P2P-client", check.detail)
+        self.assertIn("Interface p2p-dev-wlo1", check.detail)
 
     def test_p2p_go_group_interface_is_also_warned(self):
         output = self.IW_DEV_CLEAN + "\n" + "\n".join([
@@ -562,6 +586,20 @@ class IwP2pCheckTest(unittest.TestCase):
         check = self._run_iw(output)
         self.assertEqual(check.status, diagnostics.STATUS_WARN)
         self.assertIn("p2p-wlo1-9", check.message)
+        # A stale group owner must not be described as a client of a group.
+        self.assertIn("group-owner", check.message)
+        self.assertNotIn("client of a group", check.detail)
+
+    def test_every_leftover_interface_gets_its_own_del_command(self):
+        check = self._run_iw(self.IW_DEV_LEFTOVER_GO_MULTI)
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        # All three are listed and each one gets a removal command, so the next
+        # --doctor run does not report the same leftovers again (#127).
+        for name in ("p2p-wlan0-1", "p2p-wlan0-15", "p2p-wlan0-26"):
+            self.assertIn(name, check.message)
+            self.assertIn(f"sudo iw dev {name} del", check.detail)
+        # Plural wording for multiple group-owner interfaces.
+        self.assertIn("group-owner interfaces", check.message)
 
     def test_clean_adapter_with_only_p2p_device_is_ok(self):
         check = self._run_iw(self.IW_DEV_CLEAN)
@@ -574,5 +612,47 @@ class IwP2pCheckTest(unittest.TestCase):
 
         self.assertEqual(
             _iw_p2p_group_interfaces(self.IW_DEV_LEFTOVER_CLIENT),
-            ["p2p-wlo1-7"],
+            [("p2p-wlo1-7", "P2P-client")],
         )
+
+    def test_group_detection_reports_every_interface_and_kind(self):
+        from diagnostics import _iw_p2p_group_interfaces
+
+        self.assertEqual(
+            _iw_p2p_group_interfaces(self.IW_DEV_LEFTOVER_GO_MULTI),
+            [
+                ("p2p-wlan0-1", "P2P-GO"),
+                ("p2p-wlan0-15", "P2P-GO"),
+                ("p2p-wlan0-26", "P2P-GO"),
+            ],
+        )
+
+
+class P2pRowIsEvidenceTest(unittest.TestCase):
+    """A leftover-group warn must still count as Wi-Fi Direct hardware (#166).
+
+    network_hw_ok accepts NetworkManager ok or `iw P2P` ok. Once `iw P2P` can
+    be a warn, a machine that only shows P2P via a stale group netdev would
+    otherwise lose both paths and set wfd_candidate=False, refusing to start.
+    """
+
+    def test_ok_row_is_evidence(self):
+        check = diagnostics.Check("iw P2P", diagnostics.STATUS_OK, "kernel exposes a P2P-device interface", "")
+        self.assertTrue(diagnostics._p2p_row_is_evidence(check))
+
+    def test_leftover_group_warn_is_evidence(self):
+        check = diagnostics.Check(
+            "iw P2P", diagnostics.STATUS_WARN,
+            "stale Wi-Fi Direct group-owner interfaces left over from a previous session: p2p-wlan0-1",
+            "...",
+        )
+        self.assertTrue(diagnostics._p2p_row_is_evidence(check))
+
+    def test_other_warns_are_not_evidence(self):
+        for message in (
+            "iw was not found",
+            "Wi-Fi interfaces exist, but no P2P-device was shown",
+            "this Wi-Fi adapter's driver does not support Wi-Fi Direct (P2P)",
+        ):
+            check = diagnostics.Check("iw P2P", diagnostics.STATUS_WARN, message, "")
+            self.assertFalse(diagnostics._p2p_row_is_evidence(check), message)
