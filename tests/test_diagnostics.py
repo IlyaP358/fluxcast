@@ -15,6 +15,23 @@ def _completed(stdout="", returncode=0, stderr=""):
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+def _run_iw_p2p_check(output, returncode=0, *, session_running=False):
+    """Run _iw_p2p_check against canned `iw dev` output.
+
+    `_wfd_session_running` is pinned so the result never depends on whether a
+    real cast happens to hold the RTSP port on the machine running the tests.
+    """
+    with (
+        mock.patch("diagnostics._find_binary", return_value="/usr/sbin/iw"),
+        mock.patch(
+            "diagnostics._run",
+            return_value=_completed(output, returncode=returncode),
+        ),
+        mock.patch("diagnostics._wfd_session_running", return_value=session_running),
+    ):
+        return diagnostics._iw_p2p_check()
+
+
 class FirewallCheckTest(unittest.TestCase):
     def test_run_diagnostics_skips_firewall_probe_when_requested(self):
         with mock.patch("diagnostics._firewall_check") as firewall_check:
@@ -557,14 +574,7 @@ class IwP2pCheckTest(unittest.TestCase):
     ])
 
     def _run_iw(self, output, returncode=0):
-        with (
-            mock.patch("diagnostics._find_binary", return_value="/usr/sbin/iw"),
-            mock.patch(
-                "diagnostics._run",
-                return_value=_completed(output, returncode=returncode),
-            ),
-        ):
-            return diagnostics._iw_p2p_check()
+        return _run_iw_p2p_check(output, returncode)
 
     def test_leftover_group_interface_is_warned_not_ok(self):
         check = self._run_iw(self.IW_DEV_LEFTOVER_CLIENT)
@@ -589,6 +599,10 @@ class IwP2pCheckTest(unittest.TestCase):
         # A stale group owner must not be described as a client of a group.
         self.assertIn("group-owner", check.message)
         self.assertNotIn("client of a group", check.detail)
+        # `assertIn("group-owner", ...)` would also match a doubled
+        # `group-group-owner`, so pin the whole wording (#166 review feedback).
+        self.assertNotIn("group-group", check.message)
+        self.assertIn("stale Wi-Fi Direct group-owner interface left over from a", check.message)
 
     def test_every_leftover_interface_gets_its_own_del_command(self):
         check = self._run_iw(self.IW_DEV_LEFTOVER_GO_MULTI)
@@ -598,8 +612,26 @@ class IwP2pCheckTest(unittest.TestCase):
         for name in ("p2p-wlan0-1", "p2p-wlan0-15", "p2p-wlan0-26"):
             self.assertIn(name, check.message)
             self.assertIn(f"sudo iw dev {name} del", check.detail)
-        # Plural wording for multiple group-owner interfaces.
+        # Plural wording for multiple group-owner interfaces, with no doubled
+        # `group` and no stray article (#166 review feedback).
         self.assertIn("group-owner interfaces", check.message)
+        self.assertNotIn("group-group", check.message)
+        self.assertIn(
+            "stale Wi-Fi Direct group-owner interfaces left over from a "
+            "previous session: p2p-wlan0-1, p2p-wlan0-15, p2p-wlan0-26",
+            check.message,
+        )
+        self.assertNotIn("are a stale", check.detail)
+        self.assertIn("These are stale group-owner interfaces", check.detail)
+
+    def test_live_session_group_interface_is_not_stale(self):
+        # A cast that is running right now owns these group netdevs, so they are
+        # not leftovers and must not be reported stale or offered for deletion
+        # (#166 review feedback).
+        check = _run_iw_p2p_check(self.IW_DEV_LEFTOVER_GO_MULTI, session_running=True)
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+        self.assertNotIn("stale", check.message)
+        self.assertNotIn("del", check.detail)
 
     def test_clean_adapter_with_only_p2p_device_is_ok(self):
         check = self._run_iw(self.IW_DEV_CLEAN)
@@ -641,11 +673,11 @@ class P2pRowIsEvidenceTest(unittest.TestCase):
         self.assertTrue(diagnostics._p2p_row_is_evidence(check))
 
     def test_leftover_group_warn_is_evidence(self):
-        check = diagnostics.Check(
-            "iw P2P", diagnostics.STATUS_WARN,
-            "stale Wi-Fi Direct group-owner interfaces left over from a previous session: p2p-wlan0-1",
-            "...",
-        )
+        # Exercise the real message builder: a hand-built Check would keep
+        # passing even if _iw_p2p_check's message stopped matching the prefix,
+        # leaving every real row failing the predicate (#166 review feedback).
+        check = _run_iw_p2p_check(IwP2pCheckTest.IW_DEV_LEFTOVER_GO_MULTI)
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
         self.assertTrue(diagnostics._p2p_row_is_evidence(check))
 
     def test_other_warns_are_not_evidence(self):

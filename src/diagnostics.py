@@ -79,10 +79,10 @@ WFD_RTSP_PORT = 7236
 # in a way that is hard to diagnose, so --doctor surfaces the clash.
 WFD_P2P_SUBNET = "192.168.49.0/24"
 
-# Prefix of the `iw P2P` warning raised for stale Wi-Fi Direct group netdevs.
-# run_diagnostics matches on it so such a row still counts as proof the kernel
-# exposes Wi-Fi Direct (see _p2p_row_is_evidence).
-_LEFTOVER_GROUP_MSG = "stale Wi-Fi Direct group"
+# Prefix of the `iw P2P` warning raised for stale Wi-Fi Direct group
+# interfaces. run_diagnostics matches on it so such a row still counts as proof
+# the kernel exposes Wi-Fi Direct (see _p2p_row_is_evidence).
+_LEFTOVER_GROUP_MSG = "stale Wi-Fi Direct"
 
 
 @dataclass
@@ -554,6 +554,34 @@ def _iw_p2p_group_interfaces(output: str) -> list[tuple[str, str]]:
     return groups
 
 
+def _wfd_session_running(port: int = WFD_RTSP_PORT) -> bool:
+    """Whether a FluxCast WFD session is live right now.
+
+    A running session keeps its RTSP listener bound for the whole session, so a
+    listening socket on WFD_RTSP_PORT means the P2P group netdevs `iw dev`
+    shows belong to that live session rather than to an interrupted one (#166
+    review feedback). /proc/net/tcp{,6} is read directly: no `ss`/`lsof`
+    dependency and no connection attempt the RTSP server would log.
+    """
+    want = f"{port:04X}"
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                next(handle, None)  # skip the column header
+                for line in handle:
+                    fields = line.split()
+                    if len(fields) < 4:
+                        continue
+                    local_address, state = fields[1], fields[3]
+                    # state 0A is TCP_LISTEN; the last :group of the address is
+                    # the local port in uppercase hex.
+                    if state == "0A" and local_address.rsplit(":", 1)[-1] == want:
+                        return True
+        except OSError:
+            continue
+    return False
+
+
 def _iw_p2p_check() -> Check:
     iw = _find_binary("iw", IW_PATHS)
     if not iw:
@@ -570,9 +598,11 @@ def _iw_p2p_check() -> Check:
 
     # Any leftover group interface means the adapter is still (or looks)
     # attached to a group from a previous session; report it before the
-    # P2P-device check below, which would otherwise call the whole row ok.
+    # P2P-device check below, which would otherwise call the whole row ok. A
+    # live session shows the same netdevs, so they only count as stale when no
+    # cast is running (#166 review feedback).
     leftover = _iw_p2p_group_interfaces(output)
-    if leftover:
+    if leftover and not _wfd_session_running():
         names = [name for name, _ in leftover]
         kinds = {kind for _, kind in leftover}
         # #127's leftovers are all group owners; describe the netdevs by the
@@ -584,20 +614,24 @@ def _iw_p2p_check() -> Check:
             role = "client"
         else:
             role = "group-owner/client"
-        plural = "s" if len(names) > 1 else ""
+        plural = len(names) > 1
         listing = ", ".join(names)
-        # One explicit removal command per interface: removing only the first
-        # one leaves the rest behind and the next --doctor reports them again.
-        removals = "\n".join(f"  sudo iw dev {name} del" for name in names)
+        # print_report flattens newlines to " | ", so the advice has to be one
+        # line; the interface names already appear in the message, so they are
+        # not repeated here. One removal command per interface, semicolon-
+        # joined: removing only the first leaves the rest behind and the next
+        # --doctor reports them again. The raw dump below keeps its own lines
+        # and renders the same way the ok branch always has.
+        removals = "; ".join(f"sudo iw dev {name} del" for name in names)
         return Check(
             "iw P2P", STATUS_WARN,
-            f"{_LEFTOVER_GROUP_MSG}-{role} interface{plural} left over from a "
-            f"previous session: {listing}",
-            f"{listing} {'are' if plural else 'is'} a stale {role} "
-            f"interface{plural} left over from a previous session, which keeps "
-            f"the adapter attached to a Wi-Fi Direct group that no longer "
-            f"exists. Remove {'them' if plural else 'it'} before starting a new "
-            f"session:\n{removals}\n\nRaw `iw dev` output:\n{output}",
+            f"{_LEFTOVER_GROUP_MSG} {role} interface{'s' if plural else ''} "
+            f"left over from a previous session: {listing}",
+            f"{'These are stale' if plural else 'This is a stale'} {role} "
+            f"interface{'s' if plural else ''} left over from a previous "
+            f"session, which keeps the adapter attached to a Wi-Fi Direct group "
+            f"that no longer exists. Remove {'them' if plural else 'it'} before "
+            f"starting a new session: {removals}\n\nRaw `iw dev` output:\n{output}",
         )
 
     if re.search(r"\btype\s+P2P-device\b", output):
