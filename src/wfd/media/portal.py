@@ -305,6 +305,11 @@ class PortalMixin:
         # size first, then pad it into the mode as a separate step.
         fit_w, fit_h = _fit_inside(parsed_src[0], parsed_src[1], out_w, out_h)
         letterbox = (fit_w, fit_h) != (out_w, out_h)
+        # A window has no size in KWin's portal reply and changes it on every
+        # resize, so no fitted size can be pinned; it is letterboxed per frame.
+        follow_window = session.source_type == 2 and _gst_has_element("capssetter")
+        if follow_window:
+            letterbox = False
         selector_attempts = _pipewiresrc_selector_attempts(
             session.pw_node_id,
             stream_label=session.stream_label,
@@ -325,6 +330,12 @@ class PortalMixin:
                 pipewire_args.append("resend-last=true")
             if "min-force-user-latency" in props:
                 pipewire_args.append("min-force-user-latency=0")
+            if follow_window and "provide-clock" in props:
+                # Resizing a window renegotiates the stream. pipewiresrc's clock
+                # stops while KWin does that, and the source waits on it for
+                # seconds before passing on a frame. pulsesrc (or the system
+                # clock) keeps running and keeps audio and video in step.
+                pipewire_args.append("provide-clock=false")
 
             is_lg = "LG" in self.config.peer_name.upper()
 
@@ -410,8 +421,12 @@ class PortalMixin:
                 "!", "queue", "max-size-buffers=64", "max-size-time=1000000000", "leaky=downstream",
                 "!", "videorate", "skip-to-first=true",
                 "!", f"video/x-raw,framerate={self.config.fps}/1",
+                # KWin labels window frames pixel-aspect-ratio=1/2147483647,
+                # which would make add-borders squeeze them; its pixels are square.
+                *(["!", "capssetter", "caps=video/x-raw,pixel-aspect-ratio=1/1"]
+                  if follow_window else []),
                 "!", "videoconvert", "n-threads=0",
-                "!", "videoscale", "n-threads=0",
+                "!", "videoscale", *(["add-borders=true"] if follow_window else []), "n-threads=0",
                 *(["!", f"video/x-raw,width={fit_w},height={fit_h},pixel-aspect-ratio=1/1",
                    "!", "videoscale", "add-borders=true", "n-threads=0"] if letterbox else []),
                 "!", video_caps,
@@ -493,7 +508,10 @@ class PortalMixin:
             print(f"[FluxCast WFD Media] Portal source id       : {session.stream_label}")
         if not self.config.no_audio:
             print(f"[FluxCast WFD Media] Capturing audio       : {audio_monitor}")
-        if letterbox:
+        if follow_window:
+            print(f"[FluxCast WFD Media] Scaling output       : window letterboxed to "
+                  f"{out_w}x{out_h}, following resizes")
+        elif letterbox:
             print(f"[FluxCast WFD Media] Scaling output       : {fit_w}x{fit_h} "
                   f"letterboxed to {out_w}x{out_h}")
         elif out_dims != parsed_src:

@@ -362,18 +362,53 @@ class AspectRatioTest(unittest.TestCase):
         self.assertNotIn("add-borders=true", portal)
         self.assertEqual(portal.count("videoscale"), 1)
 
+    def _window_chain(self, pw_props=frozenset({"provide-clock"})):
+        # KWin's portal reply has no size for a window.
+        return next(c for c in _gst_commands(size=None, source_type=2, pw_props=pw_props)
+                    if "pipewiresrc" in c and "mpegtsmux" in c)
 
-def _gst_commands(size=(1080, 1920)):
+    def test_portal_window_is_letterboxed_frame_by_frame(self):
+        """A window has no size to pin and changes it on every resize. KWin
+        tags its frames pixel-aspect-ratio=1/2147483647, so the PAR is reset
+        first and one add-borders videoscale fits each frame into the mode."""
+        portal = self._window_chain()
+        setter = portal.index("capssetter")
+        self.assertEqual(portal[setter + 1], "caps=video/x-raw,pixel-aspect-ratio=1/1")
+        scale = portal.index("videoscale")
+        self.assertGreater(scale, setter)
+        self.assertEqual(portal[scale + 1], "add-borders=true")
+        self.assertEqual(portal.count("videoscale"), 1)
+        self.assertTrue(portal[scale + 4].startswith("video/x-raw,width=1280,height=720,"))
+        self.assertFalse(any(a.startswith("video/x-raw,width=") for a in portal[:scale]),
+                         "a pinned size would stretch the window after a resize")
+
+    def test_portal_window_does_not_clock_the_pipeline(self):
+        """pipewiresrc's clock stops while a resize renegotiates the stream
+        and the source then stalls for seconds."""
+        self.assertIn("provide-clock=false", self._window_chain())
+        self.assertNotIn("provide-clock=false", self._window_chain(pw_props=frozenset()))
+
+    def test_portal_monitor_keeps_its_pinned_letterbox(self):
+        portal = next(c for c in _gst_commands(size=(2880, 1920))
+                      if "pipewiresrc" in c and "mpegtsmux" in c)
+        self.assertNotIn("capssetter", portal)
+        self.assertNotIn("provide-clock=false", portal)
+
+
+def _gst_commands(size=(1080, 1920), source_type=1, pw_props=frozenset()):
     """Generated gst argv for every WFD pipeline that scales."""
     class Mon:
-        name, width, height, x, y, display = "eDP-1", size[0], size[1], 0, 0, ":0"
+        name, width, height, x, y, display = "eDP-1", 1080, 1920, 0, 0, ":0"
 
     class Sess:
         session_handle, pw_node_id, pw_fd, restore_token = "/h", 7, 42, None
-        source_type, position = 1, (0, 0)
+        position = (0, 0)
         stream_label, runtime, bus = "m", None, None
 
+    if size is not None:
+        Mon.width, Mon.height = size
     Sess.size = size
+    Sess.source_type = source_type
 
     captured = []
 
@@ -411,7 +446,7 @@ def _gst_commands(size=(1080, 1920)):
         mock.patch.object(wfd.shutil, "which", side_effect=lambda n: "/usr/bin/" + n),
         patch_all("_gst_has_element", return_value=True),
         patch_all("_detect_audio_monitor", return_value="m"),
-        patch_all("_gst_pipewiresrc_properties", return_value=set()),
+        patch_all("_gst_pipewiresrc_properties", return_value=set(pw_props)),
         patch_all("_gst_x264enc_properties", return_value=set()),
         patch_all("_pipewiresrc_selector_attempts",
                           return_value=[("path", ["path=7"])]),
