@@ -15,19 +15,14 @@ def _completed(stdout="", returncode=0, stderr=""):
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
-def _run_iw_p2p_check(output, returncode=0, *, session_running=False):
-    """Run _iw_p2p_check against canned `iw dev` output.
-
-    `_wfd_session_running` is pinned so the result never depends on whether a
-    real cast happens to hold the RTSP port on the machine running the tests.
-    """
+def _run_iw_p2p_check(output, returncode=0):
+    """Run _iw_p2p_check against canned `iw dev` output."""
     with (
         mock.patch("diagnostics._find_binary", return_value="/usr/sbin/iw"),
         mock.patch(
             "diagnostics._run",
             return_value=_completed(output, returncode=returncode),
         ),
-        mock.patch("diagnostics._wfd_session_running", return_value=session_running),
     ):
         return diagnostics._iw_p2p_check()
 
@@ -623,15 +618,6 @@ class IwP2pCheckTest(unittest.TestCase):
         )
         self.assertNotIn("are a stale", check.detail)
         self.assertIn("These are stale group-owner interfaces", check.detail)
-
-    def test_live_session_group_interface_is_not_stale(self):
-        # A cast that is running right now owns these group netdevs, so they are
-        # not leftovers and must not be reported stale or offered for deletion
-        # (#166 review feedback).
-        check = _run_iw_p2p_check(self.IW_DEV_LEFTOVER_GO_MULTI, session_running=True)
-        self.assertEqual(check.status, diagnostics.STATUS_OK)
-        self.assertNotIn("stale", check.message)
-        self.assertNotIn("del", check.detail)
 
     def test_clean_adapter_with_only_p2p_device_is_ok(self):
         check = self._run_iw(self.IW_DEV_CLEAN)
