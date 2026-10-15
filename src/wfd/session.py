@@ -1,14 +1,19 @@
+import socket
 import threading
 import time
+from typing import Optional
 
 from diagnostics import print_report, run_diagnostics
 
 from .config import WFDMediaConfig, WFDNotReady
-from .constants import WFD_RTSP_PORT, WFD_UIBC_PORT
+from .constants import WFD_RTSP_PORT, WFD_UIBC_PORT, _DEVICE_NAME
 from .dump import report_ts_dump
 from .env import _is_hyprland_session, _is_wayland_session
 from .firewall import (
     _close_wfd_firewall_port, _open_wfd_firewall_port, _warn_if_ufw_may_block,
+)
+from .mice import (
+    MICE_AUTO, MICE_PORT, discover_sink, send_source_ready, send_stop_projection, sink_name,
 )
 from .p2p.device import _set_p2p_device_name, _set_p2p_go_intent
 from .p2p.nm import (
@@ -35,16 +40,93 @@ def _cleanup_step(label: str, action) -> None:
     except Exception as exc:
         print(f"[FluxCast WFD] Cleanup step '{label}' failed: {exc}")
 
+
+def _media_config(args, monitor, peer_name: str) -> WFDMediaConfig:
+    return WFDMediaConfig(
+        monitor=monitor,
+        fps=args.fps,
+        bitrate=args.bitrate,
+        bitrate_explicit=getattr(args, "bitrate_explicit", False),
+        output_resolution=args.output_res,
+        audio_device=getattr(args, "wfd_audio_device", None),
+        no_audio=getattr(args, "wfd_no_audio", False),
+        test_pattern=getattr(args, "wfd_test_pattern", False),
+        ffmpeg_stats=getattr(args, "wfd_ffmpeg_stats", False),
+        source_port=getattr(args, "wfd_rtp_source_port", 19002),
+        media_pipeline=getattr(args, "wfd_media_pipeline", "auto"),
+        latency_log_path=getattr(args, "wfd_latency_log", None),
+        capture_backend=getattr(args, "wfd_capture_backend", "auto"),
+        encoder=getattr(args, "wfd_encoder", "x264"),
+        rate_control=getattr(args, "wfd_rate_control", "qvbr"),
+        r2=getattr(args, "wfd_r2", True),
+        peer_name=peer_name,
+        uibc=getattr(args, "wfd_uibc", False),
+        aosp_pmt_pid=getattr(args, "wfd_aosp_pmt_pid", False),
+        dump_ts_path=getattr(args, "wfd_dump_ts", None),
+    )
+
+
+def _start_mice_session(args, monitor, mice_host: str, name: Optional[str] = None) -> None:
+    """Run a WFD session over the LAN (MS-MICE) instead of Wi-Fi Direct."""
+    try:
+        host = socket.gethostbyname(mice_host)
+    except OSError as exc:
+        raise WFDNotReady(f"Cannot resolve MICE sink '{mice_host}': {exc}") from exc
+    name = name or sink_name(host)
+    media_config = _media_config(args, monitor, name)
+    rtsp_port = getattr(args, "wfd_rtsp_port", WFD_RTSP_PORT)
+    rtsp = WFDRTSPServer(
+        media_config=media_config,
+        peer_address="",
+        port=rtsp_port,
+        mice_host=host,
+    )
+    control = None
+    try:
+        rtsp.start()
+        print(f"[FluxCast WFD] MICE: asking {name} ({host}) to connect back to RTSP port {rtsp_port}...")
+        try:
+            control = send_source_ready(host, rtsp_port, _DEVICE_NAME)
+        except OSError as exc:
+            raise WFDNotReady(
+                f"Cannot reach {host}:{MICE_PORT} ({exc}); the sink may not "
+                "support Miracast over Infrastructure."
+            ) from exc
+        print(
+            f"[FluxCast WFD] MICE: the TV connects over the LAN, so TCP {rtsp_port} "
+            "must be allowed by the firewall of this network's zone."
+        )
+        print("[FluxCast WFD] Waiting for TV RTSP/WFD session. Press Ctrl+C to stop.")
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[FluxCast WFD] Stopping WFD session...")
+    finally:
+        _cleanup_step("media shutdown", rtsp.stop_all_media)
+        _cleanup_step("TS dump report",
+                      lambda: report_ts_dump(media_config.dump_ts_path))
+        if control is not None:
+            _cleanup_step("MICE stop projection",
+                          lambda: send_stop_projection(control, _DEVICE_NAME))
+        _cleanup_step("RTSP server shutdown", rtsp.stop)
+
+
 def start_experimental_backend(args) -> None:
     report = run_diagnostics(skip_firewall=getattr(args, "wfd_no_firewall", False))
     print_report(report)
     print()
 
-    if not report.wfd_candidate:
+    mice_host = getattr(args, "wfd_mice", None)
+    if not report.wfd_candidate and not mice_host:
         raise WFDNotReady(
             "Miracast/WFD is not ready on this machine yet. "
             "Fix the warn/fail rows above, then run --wfd-scan."
         )
+
+    mice_name = None
+    if mice_host == MICE_AUTO:
+        sink = discover_sink(getattr(args, "wfd_peer", None))
+        mice_host, mice_name = sink.address, sink.name
 
     monitor = None
     if not getattr(args, "wfd_test_pattern", False) and not getattr(args, "wfd_dry_run", False):
@@ -71,6 +153,10 @@ def start_experimental_backend(args) -> None:
             else:
                 from capture import prompt_monitor
                 monitor = prompt_monitor()
+
+    if mice_host:
+        _start_mice_session(args, monitor, mice_host, mice_name)
+        return
 
     backend_probe_path = _nm_p2p_device_path(args.wfd_interface)
     if not backend_probe_path:
@@ -121,25 +207,7 @@ def start_experimental_backend(args) -> None:
         else:
             print("[FluxCast WFD] Test pattern smoke mode includes AAC audio.")
 
-    media_config = WFDMediaConfig(
-        monitor=monitor,
-        fps=args.fps,
-        bitrate=args.bitrate,
-        bitrate_explicit=getattr(args, "bitrate_explicit", False),
-        output_resolution=args.output_res,
-        audio_device=getattr(args, "wfd_audio_device", None),
-        no_audio=no_audio,
-        test_pattern=getattr(args, "wfd_test_pattern", False),
-        ffmpeg_stats=getattr(args, "wfd_ffmpeg_stats", False),
-        source_port=getattr(args, "wfd_rtp_source_port", 19002),
-        media_pipeline=getattr(args, "wfd_media_pipeline", "auto"),
-        latency_log_path=getattr(args, "wfd_latency_log", None),
-        capture_backend=getattr(args, "wfd_capture_backend", "auto"),
-        peer_name=peer.name,
-        uibc=getattr(args, "wfd_uibc", False),
-        aosp_pmt_pid=getattr(args, "wfd_aosp_pmt_pid", False),
-        dump_ts_path=getattr(args, "wfd_dump_ts", None),
-    )
+    media_config = _media_config(args, monitor, peer.name)
     if media_config.dump_ts_path:
         print(f"[FluxCast WFD] Dumping transmitted MPEG-TS to: {media_config.dump_ts_path}")
     if media_config.latency_log_path:

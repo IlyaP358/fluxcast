@@ -33,7 +33,9 @@ DLNA / Cast Options:
 
 Wi-Fi Display (Miracast) Options:
     --wfd-scan               Run active Wi-Fi Direct discovery and exit
-    --wfd-peer PEER          Peer selector: index, MAC, or name
+    --wfd-peer PEER          Peer selector: index, MAC, or name (also picks the MICE sink)
+    --wfd-mice [HOST]        Cast over the LAN (Miracast over Infrastructure) to HOST;
+                             without HOST, find the sink on the LAN
     --wfd-dry-run            Print D-Bus call without activating connection
     --wfd-test-pattern       Stream generated test video instead of the desktop
     --wfd-ffmpeg-stats       Show ffmpeg progress statistics for WFD streams
@@ -41,6 +43,10 @@ Wi-Fi Display (Miracast) Options:
                              RTP media sender (default: auto)
     --wfd-capture-backend auto|portal|wf-recorder|x11grab
                              Desktop capture backend for wfd (default: auto)
+    --wfd-encoder x264|va    H.264 encoder for the portal backend (default: x264)
+    --wfd-rate-control vbr|cbr|qvbr
+                             Rate control for --wfd-encoder va (default: qvbr)
+    --wfd-no-r2              Do not try WFD R2 (wfd2_video_formats) negotiation
     --wfd-latency-log PATH   Write latency/session events to JSONL log file
     --wfd-no-audio           Stream video only
     --wfd-aosp-pmt-pid       MPEG-TS tables as Android sinks expect them; for a sink
@@ -148,6 +154,12 @@ def parse_args() -> argparse.Namespace:
                      help="Run active Wi-Fi Direct discovery and exit")
     wfd.add_argument("--wfd-peer", default=None, dest="wfd_peer",
                      help="WFD peer selector for --protocol wfd: index, MAC, or name")
+    wfd.add_argument("--wfd-mice", nargs="?", const="auto", default=None, dest="wfd_mice",
+                     metavar="HOST",
+                     help="For --protocol wfd, cast over the LAN to this sink IP or "
+                          "hostname using Miracast over Infrastructure (MS-MICE) "
+                          "instead of Wi-Fi Direct. Without HOST, find the sink via "
+                          "mDNS and pick it with --wfd-peer when there are several")
     wfd.add_argument("--wfd-dry-run", action="store_true", dest="wfd_dry_run",
                      help="Print WFD connection D-Bus call without activating it")
     wfd.add_argument("--wfd-test-pattern", action="store_true", dest="wfd_test_pattern",
@@ -163,6 +175,22 @@ def parse_args() -> argparse.Namespace:
                      help="Desktop capture backend for --protocol wfd: auto (default), portal, "
                           "wf-recorder, x11grab, or gst-x11 (X11 capture through the GStreamer "
                           "MPEG-TS pipeline, for sinks that black-screen on the ffmpeg path)")
+    wfd.add_argument("--wfd-encoder", default="x264", dest="wfd_encoder",
+                     choices=["x264", "va"],
+                     help="For --protocol wfd, H.264 encoder used by the portal capture "
+                          "backend: x264 (default, software) or va (GPU through VA-API "
+                          "vah264enc; falls back to x264 when it is not available)")
+    wfd.add_argument("--wfd-rate-control", default="qvbr", dest="wfd_rate_control",
+                     choices=["vbr", "cbr", "qvbr"],
+                     help="For --wfd-encoder va, vah264enc rate control: qvbr (default, "
+                          "constant quality up to --bitrate; keeps keyframes small), vbr "
+                          "(sends only what the picture needs, up to --bitrate) or cbr "
+                          "(always sends the full --bitrate)")
+    wfd.add_argument("--wfd-no-r2", action="store_false", dest="wfd_r2",
+                     help="For --protocol wfd, do not ask the sink for WFD R2 formats. By "
+                          "default FluxCast asks, and negotiates H.264 through "
+                          "wfd2_video_formats only when that unlocks a better mode (such as "
+                          "1080p60 on LG C2); otherwise it stays on R1")
     wfd.add_argument("--wfd-latency-log", nargs="?", const="/tmp/fluxcast-wfd-latency.jsonl",
                      default=None, dest="wfd_latency_log",
                      help="For --protocol wfd, JSONL file path for latency/session logging "

@@ -362,18 +362,55 @@ class AspectRatioTest(unittest.TestCase):
         self.assertNotIn("add-borders=true", portal)
         self.assertEqual(portal.count("videoscale"), 1)
 
+    def _window_chain(self, pw_props=frozenset({"provide-clock"})):
+        # KWin's portal reply has no size for a window.
+        return next(c for c in _gst_commands(size=None, source_type=2, pw_props=pw_props)
+                    if "pipewiresrc" in c and "mpegtsmux" in c)
 
-def _gst_commands(size=(1080, 1920)):
+    def test_portal_window_is_letterboxed_frame_by_frame(self):
+        """A window has no size to pin and changes it on every resize. KWin
+        tags its frames pixel-aspect-ratio=1/2147483647, so the PAR is reset
+        first and one add-borders videoscale fits each frame into the mode."""
+        portal = self._window_chain()
+        setter = portal.index("capssetter")
+        self.assertEqual(portal[setter + 1], "caps=video/x-raw,pixel-aspect-ratio=1/1")
+        scale = portal.index("videoscale")
+        self.assertGreater(scale, setter)
+        self.assertEqual(portal[scale + 1], "add-borders=true")
+        self.assertEqual(portal.count("videoscale"), 1)
+        self.assertTrue(portal[scale + 4].startswith("video/x-raw,width=1280,height=720,"))
+        self.assertFalse(any(a.startswith("video/x-raw,width=") for a in portal[:scale]),
+                         "a pinned size would stretch the window after a resize")
+
+    def test_portal_window_does_not_clock_the_pipeline(self):
+        """pipewiresrc's clock stops while a resize renegotiates the stream
+        and the source then stalls for seconds."""
+        self.assertIn("provide-clock=false", self._window_chain())
+        self.assertNotIn("provide-clock=false", self._window_chain(pw_props=frozenset()))
+
+    def test_portal_monitor_keeps_its_pinned_letterbox(self):
+        portal = next(c for c in _gst_commands(size=(2880, 1920))
+                      if "pipewiresrc" in c and "mpegtsmux" in c)
+        self.assertNotIn("capssetter", portal)
+        self.assertNotIn("provide-clock=false", portal)
+
+
+def _gst_commands(size=(1080, 1920), encoder="x264", has_va=True, rate_control="qvbr",
+                  dmabuf_fails=False, va_rate_controls=("cbr", "vbr", "qvbr"),
+                  source_type=1, pw_props=frozenset()):
     """Generated gst argv for every WFD pipeline that scales."""
     class Mon:
-        name, width, height, x, y, display = "eDP-1", size[0], size[1], 0, 0, ":0"
+        name, width, height, x, y, display = "eDP-1", 1080, 1920, 0, 0, ":0"
 
     class Sess:
         session_handle, pw_node_id, pw_fd, restore_token = "/h", 7, 42, None
-        source_type, position = 1, (0, 0)
+        position = (0, 0)
         stream_label, runtime, bus = "m", None, None
 
+    if size is not None:
+        Mon.width, Mon.height = size
     Sess.size = size
+    Sess.source_type = source_type
 
     captured = []
 
@@ -381,11 +418,12 @@ def _gst_commands(size=(1080, 1920)):
         returncode = 0
         pid = 4242
 
-        def __init__(self):
+        def __init__(self, cmd=()):
             self.stdout = io.BytesIO()
+            self.failed = dmabuf_fails and "video/x-raw(memory:DMABuf)" in cmd
 
         def poll(self):
-            return None
+            return 1 if self.failed else None
 
         def terminate(self):
             pass
@@ -403,16 +441,18 @@ def _gst_commands(size=(1080, 1920)):
             return False
 
     config = wfd.WFDMediaConfig(monitor=Mon(), output_resolution="1280x720", fps=30,
-                                bitrate="4M", no_audio=True, peer_name="X")
+                                bitrate="4M", no_audio=True, peer_name="X", encoder=encoder,
+                                rate_control=rate_control)
     pipeline = wfd.WFDMediaPipeline(config, tv_ip="10.42.0.2", local_ip="10.42.0.1",
                                     sink_rtp_port=35034)
     pipeline.tx_interface = "lo"
     with (
         mock.patch.object(wfd.shutil, "which", side_effect=lambda n: "/usr/bin/" + n),
-        patch_all("_gst_has_element", return_value=True),
+        patch_all("_gst_has_element", side_effect=lambda n: has_va or n != "vah264enc"),
         patch_all("_detect_audio_monitor", return_value="m"),
-        patch_all("_gst_pipewiresrc_properties", return_value=set()),
+        patch_all("_gst_pipewiresrc_properties", return_value=set(pw_props)),
         patch_all("_gst_x264enc_properties", return_value=set()),
+        patch_all("_gst_vah264enc_rate_controls", return_value=set(va_rate_controls)),
         patch_all("_pipewiresrc_selector_attempts",
                           return_value=[("path", ["path=7"])]),
         patch_all("start_portal_capture", return_value=Sess()),
@@ -420,7 +460,7 @@ def _gst_commands(size=(1080, 1920)):
         patch_all("_process_written_bytes", return_value=None),
         mock.patch.object(wfd.subprocess, "Popen",
                           side_effect=lambda cmd, *a, **k: (captured.append(list(cmd)),
-                                                            Proc())[1]),
+                                                            Proc(cmd))[1]),
         mock.patch.object(wfd.time, "sleep"),
         contextlib.redirect_stdout(io.StringIO()),
     ):
@@ -445,6 +485,75 @@ class PipewireBufferHandbackTest(unittest.TestCase):
         property unset rather than setting it either way."""
         for cmd in _gst_commands():
             self.assertNotIn("always-copy=false", cmd)
+
+
+class PortalVaEncoderTest(unittest.TestCase):
+    def _portal(self, **kwargs):
+        return next(c for c in _gst_commands(**kwargs)
+                    if "pipewiresrc" in c and "mpegtsmux" in c)
+
+    def test_default_encoder_is_x264enc(self):
+        portal = self._portal()
+        self.assertIn("x264enc", portal)
+        self.assertNotIn("vah264enc", portal)
+
+    def test_va_encoder_replaces_x264enc(self):
+        portal = self._portal(encoder="va")
+        self.assertNotIn("x264enc", portal)
+        enc = portal.index("vah264enc")
+        self.assertTrue(portal[enc - 2].startswith("video/x-raw(memory:VAMemory),format=NV12,"))
+        self.assertEqual(portal[enc - 7], "vacompositor")
+        bitrate = int(next(a for a in portal[enc:] if a.startswith("bitrate=")).split("=")[1])
+        for arg in ("rate-control=qvbr", "ref-frames=1", "num-slices=8", f"cpb-size={bitrate // 5}",
+                    "key-int-max=30", "b-frames=0", "aud=true"):
+            self.assertIn(arg, portal[enc:])
+        caps = next(a for a in portal[enc:] if a.startswith("video/x-h264"))
+        self.assertIn("profile=constrained-baseline", caps)
+
+    def test_va_tries_dmabuf_first(self):
+        portal = self._portal(encoder="va")
+        self.assertIn("video/x-raw(memory:DMABuf)", portal)
+        self.assertNotIn("always-copy=true", portal)
+        self.assertNotIn("videoconvert", portal)
+        post = portal.index("vapostproc")
+        self.assertTrue(portal[post + 2].startswith("video/x-raw(memory:VAMemory),format=NV12,width=400,height=710"))
+        comp = portal.index("vacompositor")
+        self.assertEqual(portal[comp + 2:comp + 4], ["sink_0::xpos=440", "sink_0::ypos=5"])
+        self.assertTrue(portal[comp + 5].startswith("video/x-raw(memory:VAMemory),format=NV12,width=1280,height=720"))
+
+    def test_va_falls_back_to_the_cpu_chain_without_dmabuf(self):
+        portals = [c for c in _gst_commands(encoder="va", dmabuf_fails=True)
+                   if "pipewiresrc" in c and "mpegtsmux" in c]
+        self.assertIn("video/x-raw(memory:DMABuf)", portals[0])
+        fallback = portals[1]
+        self.assertIn("always-copy=true", fallback)
+        enc = fallback.index("vacompositor")
+        self.assertEqual(fallback[enc - 2], "video/x-raw,format=NV12")
+
+    def test_va_window_skips_dmabuf_and_follows_resizes(self):
+        """The DMABuf chain pins one fitted size, which stretches a window once
+        it is resized; the CPU chain letterboxes every frame instead."""
+        portals = [c for c in _gst_commands(encoder="va", size=None, source_type=2)
+                   if "pipewiresrc" in c and "mpegtsmux" in c]
+        self.assertEqual(len(portals), 1)
+        portal = portals[0]
+        self.assertNotIn("video/x-raw(memory:DMABuf)", portal)
+        self.assertIn("vah264enc", portal)
+        self.assertIn("capssetter", portal)
+        self.assertEqual(portal[portal.index("videoscale") + 1], "add-borders=true")
+
+    def test_va_rate_control_can_be_cbr(self):
+        portal = self._portal(encoder="va", rate_control="cbr")
+        self.assertIn("rate-control=cbr", portal[portal.index("vah264enc"):])
+
+    def test_va_qvbr_falls_back_to_vbr_when_the_driver_lacks_it(self):
+        portal = self._portal(encoder="va", va_rate_controls=("cbr", "vbr"))
+        self.assertIn("rate-control=vbr", portal[portal.index("vah264enc"):])
+
+    def test_va_encoder_falls_back_to_x264enc_when_missing(self):
+        portal = self._portal(encoder="va", has_va=False)
+        self.assertIn("x264enc", portal)
+        self.assertNotIn("vah264enc", portal)
 
 
 def _sequence(values):

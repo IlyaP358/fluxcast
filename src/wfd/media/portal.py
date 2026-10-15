@@ -17,8 +17,8 @@ from ..encoding import (
 from ..env import _detect_audio_monitor
 from ..gst import (
     _gst_dump_branch, _gst_has_element, _gst_pick_aac_encoder,
-    _gst_pipewiresrc_properties, _gst_rtp_link, _gst_x264enc_properties,
-    _pipewiresrc_selector_attempts, _wfd_gst_prog_map,
+    _gst_pipewiresrc_properties, _gst_rtp_link, _gst_vah264enc_rate_controls,
+    _gst_x264enc_properties, _pipewiresrc_selector_attempts, _wfd_gst_prog_map,
 )
 from ..modes import _h264_level_for_mode
 from ..net import _ffmpeg_sender_args
@@ -305,6 +305,11 @@ class PortalMixin:
         # size first, then pad it into the mode as a separate step.
         fit_w, fit_h = _fit_inside(parsed_src[0], parsed_src[1], out_w, out_h)
         letterbox = (fit_w, fit_h) != (out_w, out_h)
+        # A window has no size in KWin's portal reply and changes it on every
+        # resize, so no fitted size can be pinned; it is letterboxed per frame.
+        follow_window = session.source_type == 2 and _gst_has_element("capssetter")
+        if follow_window:
+            letterbox = False
         selector_attempts = _pipewiresrc_selector_attempts(
             session.pw_node_id,
             stream_label=session.stream_label,
@@ -314,8 +319,17 @@ class PortalMixin:
             not self.config.no_audio, self.config.aosp_pmt_pid
         )
         has_h264parse = _gst_has_element("h264parse")
+        use_va = (self.config.encoder == "va" and _gst_has_element("vah264enc")
+                  and _gst_has_element("vacompositor"))
+        if self.config.encoder == "va" and not use_va:
+            print("[FluxCast WFD Media] vah264enc/vacompositor not available; falling back to x264enc.")
+        rate_control = self.config.rate_control
+        if use_va and rate_control not in _gst_vah264enc_rate_controls():
+            print(f"[FluxCast WFD Media] vah264enc does not offer {rate_control} on this driver; using vbr.")
+            rate_control = "vbr"
 
-        def _gst_video_chain(video_caps: str, selector_args: list[str]) -> list[str]:
+        def _gst_video_chain(video_caps: str, selector_args: list[str],
+                             dmabuf: bool = False) -> list[str]:
             # Use more buffers for high-res 1440p capture and move videorate early
             props = _gst_pipewiresrc_properties()
             pipewire_args = [*selector_args]
@@ -325,6 +339,12 @@ class PortalMixin:
                 pipewire_args.append("resend-last=true")
             if "min-force-user-latency" in props:
                 pipewire_args.append("min-force-user-latency=0")
+            if follow_window and "provide-clock" in props:
+                # Resizing a window renegotiates the stream. pipewiresrc's clock
+                # stops while KWin does that, and the source waits on it for
+                # seconds before passing on a frame. pulsesrc (or the system
+                # clock) keeps running and keeps audio and video in step.
+                pipewire_args.append("provide-clock=false")
 
             is_lg = "LG" in self.config.peer_name.upper()
 
@@ -394,6 +414,72 @@ class PortalMixin:
             # Inject in-band SPS/PPS before every IDR (mirrors ffmpeg repeat-headers=1).
             h264_parse_chain = ["!", "h264parse", "config-interval=-1"] if has_h264parse else []
 
+            if use_va:
+                # CPB of 500 ms for LG and 200 ms otherwise, matching the x264enc VBV above.
+                # VBR caps nothing per frame on Intel: on a still desktop every keyframe
+                # grows to ~300 KiB, a burst a weak link loses and the sink never starts.
+                # QVBR (the default) keeps them near x264's size; CBR pads every frame.
+                # One reference
+                # frame keeps the sink's decode buffer small (max_dec_frame_buffering).
+                # Slices confine a lost packet to a band instead of the rest of the frame.
+                # vacompositor repeats the last frame on the GPU like imagefreeze does
+                # below, but passes a new frame on at once instead of on the next tick.
+                encoder_chain = [
+                    *([] if dmabuf else ["!", "video/x-raw,format=NV12"]),
+                    "!", "vacompositor", "force-live=true",
+                    *([f"sink_0::xpos={(out_w - fit_w) // 2}",
+                       f"sink_0::ypos={(out_h - fit_h) // 2}"] if dmabuf else []),
+                    "!", f"video/x-raw(memory:VAMemory),format=NV12,width={out_w},height={out_h},"
+                          f"framerate={self.config.fps}/1",
+                    "!", "vah264enc",
+                    f"rate-control={rate_control}",
+                    "ref-frames=1",
+                    "num-slices=8",
+                    f"bitrate={bitrate_kbits}",
+                    f"cpb-size={bitrate_kbits // 2 if is_lg else bitrate_kbits // 5}",
+                    f"key-int-max={gop}",
+                    "b-frames=0",
+                    "aud=true",
+                ]
+            else:
+                encoder_chain = [
+                    "!", "imagefreeze", "is-live=true", "allow-replace=true",
+                    "!", "capsfilter", f"caps=video/x-raw,framerate={self.config.fps}/1",
+                    "!", "video/x-raw,format=I420", "!", "x264enc", *encoder_args,
+                ]
+            # x264enc's "baseline" output is Constrained Baseline; vah264enc
+            # only negotiates that profile under its exact name.
+            caps_profile = self.config.h264_profile
+            if use_va and caps_profile == "baseline":
+                caps_profile = "constrained-baseline"
+
+            if dmabuf:
+                # Zero-copy: vapostproc converts and scales KWin's DMABuf on the
+                # GPU and lets go of the PipeWire buffer straight away; the queue
+                # only holds our own VA surfaces (#147). KWin's DMABuf caps carry
+                # pixel-aspect-ratio=1/2147483647, which makes add-borders stretch,
+                # so the fitted size is pinned and vacompositor centres it on a
+                # black canvas of the WFD mode.
+                # BGRx in system memory must never reach vapostproc: on Intel
+                # it comes out sheared for widths that are not a multiple of 128.
+                return [
+                    "pipewiresrc",
+                    f"fd={session.pw_fd}",
+                    *pipewire_args,
+                    "do-timestamp=true",
+                    "!", "video/x-raw(memory:DMABuf)",
+                    "!", "videorate", "drop-only=true", f"max-rate={self.config.fps}",
+                    "!", "vapostproc",
+                    "!", f"video/x-raw(memory:VAMemory),format=NV12,width={fit_w},height={fit_h},"
+                          "pixel-aspect-ratio=1/1",
+                    "!", "queue", "max-size-buffers=8", "leaky=downstream",
+                    *encoder_chain,
+                    *h264_parse_chain,
+                    "!", f"video/x-h264,stream-format=byte-stream,alignment=au,profile={caps_profile}",
+                    "!", "queue",
+                    "!", "mux.sink_4113",
+                ]
+
             return [
                 "pipewiresrc",
                 f"fd={session.pw_fd}",
@@ -406,21 +492,24 @@ class PortalMixin:
                 # is not enough - the starvation is about holding the buffers,
                 # not about their memory type.
                 "always-copy=true",
-                "keepalive-time=33",
                 "!", "queue", "max-size-buffers=64", "max-size-time=1000000000", "leaky=downstream",
-                "!", "videorate", "skip-to-first=true",
-                "!", f"video/x-raw,framerate={self.config.fps}/1",
+                # KWin only sends a frame on damage. Thin bursts here and repeat the
+                # last frame after the conversion (see encoder_chain), so a static
+                # screen is not converted and scaled 30 times a second.
+                "!", "videorate", "drop-only=true", f"max-rate={self.config.fps}",
+                # KWin labels window frames pixel-aspect-ratio=1/2147483647,
+                # which would make add-borders squeeze them; its pixels are square.
+                *(["!", "capssetter", "caps=video/x-raw,pixel-aspect-ratio=1/1"]
+                  if follow_window else []),
                 "!", "videoconvert", "n-threads=0",
-                "!", "videoscale", "n-threads=0",
+                "!", "videoscale", *(["add-borders=true"] if follow_window else []), "n-threads=0",
                 *(["!", f"video/x-raw,width={fit_w},height={fit_h},pixel-aspect-ratio=1/1",
                    "!", "videoscale", "add-borders=true", "n-threads=0"] if letterbox else []),
                 "!", video_caps,
                 "!", "videoconvert", "n-threads=0",
-                "!", "video/x-raw,format=I420",
-                "!", "x264enc",
-                *encoder_args,
+                *encoder_chain,
                 *h264_parse_chain,
-                "!", f"video/x-h264,stream-format=byte-stream,alignment=au,profile={self.config.h264_profile}",
+                "!", f"video/x-h264,stream-format=byte-stream,alignment=au,profile={caps_profile}",
                 "!", "queue",
                 "!", "mux.sink_4113",
             ]
@@ -439,7 +528,8 @@ class PortalMixin:
                 "!", "mux.sink_4352",
             ]
 
-        def _gst_cmd_for_caps(video_caps: str, selector_args: list[str]) -> list[str]:
+        def _gst_cmd_for_caps(video_caps: str, selector_args: list[str],
+                              dmabuf: bool = False) -> list[str]:
             return [
                 "gst-launch-1.0", "-e", "-q",
                 "mpegtsmux", "name=mux",
@@ -456,7 +546,7 @@ class PortalMixin:
                 f"bind-port={self.config.source_port}",
                 "sync=false",
                 "async=false",
-                *_gst_video_chain(video_caps, selector_args),
+                *_gst_video_chain(video_caps, selector_args, dmabuf),
                 *gst_audio_chain,
                 *_gst_dump_branch(self.config.dump_ts_path),
             ]
@@ -482,6 +572,7 @@ class PortalMixin:
             + ", ".join(name for name, _ in selector_attempts)
         )
         print("[FluxCast WFD Media] Pipeline             : gstreamer (portal->rtp)")
+        print(f"[FluxCast WFD Media] Video encoder        : {'vah264enc (VA-API)' if use_va else 'x264enc'}")
         print(f"[FluxCast WFD Media] Portal source type      : {session.source_type}")
         if session.position and session.size:
             print(
@@ -493,7 +584,10 @@ class PortalMixin:
             print(f"[FluxCast WFD Media] Portal source id       : {session.stream_label}")
         if not self.config.no_audio:
             print(f"[FluxCast WFD Media] Capturing audio       : {audio_monitor}")
-        if letterbox:
+        if follow_window:
+            print(f"[FluxCast WFD Media] Scaling output       : window letterboxed to "
+                  f"{out_w}x{out_h}, following resizes")
+        elif letterbox:
             print(f"[FluxCast WFD Media] Scaling output       : {fit_w}x{fit_h} "
                   f"letterboxed to {out_w}x{out_h}")
         elif out_dims != parsed_src:
@@ -573,13 +667,18 @@ class PortalMixin:
 
         gst_proc = None
         probe_alive_seconds = 3.0
+        gst_attempts = [(name, caps, False) for name, caps in caps_attempts]
+        if use_va and not follow_window:
+            # The DMABuf path pins the fitted size on the GPU, which would
+            # stretch a window after it is resized.
+            gst_attempts.insert(0, ("dmabuf", caps_strict, True))
         for selector_name, selector_args in selector_attempts:
-            for attempt_name, attempt_caps in caps_attempts:
+            for attempt_name, attempt_caps, dmabuf in gst_attempts:
                 print(
                     f"[FluxCast WFD Media] Portal attempt       : "
                     f"selector={selector_name}, caps={attempt_name}"
                 )
-                gst_cmd = _gst_cmd_for_caps(attempt_caps, selector_args)
+                gst_cmd = _gst_cmd_for_caps(attempt_caps, selector_args, dmabuf)
                 gst_proc = subprocess.Popen(gst_cmd, stderr=None, pass_fds=(session.pw_fd,))
                 time.sleep(2.5)
                 if gst_proc.poll() is not None:
