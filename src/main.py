@@ -326,8 +326,8 @@ def main() -> None:
 
     if args.protocol == "wfd":
         from wfd import WFDNotReady, start_experimental_backend
-        # The tray stops casts with SIGTERM; take the same cleanup path as Ctrl+C
-        # so the sink is told to stop (MICE STOP_PROJECTION, RTSP teardown).
+        # The tray stops casts with SIGTERM; take the same cleanup path as
+        # Ctrl+C so the RTSP session is torn down and the P2P group released.
         signal.signal(signal.SIGTERM, signal.default_int_handler)
         try:
             start_experimental_backend(args)
