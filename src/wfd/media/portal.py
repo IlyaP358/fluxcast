@@ -12,7 +12,7 @@ from ..config import WFDNotReady
 from ..dump import _process_written_bytes
 from ..encoding import (
     _bitrate_to_kbits, _calculate_gop, _fit_inside, _kbits_to_bitrate_text,
-    _effective_kbits, _parse_resolution, _vbv_bufsize,
+    _effective_kbits, _parse_resolution, _vbv_bufsize, _x264_threads,
 )
 from ..env import _detect_audio_monitor
 from ..gst import (
@@ -147,6 +147,7 @@ class PortalMixin:
             "-c:v", "libx264",
             "-preset", "ultrafast" if out_h > 1080 else "veryfast",
             "-tune", "zerolatency",
+            "-threads", str(_x264_threads()),
             "-profile:v", self.config.h264_profile,
             "-level:v", _h264_level_for_mode(self.config),
             "-pix_fmt", "yuv420p",
@@ -355,7 +356,7 @@ class PortalMixin:
                 f"bitrate={bitrate_kbits}",
                 f"key-int-max={gop}",
                 #"intra-refresh=true",
-                "threads=0",
+                f"threads={_x264_threads()}",
                 "bframes=0",
                 "byte-stream=true",
                 "aud=true",

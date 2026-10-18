@@ -397,7 +397,7 @@ class AspectRatioTest(unittest.TestCase):
 
 def _gst_commands(size=(1080, 1920), encoder="x264", has_va=True, rate_control="qvbr",
                   dmabuf_fails=False, va_rate_controls=("cbr", "vbr", "qvbr"),
-                  source_type=1, pw_props=frozenset()):
+                  source_type=1, pw_props=frozenset(), ffmpeg=False):
     """Generated gst argv for every WFD pipeline that scales."""
     class Mon:
         name, width, height, x, y, display = "eDP-1", 1080, 1920, 0, 0, ":0"
@@ -468,7 +468,34 @@ def _gst_commands(size=(1080, 1920), encoder="x264", has_va=True, rate_control="
         pipeline._start_desktop_portal()
         config.aosp_pmt_pid = True
         pipeline._start_desktop_portal_ffmpeg()
+    if ffmpeg:
+        return [c for c in captured if "libx264" in c]
     return [c for c in captured if c and c[0].startswith("gst-launch")]
+
+
+class X264ThreadsTest(unittest.TestCase):
+    """With sliced threads x264 encodes one slice per thread; on auto that is
+    one per CPU, which costs CPU and compression on many-core machines."""
+
+    def test_threads_cap_at_four_and_follow_affinity(self):
+        for cpus, expected in ((16, 4), (4, 4), (2, 2), (1, 1)):
+            with mock.patch.object(wfd.encoding.os, "sched_getaffinity",
+                                   return_value=set(range(cpus))):
+                self.assertEqual(wfd._x264_threads(), expected)
+
+    def test_every_x264_pipeline_caps_its_threads(self):
+        with mock.patch.object(wfd.encoding.os, "sched_getaffinity",
+                               return_value=set(range(16))):
+            gst = [c for c in _gst_commands() if "x264enc" in c]
+            ffmpeg = _gst_commands(ffmpeg=True)
+        self.assertGreaterEqual(len(gst), 2)
+        for cmd in gst:
+            enc = cmd[cmd.index("x264enc"):]
+            self.assertIn("threads=4", enc)
+            self.assertNotIn("threads=0", enc)
+        self.assertTrue(ffmpeg)
+        for cmd in ffmpeg:
+            self.assertEqual(cmd[cmd.index("-threads") + 1], "4")
 
 
 class PipewireBufferHandbackTest(unittest.TestCase):

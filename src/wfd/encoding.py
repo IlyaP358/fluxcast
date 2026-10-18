@@ -1,8 +1,24 @@
+import os
 import re
 from typing import Optional
 
 from .config import WFDMediaConfig
 
+# With sliced threads (tune=zerolatency) x264 encodes one slice per thread, and
+# on auto it starts one thread per CPU: 16 slices on a 16-core laptop. Every
+# slice restarts intra prediction and CABAC, and all of them sync each frame,
+# so on hybrid CPUs the frame also waits for the slowest cores. Four threads
+# measured 25-37% less encoder CPU at 1080p60 with slightly better PSNR, for
+# ~1.5 ms more encode time per frame.
+_X264_MAX_THREADS = 4
+
+
+def _x264_threads() -> int:
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cpus = os.cpu_count() or 1
+    return max(1, min(_X264_MAX_THREADS, cpus))
 
 def _parse_resolution(value: Optional[str]) -> Optional[tuple[int, int]]:
     if not value:

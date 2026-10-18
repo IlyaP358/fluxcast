@@ -4,7 +4,7 @@ import time
 
 from ..config import WFDNotReady
 from ..encoding import (
-    _bitrate_to_kbits, _calculate_gop, _parse_resolution, _vbv_bufsize,
+    _bitrate_to_kbits, _calculate_gop, _parse_resolution, _vbv_bufsize, _x264_threads,
 )
 from ..gst import (
     _gst_dump_branch, _gst_has_element, _gst_pick_aac_encoder, _gst_rtp_link,
@@ -44,6 +44,7 @@ class TestPatternMixin:
             "-c:v", "libx264",
             "-preset", "ultrafast" if _tp_h > 1080 else "veryfast",
             "-tune", "zerolatency",
+            "-threads", str(_x264_threads()),
             "-profile:v", self.config.h264_profile,
             "-level:v", _h264_level_for_mode(self.config),
             "-pix_fmt", "yuv420p",
@@ -133,6 +134,7 @@ class TestPatternMixin:
             "bframes=0",
             "byte-stream=true",
             "aud=true",
+            f"threads={_x264_threads()}",
             "sliced-threads=true",
             "vbv-buf-capacity=200",
             *h264_parse_chain,
