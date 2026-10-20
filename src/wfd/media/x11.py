@@ -6,7 +6,7 @@ import time
 from ..config import WFDNotReady
 from ..encoding import (
     _bitrate_to_kbits, _calculate_gop, _kbits_to_bitrate_text, _letterbox_vf,
-    _effective_kbits, _parse_resolution, _vbv_bufsize,
+    _effective_kbits, _parse_resolution, _vbv_bufsize, _x264_threads,
 )
 from ..env import _detect_audio_monitor
 from ..gst import (
@@ -68,6 +68,7 @@ class X11Mixin:
             "-c:v", "libx264",
             "-preset", "ultrafast" if parsed_out[1] > 1080 else "veryfast",
             "-tune", "zerolatency",
+            "-threads", str(_x264_threads()),
             "-profile:v", self.config.h264_profile,
             "-level:v", _h264_level_for_mode(self.config),
             "-pix_fmt", "yuv420p",
@@ -191,6 +192,7 @@ class X11Mixin:
             "bframes=0",
             "byte-stream=true",
             "aud=true",
+            f"threads={_x264_threads()}",
             "sliced-threads=true",
             "vbv-buf-capacity=200",
             "!", f"video/x-h264,stream-format=byte-stream,alignment=au,profile={self.config.h264_profile}",
