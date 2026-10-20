@@ -84,8 +84,10 @@ class WFDRTSPServer:
         interface: Optional[str] = None,
         host: str = "0.0.0.0",
         port: int = WFD_RTSP_PORT,
+        mice_host: Optional[str] = None,
     ) -> None:
         self.host = host
+        self.mice_host = mice_host
         self.port = port
         self.media_config = media_config
         self.peer_address = peer_address
@@ -119,6 +121,8 @@ class WFDRTSPServer:
 
     def authenticate_client(self, client_ip: str) -> bool:
         """Check the receiver address, serializing neighbour lookups."""
+        if self.mice_host is not None:
+            return client_ip == self.mice_host
         # The listener starts before P2P activation so passive receivers do not
         # race a closed port. If one connects as the group comes up, briefly
         # wait for the backend to publish the exact group interface.
