@@ -47,6 +47,7 @@ The tray picks your language up from the system locale, no configuration needed.
 | Español | [Jemo121](https://github.com/Jemo121) |
 | Português (Brasil) | [Jemo121](https://github.com/Jemo121) |
 | Svenska | [Martan404](https://github.com/Martan404) |
+| Türkçe | [ayanburak](https://github.com/ayanburak) |
 
 Adding your language means editing one JSON file and no code at all.
 See [CONTRIBUTING.md](CONTRIBUTING.md#translations).
