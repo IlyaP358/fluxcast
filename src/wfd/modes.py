@@ -236,6 +236,60 @@ def _selected_video_format(
         f"{vesa_mask:08x} 00000000 00 0000 0000 00 none none"
     )
 
+def _parse_sink_r2_video_formats(value: str) -> Optional[WFDVideoFormat]:
+    """Read wfd2_video_formats (WFD v2.1, 6.1.22) into the R1 shape used for mode choice.
+
+    The value is: native, then comma-separated tuples of codec, profile, level,
+    48-bit CEA/VESA/HH bitmaps and misc fields. CEA/VESA bits keep their R1
+    positions and H.264 levels their R1 bits, so the H.264 Constrained
+    Baseline tuple (codec bit 0, profile bit 0) maps directly.
+    """
+    chunks = value.split(",")
+    first = chunks[0].split()
+    if len(first) < 2 or first[0].lower() == "none":
+        return None
+    chunks[0] = " ".join(first[1:])
+    for chunk in chunks:
+        tokens = chunk.split()
+        try:
+            codec, profile, level, cea, vesa, hh = (int(t, 16) for t in tokens[:6])
+        except ValueError:
+            continue
+        if codec & 0x01 and profile & 0x01:
+            return WFDVideoFormat(
+                native="00", preferred="00", profile="01", level=f"{level & 0xff:02x}",
+                cea_mask=cea & 0xffffffff, vesa_mask=vesa & 0xffffffff,
+                hh_mask=hh & 0xffffffff,
+            )
+    return None
+
+def _selected_r2_video_format(
+    config: WFDMediaConfig,
+    sink_format: Optional[WFDVideoFormat],
+) -> str:
+    """One wfd2_video_formats tuple for M4: native 00, H.264 CBP, level, bitmaps."""
+    mode = _choose_cea_mode(config, sink_format)
+    level = _wfd_level_for_mode(mode)
+    if mode.width * mode.height > 1920 * 1080:
+        level = WFD_LEVEL_50 if mode.fps <= 30 else WFD_LEVEL_51
+    cea, vesa = (0, mode.bit) if mode.table == "vesa" else (mode.bit, 0)
+    return (
+        f"00 01 01 {level:04x} {cea:012x} {vesa:012x} "
+        f"{0:012x} 00 0000 0000 00 00"
+    )
+
+def _use_r2_format(
+    config: WFDMediaConfig,
+    r1_format: Optional[WFDVideoFormat],
+    r2_format: Optional[WFDVideoFormat],
+) -> bool:
+    """Use R2 only if R1 is missing or R2 unlocks a different mode, e.g. 1080p60 on LG C2."""
+    if r2_format is None:
+        return False
+    if r1_format is None:
+        return True
+    return _choose_cea_mode(config, r2_format).name != _choose_cea_mode(config, r1_format).name
+
 def _h264_level_for_mode(config: WFDMediaConfig) -> str:
     resolution = _parse_resolution(config.output_resolution) or (1920, 1080)
     width, height = resolution
