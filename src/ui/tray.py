@@ -587,6 +587,14 @@ def _show_about() -> None:
     _about_thread.start()
 
 
+# ── settings window ──────────────────────────────────────────────────────────
+
+def _show_settings() -> None:
+    # Imported late so the tray still starts without tkinter installed.
+    from ui.settings import show_settings
+    show_settings()
+
+
 # ── menu ──────────────────────────────────────────────────────────────────────
 
 def _act(fn, *args):
@@ -700,6 +708,7 @@ def _build_menu():
 
         items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem(_l("Rescan Devices"), lambda *_: _rescan_all()))
+        items.append(pystray.MenuItem(_l("Settings"), lambda *_: _show_settings()))
 
     items.append(pystray.Menu.SEPARATOR)
     items.append(pystray.MenuItem(_l("About FluxCast"), lambda *_: _show_about()))

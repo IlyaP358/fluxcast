@@ -32,6 +32,7 @@ def _choice(*choices: str) -> Validator:
             raise ValueError(f"expected one of: {expected}")
         return normalized
 
+    validate.choices = choices  # the settings window fills its dropdowns from this
     return validate
 
 
@@ -136,6 +137,9 @@ _MODE_OPTIONS = {
         "wfd-timeout": _Option(_positive_int),
         "wfd-go-intent": _Option(_go_intent),
         "wfd-uibc": _Option(_boolean, is_flag=True),
+        "wfd-encoder": _Option(_choice("x264", "va")),
+        "wfd-rate-control": _Option(_choice("vbr", "cbr", "qvbr")),
+        "wfd-r2": _Option(_boolean, is_flag=True),
     },
     "dlna": _DLNA_CAST_OPTIONS,
     "cast": _DLNA_CAST_OPTIONS,
