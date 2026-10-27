@@ -86,71 +86,71 @@ _ICON_PATH = os.path.join(_BASE, "assets", "flcast_logo_512x512.png")
 _settings_thread = None
 
 _TABS = (
-    ("Miracast (WFD)", "wfd"),
-    ("DLNA", "dlna"),
-    ("Chromecast", "cast"),
+    (_l("Miracast (WFD)"), "wfd"),
+    (_l("DLNA"), "dlna"),
+    (_l("Chromecast"), "cast"),
 )
 
 _VIDEO = (
-    ("output-res", "Output resolution", "resolution",
-     "Empty keeps the desktop resolution"),
-    ("fps", "Frames per second", "number", "Default 30"),
-    ("bitrate", "Video bitrate", "text", "For example 4M or 12M. Default 4M"),
+    ("output-res", _l("Output resolution"), "resolution",
+     _l("Empty keeps the desktop resolution")),
+    ("fps", _l("Frames per second"), "number", _l("Default 30")),
+    ("bitrate", _l("Video bitrate"), "text", _l("For example 4M or 12M. Default 4M")),
 )
 
 _GROUPS = {
     "wfd": (
-        ("Video", _VIDEO + (
-            ("wfd-encoder", "H.264 encoder", "choice",
-             "va encodes on the GPU through VA-API and falls back to x264 when it is missing"),
-            ("wfd-rate-control", "Rate control", "choice",
-             "Only used with the va encoder. Default qvbr"),
+        (_l("Video"), _VIDEO + (
+            ("wfd-encoder", _l("H.264 encoder"), "choice",
+             _l("va encodes on the GPU through VA-API and falls back to x264 when it is missing")),
+            ("wfd-rate-control", _l("Rate control"), "choice",
+             _l("Only used with the va encoder. Default qvbr")),
         )),
-        ("Audio", (
-            ("wfd-no-audio", "Stream video only", "bool", ""),
-            ("wfd-audio-device", "Audio source", "text",
-             "PulseAudio or PipeWire monitor source. Empty picks one automatically"),
+        (_l("Audio"), (
+            ("wfd-no-audio", _l("Stream video only"), "bool", ""),
+            ("wfd-audio-device", _l("Audio source"), "text",
+             _l("PulseAudio or PipeWire monitor source. Empty picks one automatically")),
         )),
-        ("Capture", (
-            ("wfd-capture-backend", "Capture backend", "choice", "Default auto"),
-            ("wfd-media-pipeline", "Media pipeline", "choice",
-             "Which sender pushes the RTP stream. Default auto"),
-            ("wfd-test-pattern", "Stream a generated test picture instead of the desktop",
+        (_l("Capture"), (
+            ("wfd-capture-backend", _l("Capture backend"), "choice", _l("Default auto")),
+            ("wfd-media-pipeline", _l("Media pipeline"), "choice",
+             _l("Which sender pushes the RTP stream. Default auto")),
+            ("wfd-test-pattern", _l("Stream a generated test picture instead of the desktop"),
              "bool", ""),
         )),
-        ("Connection", (
-            ("wfd-interface", "Wi-Fi interface", "text",
-             "Used when scanning for TVs, for example wlan0. Empty picks one automatically"),
-            ("wfd-rtsp-port", "RTSP port", "number", "Default 7236"),
-            ("wfd-rtp-source-port", "RTP source port", "number", "Default 19002"),
-            ("wfd-timeout", "Scan timeout", "number", "Wi-Fi Direct scan, in seconds. Default 8"),
-            ("wfd-go-intent", "Group owner intent", "number",
-             "0 to 15. 0 lets the TV own the group, which most Miracast TVs require. Default 0"),
-            ("wfd-no-firewall", "Do not open the RTSP port in firewalld", "bool", ""),
+        (_l("Connection"), (
+            ("wfd-interface", _l("Wi-Fi interface"), "text",
+             _l("Used when scanning for TVs, for example wlan0. Empty picks one automatically")),
+            ("wfd-rtsp-port", _l("RTSP port"), "number", _l("Default 7236")),
+            ("wfd-rtp-source-port", _l("RTP source port"), "number", _l("Default 19002")),
+            ("wfd-timeout", _l("Scan timeout"), "number", _l("Wi-Fi Direct scan, in seconds. Default 8")),
+            ("wfd-go-intent", _l("Group owner intent"), "number",
+             _l("0 to 15. 0 lets the TV own the group, which most Miracast TVs require. Default 0")),
+            ("wfd-no-firewall", _l("Do not open the RTSP port in firewalld"), "bool", ""),
         )),
-        ("Advanced", (
-            ("wfd-r2", "Ask the TV for WFD R2 formats, which can unlock 1080p60", "bool", ""),
-            ("wfd-uibc", "Accept touch and mouse input back from the TV", "bool",
-             "Experimental, and needs access to /dev/uinput"),
-            ("wfd-aosp-pmt-pid", "Write MPEG-TS tables the way Android sinks expect them",
-             "bool", "Try this when the session connects but the TV stays black"),
-            ("wfd-latency-log", "Latency log", "text",
-             "Path to a JSONL file written during the session. "
-             "Default /tmp/fluxcast-wfd-latency.jsonl"),
+        (_l("Advanced"), (
+            ("wfd-r2", _l("Ask the TV for WFD R2 formats, which can unlock 1080p60"), "bool", ""),
+            ("wfd-uibc", _l("Accept touch and mouse input back from the TV"), "bool",
+             _l("Experimental, and needs access to /dev/uinput")),
+            ("wfd-aosp-pmt-pid", _l("Write MPEG-TS tables the way Android sinks expect them"),
+             "bool", _l("Try this when the session connects but the TV stays black")),
+            ("wfd-latency-log", _l("Latency log"), "text",
+             _l("Path to a JSONL file written during the session. "
+                "Default /tmp/fluxcast-wfd-latency.jsonl")),
         )),
     ),
     "dlna": (
-        ("Video", _VIDEO),
-        ("Server", (
-            ("host", "Bind address", "text",
-             "LAN address to serve and advertise. Empty detects it automatically"),
-            ("port", "HTTP port", "number", "Default 8080"),
-            ("transport", "Transport", "choice",
-             "Default progressive-ts for DLNA and hls for Chromecast. live-ts is experimental"),
+        (_l("Video"), _VIDEO),
+        (_l("Server"), (
+            ("host", _l("Bind address"), "text",
+             _l("LAN address to serve and advertise. Empty detects it automatically")),
+            ("port", _l("HTTP port"), "number", _l("Default 8080")),
+            ("transport", _l("Transport"), "choice",
+             _l("Default progressive-ts for DLNA and hls for Chromecast. live-ts is experimental")),
         )),
-        ("Capture", (
-            ("capture-backend", "Capture backend", "choice", "Default auto"),
-            ("discover-timeout", "Discovery timeout", "number", "In seconds. Default 5"),
+        (_l("Capture"), (
+            ("capture-backend", _l("Capture backend"), "choice", _l("Default auto")),
+            ("discover-timeout", _l("Discovery timeout"), "number", _l("In seconds. Default 5")),
         )),
     ),
 }
