@@ -464,10 +464,10 @@ class WlrootsMixin:
 
         # Match M4 WFD profile: CHP → high, CBP → constrained_baseline.
         profile = self._wf_vaapi_h264_profile()
+        i_qfactor = (os.environ.get("FLUXCAST_WFD_VAAPI_I_QFACTOR", "") or "").strip()
 
         if rc == "CQP":
             qp = (os.environ.get("FLUXCAST_WFD_VAAPI_QP", "") or "18").strip() or "18"
-            i_qfactor = (os.environ.get("FLUXCAST_WFD_VAAPI_I_QFACTOR", "") or "").strip()
             params = [
                 "-p", f"rc_mode={rc}",
                 "-p", f"qp={qp}",
@@ -546,10 +546,15 @@ class WlrootsMixin:
                         "-p", f"minrate={min_bits}",
                     ]
                 )
+                # I-frames same quantizer as P (CQP High's 1.3 coarsens IDR).
+                if not i_qfactor:
+                    i_qfactor = "1.0"
+                params.extend(["-p", f"i_qfactor={i_qfactor}"])
                 desc = (
                     f"{rc} b={target} max={peak} min≈{min_bits} "
                     f"qmin={qmin} qmax={qmax} buf={buf_bits}, gop={gop}, "
                     f"quality={quality}, async={async_depth}, profile={profile}"
+                    f", i_qfactor={i_qfactor}"
                 )
             elif rc in ("VBR", "AVBR"):
                 params.extend(["-p", f"maxrate={peak_bits}"])
