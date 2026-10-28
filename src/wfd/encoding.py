@@ -52,6 +52,28 @@ def latency_first_vbv_multiplier(
     return 0.5
 
 
+def low_delay_hrd_bits(
+    peak_bits: int,
+    fps: float,
+    *,
+    frames: int = 4,
+    max_s: float = 0.1,
+) -> int:
+    """HRD size in bits: a few frames, never more than ``max_s`` of peak.
+
+    QVBR undershoot made ``peak * 0.25`` a multi-second buffer (3.5 Mbit at
+    0.2 Mbps ≈ 18 s). Size from frame count so delay stays interactive even
+    when Intel BRC sits below target.
+    """
+    peak = max(1, int(peak_bits))
+    fps_n = max(1.0, float(fps or 30.0))
+    frame_bits = max(1, int(peak / fps_n))
+    by_frames = frame_bits * max(1, int(frames))
+    cap_s = max(0.05, float(max_s))
+    by_time = max(frame_bits, int(peak * cap_s))
+    return max(frame_bits, min(by_frames, by_time))
+
+
 def _vbv_bufsize(bitrate_text: str, config: WFDMediaConfig) -> str:
     """Calculate VBV buffer size.
 

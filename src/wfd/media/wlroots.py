@@ -8,7 +8,8 @@ from ..config import WFDNotReady
 from ..wf_recorder import find_wf_recorder, wf_recorder_supports_icc
 from ..encoding import (
     _bitrate_to_kbits, _calculate_gop, cap_kbits_to_link, _kbits_to_bitrate_text,
-    _letterbox_vf, _parse_resolution, read_go_air_mbps, _vbv_bufsize,
+    _letterbox_vf, _parse_resolution, low_delay_hrd_bits, read_go_air_mbps,
+    _vbv_bufsize,
 )
 from ..env import _detect_audio_monitor
 from ..hw_encode import (
@@ -335,6 +336,29 @@ class WlrootsMixin:
             return ["-r", icc_fps]
         return []
 
+    def _warn_capture_fps_mismatch(self, monitor) -> None:
+        """Log when HEADLESS refresh != encode fps (ICC stall / IO-watchdog loop)."""
+        try:
+            from ..outputs import _hyprctl_monitors, _named_monitor
+
+            name = getattr(monitor, "name", None) or str(monitor or "")
+            if not name:
+                return
+            mons = _hyprctl_monitors() or []
+            mon = _named_monitor(mons, name) if mons else None
+            hz = float((mon or {}).get("refreshRate") or 0)
+            fps = float(getattr(self.config, "fps", 0) or 0)
+            if hz and fps and abs(hz - fps) >= 1.0:
+                print(
+                    f"[FluxCast WFD Media] Capture fps mismatch: "
+                    f"{name} is {hz:.1f}Hz but encode is {fps:.0f}fps "
+                    "— ICC will stall and the IO watchdog will rebind. "
+                    "Match HEADLESS refresh to the negotiated stream fps.",
+                    flush=True,
+                )
+        except Exception:
+            return
+
     def _maybe_rebind_for_impairment(self, reason: str) -> None:
         """Restart desktop capture after DTS/pool spikes (debounced)."""
         now = time.monotonic()
@@ -499,21 +523,25 @@ class WlrootsMixin:
             if peak_bits < br_bits:
                 peak_bits = br_bits
                 peak = target
-            # QVBR quality-first HRD (~2 s). CQP/CBR stay latency-first.
-            # FLUXCAST_WFD_VBV_MULTIPLIER still wins (omarchy encode.env).
+            # Frame-count HRD. peak*0.25 at QVBR undershoot is many seconds.
             try:
                 env_vbv = (os.environ.get("FLUXCAST_WFD_VBV_MULTIPLIER", "") or "").strip()
                 if env_vbv:
                     vbv_mult = float(env_vbv)
-                elif rc == "QVBR":
-                    vbv_mult = 2.0
                 else:
-                    from ..encoding import latency_first_vbv_multiplier
-                    vbv_mult = float(latency_first_vbv_multiplier(br_bits / 1_000_000.0))
+                    vbv_mult = 0.1
             except (ValueError, Exception):
-                vbv_mult = 2.0 if rc == "QVBR" else 0.5
-            vbv_mult = max(0.25, min(4.0, vbv_mult))
-            buf_bits = max(br_bits // 4, int(peak_bits * vbv_mult))
+                vbv_mult = 0.1
+            vbv_mult = max(0.05, min(0.25, vbv_mult))
+            # CBR fills, so HRD time is real delay. 0.1 s pumped quality on
+            # this Intel path; 0.25 s (Intel LD) was the last good picture.
+            hrd_frames = 15 if rc == "CBR" else 4
+            buf_bits = low_delay_hrd_bits(
+                peak_bits,
+                float(self.config.fps or 30),
+                frames=hrd_frames,
+                max_s=vbv_mult if rc != "CBR" else max(vbv_mult, 0.25),
+            )
             params = [
                 "-p", f"b={br_bits}",
                 "-p", f"rc_mode={rc}",
@@ -524,6 +552,7 @@ class WlrootsMixin:
                 "-p", f"profile={profile}",
                 "-p", f"framerate={self.config.fps}",
                 "-p", f"bufsize={buf_bits}",
+                "-p", "aud=1",
             ]
             if rc == "QVBR":
                 # Fixed qp= makes Intel QVBR treat quality as already met and
@@ -565,10 +594,13 @@ class WlrootsMixin:
             elif rc == "CBR":
                 # HRD: maxrate == target.
                 params.extend(["-p", f"maxrate={br_bits}"])
+                if not i_qfactor:
+                    i_qfactor = "1.0"
+                params.extend(["-p", f"i_qfactor={i_qfactor}"])
                 desc = (
                     f"{rc} bitrate={target} buf={buf_bits}, "
                     f"gop={gop}, quality={quality}, async={async_depth}, "
-                    f"profile={profile}"
+                    f"profile={profile}, i_qfactor={i_qfactor}"
                 )
             else:
                 desc = (
@@ -777,10 +809,16 @@ class WlrootsMixin:
 
         # Keep demux queue small — 4096 buffered nut packets can add hundreds of
         # ms of glass-to-glass lag. Override with FLUXCAST_WFD_THREAD_QUEUE_SIZE.
+        # DMA ffmpeg is copy+AAC+mux only (encode already ran in wf-recorder
+        # h264_vaapi). nobuffer/low_delay stop the copy muxer from holding
+        # seconds of TS for A/V sync.
         _tqs = (os.environ.get("FLUXCAST_WFD_THREAD_QUEUE_SIZE", "") or "8").strip() or "8"
         ffmpeg_cmd = [
             *_ffmpeg_sender_args(self.config.ffmpeg_stats),
-            "-fflags", "+genpts",
+            "-fflags", "nobuffer+genpts+flush_packets",
+            "-flags", "low_delay",
+            "-probesize", "32",
+            "-analyzeduration", "0",
             "-thread_queue_size", _tqs,
             "-f", "nut",
             "-i", "pipe:0",
@@ -794,7 +832,6 @@ class WlrootsMixin:
                 "-map", "0:v:0",
                 "-map", "1:a:0",
                 "-c:v", "copy",
-                "-af", "aresample=async=1",
                 "-c:a", "aac",
                 "-profile:a", "aac_low",
                 "-b:a", "128k",
@@ -810,6 +847,7 @@ class WlrootsMixin:
 
         ffmpeg_cmd += self._common_output_args()
 
+        self._warn_capture_fps_mismatch(monitor)
         print(f"[FluxCast WFD Media] Capturing screen : {monitor.name} ({meta['src_res']})")
         if not self.config.no_audio and audio_monitor:
             print(
@@ -1181,7 +1219,6 @@ class WlrootsMixin:
 
         if not self.config.no_audio:
             ffmpeg_cmd += [
-                "-af", "aresample=async=1",
                 "-c:a", "aac",
                 "-profile:a", "aac_low",
                 "-b:a", "128k",

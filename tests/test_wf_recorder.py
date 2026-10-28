@@ -263,7 +263,7 @@ class WlrootsDamageFlagTest(unittest.TestCase):
         self.assertNotIn("-C", cmds["wf"])
         self.assertNotIn("--audio=", " ".join(cmds["wf"]))
 
-    def test_qvbr_dmabuf_uses_2s_vbv_and_i_qfactor(self):
+    def test_qvbr_dmabuf_uses_frame_hrd_and_i_qfactor(self):
         os.environ["FLUXCAST_WFD_VAAPI_RC"] = "QVBR"
         os.environ["FLUXCAST_WFD_BITRATE"] = "4M"
         os.environ["FLUXCAST_WFD_VAAPI_BITRATE"] = "4M"
@@ -278,8 +278,28 @@ class WlrootsDamageFlagTest(unittest.TestCase):
         wf = " ".join(cmds["wf"])
         self.assertIn("rc_mode=QVBR", wf)
         self.assertIn("i_qfactor=1.0", wf)
-        self.assertIn("bufsize=8000000", wf)
+        # 4M @ 30fps, 0.1s cap, 4 frames → 400 kbit
+        self.assertIn("bufsize=400000", wf)
         self.assertIn("gop_size=60", wf)
+
+    def test_cbr_dmabuf_uses_frame_hrd(self):
+        os.environ["FLUXCAST_WFD_VAAPI_RC"] = "CBR"
+        os.environ["FLUXCAST_WFD_BITRATE"] = "8M"
+        os.environ["FLUXCAST_WFD_VAAPI_BITRATE"] = "8M"
+        os.environ.pop("FLUXCAST_WFD_VBV_MULTIPLIER", None)
+        os.environ["FLUXCAST_WFD_VAAPI_GOP"] = "60"
+        with mock.patch("wfd.hw_encode._vaapi_usable", return_value=True):
+            with mock.patch("wfd.hw_encode._requested_gpu_encode", return_value=True):
+                with mock.patch("wfd.hw_encode.monitor_scale", return_value=1.0):
+                    cmds = self._capture_cmds(
+                        encoder="auto", capture_encode="vaapi", power_plan="power-saver"
+                    )
+        wf = " ".join(cmds["wf"])
+        self.assertIn("rc_mode=CBR", wf)
+        # 8M @ 30fps, 0.25 s CBR HRD → 2 Mbit
+        self.assertIn("bufsize=2000000", wf)
+        self.assertIn("maxrate=8000000", wf)
+        self.assertIn("i_qfactor=1.0", wf)
 
     def test_dmabuf_aac_is_encoded_in_ffmpeg_not_copied_from_nut(self):
         """WFD AAC is ADTS in MPEG-TS; NUT AAC copy leaves an empty sink plane."""
@@ -305,6 +325,9 @@ class WlrootsDamageFlagTest(unittest.TestCase):
         self.assertEqual(ff[ff.index("-c:a") + 1], "aac")
         self.assertIn("aac_low", ff)
         self.assertNotEqual(ff[ff.index("-c:a") + 1], "copy")
+        self.assertIn("nobuffer+genpts+flush_packets", ff)
+        self.assertIn("low_delay", ff)
+        self.assertNotIn("aresample", ff)
 
     def test_dmabuf_icc_binary_passes_capture_rate(self):
         """ICC builds need -r for capture cadence; stock must not get -r on DMA.

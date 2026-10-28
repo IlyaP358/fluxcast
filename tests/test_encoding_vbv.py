@@ -12,12 +12,20 @@ from wfd.encoding import (
     cap_kbits_to_link,
     latency_first_vbv_multiplier,
     link_allows_lpcm,
+    low_delay_hrd_bits,
     parse_iw_station_air_mbps,
     should_honor_idr_request,
 )
 
 
 class VbvBufsizeTest(unittest.TestCase):
+    def test_low_delay_hrd_is_a_few_frames(self):
+        # 14 Mbps @ 60 fps: 4 frames = 933_333 bits, 0.1 s cap = 1.4 Mbit → frames win
+        self.assertEqual(low_delay_hrd_bits(14_000_000, 60.0), 933_332)
+        # 4 Mbps @ 30 fps: 4 frames = 533_333, 0.1 s = 400_000 → time cap
+        self.assertEqual(low_delay_hrd_bits(4_000_000, 30.0), 400_000)
+
+
     def tearDown(self):
         os.environ.pop("FLUXCAST_WFD_VBV_MULTIPLIER", None)
         os.environ.pop("FLUXCAST_WFD_AIR_MBPS", None)

@@ -352,13 +352,16 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                     "[FluxCast WFD RTSP] TV advertised no AAC/LPCM audio; "
                     "falling back to video-only WFD."
                 )
-            elif audio and _lpcm_ok:
+            elif audio and _has_lpcm and not _force_aac:
+                # LPCM-only sinks (hotyeah / many Realtek dongles) cannot play
+                # AAC. Do not fall through to AAC when the air check is tight.
                 self.negotiated_lpcm = True
                 extra = " and AAC" if _has_aac else " only"
                 air_s = f"{_air:.1f} Mbps" if _air else "unknown"
+                why = "" if _lpcm_ok else " (air check would have preferred AAC)"
                 print(
                     f"[FluxCast WFD RTSP] TV advertised LPCM{extra}; "
-                    f"negotiating WFD LPCM (P2P air {air_s}; "
+                    f"negotiating WFD LPCM (P2P air {air_s}{why}; "
                     "PIDs 0x1011/0x1100, stream_type 0x83)."
                 )
             elif audio and _has_aac:
@@ -371,16 +374,14 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                     and _can5 is False
                 ):
                     why = "5 GHz GO; phy cannot carry 5 GHz WFD payload"
-                if _has_lpcm and not _force_aac:
-                    air_s = f"{_air:.1f} Mbps" if _air else "unknown"
-                    print(
-                        "[FluxCast WFD RTSP] Sink advertised LPCM+AAC; "
-                        f"using AAC ({why}, air {air_s})"
-                    )
-                elif _has_lpcm and _force_aac:
+                if _has_lpcm and _force_aac:
                     print(
                         "[FluxCast WFD RTSP] TV advertised LPCM; "
                         "FLUXCAST_WFD_FORCE_AAC=1 — using AAC."
+                    )
+                else:
+                    print(
+                        f"[FluxCast WFD RTSP] using AAC ({why})"
                     )
             elif audio and not _has_aac and _has_lpcm and _force_aac:
                 self.negotiated_lpcm = False

@@ -127,8 +127,13 @@ back to sudo - see the file for details.
 ### WFD (Primary)
 
 ```text
-screen + audio capture -> H.264/AAC RTP -> Wi-Fi Direct + RTSP -> TV WFD receiver
+screen + audio capture -> H.264 + LPCM (WFD 0x83) or AAC in MPEG-TS/RTP
+  -> Wi-Fi Direct + RTSP -> TV WFD receiver
 ```
+
+LPCM whenever the sink advertises it (Realtek/hotyeah are often LPCM-only).
+AAC if the sink has no LPCM, or `FLUXCAST_WFD_FORCE_AAC=1`. Interactive
+encode: CBR, ~0.25 s HRD, GOP ≈ 0.25 s at 60 fps, no ffmpeg `aresample=async`.
 
 This is the lowest-latency and most predictable path in the current codebase.
 
