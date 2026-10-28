@@ -435,5 +435,24 @@ class P2pClientCarrierTest(unittest.TestCase):
         self.assertIn("disappeared", str(ctx.exception))
 
 
+class StopGoDnsmasqTest(unittest.TestCase):
+    def test_pkills_all_fluxcast_dnsmasq_without_lease_file(self):
+        wpas_ip._go_dnsmasq_lease_file = None
+        with mock.patch.object(wpas_ip, "_sudo_run") as sudo:
+            wpas_ip._stop_go_dnsmasq()
+        cmds = [" ".join(c.args[0]) for c in sudo.call_args_list]
+        self.assertTrue(any("dnsmasq.*fluxcast-dnsmasq" in c for c in cmds))
+        self.assertIsNone(wpas_ip._go_dnsmasq_lease_file)
+
+    def test_pkills_lease_file_and_all_fluxcast_dnsmasq(self):
+        wpas_ip._go_dnsmasq_lease_file = "/tmp/fluxcast-dnsmasq-p2p-wlp0s20-0.leases"
+        with mock.patch.object(wpas_ip, "_sudo_run") as sudo:
+            wpas_ip._stop_go_dnsmasq()
+        cmds = [" ".join(c.args[0]) for c in sudo.call_args_list]
+        self.assertTrue(any("fluxcast-dnsmasq-p2p-wlp0s20-0.leases" in c for c in cmds))
+        self.assertTrue(any("dnsmasq.*fluxcast-dnsmasq" in c for c in cmds))
+        self.assertIsNone(wpas_ip._go_dnsmasq_lease_file)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,28 @@ from ..modes import _h264_level_for_mode
 from ..net import _ffmpeg_sender_args
 
 
+def io_watch_is_frozen(
+    last: tuple[int, int], cur: tuple[int, int], watch: str = "both"
+) -> bool:
+    """True when the watched IO counters have not advanced.
+
+    ``watch="wchar"`` is for DMA wf-recorder (rchar stays flat; wchar is
+    annex-B into the muxer pipe). Default watches both rchar and wchar.
+    """
+    if watch == "wchar":
+        return cur[1] == last[1]
+    return cur[0] == last[0] and cur[1] == last[1]
+
+
+def impairment_debounce_seconds(reason: str) -> float:
+    """Seconds to wait before another capture rebind for *reason*."""
+    if reason == "encode-stall":
+        return 4.0
+    if reason in ("buffer-pool", "bufs-size-storm"):
+        return 8.0
+    return 20.0
+
+
 class WlrootsMixin:
     @staticmethod
     def _enlarge_pipe_fd(fd: int, size: int | None = None) -> int:
@@ -69,10 +91,12 @@ class WlrootsMixin:
         *,
         stall_seconds: float = 12.0,
         poll_seconds: float = 1.0,
+        watch: str = "both",
     ) -> None:
-        """Rebind capture if ffmpeg IO freezes while the process stays alive.
+        """Rebind capture if sender IO freezes while the process stays alive.
 
-        Catches VAAPI pipe wedges faster than waiting for bufs_size / TX stalls.
+        Catches VAAPI/ICC wedges faster than waiting for TX stalls.
+        ``watch="wchar"`` for DMA wf-recorder (rchar stays flat).
         Disabled with FLUXCAST_WFD_FFMPEG_IO_WATCHDOG=0.
         """
         flag = (os.environ.get("FLUXCAST_WFD_FFMPEG_IO_WATCHDOG") or "1").strip().lower()
@@ -109,7 +133,7 @@ class WlrootsMixin:
                     last = cur
                     flat_for = 0.0
                     continue
-                if cur[0] == last[0] and cur[1] == last[1]:
+                if io_watch_is_frozen(last, cur, watch):
                     flat_for += poll_seconds
                 else:
                     flat_for = 0.0
@@ -117,7 +141,8 @@ class WlrootsMixin:
                 if flat_for >= stall_seconds:
                     print(
                         "[FluxCast WFD Media] ffmpeg IO watchdog: "
-                        f"rchar/wchar flat for {flat_for:.0f}s "
+                        f"{'wchar' if watch == 'wchar' else 'rchar/wchar'} "
+                        f"flat for {flat_for:.0f}s "
                         f"(pid={pid}); rebinding desktop capture",
                         flush=True,
                     )
@@ -363,9 +388,7 @@ class WlrootsMixin:
         """Restart desktop capture after DTS/pool spikes (debounced)."""
         now = time.monotonic()
         last = float(getattr(self, "_last_impairment_rebind", 0.0) or 0.0)
-        # Pipe + continuous -D storms need faster recovery than generic DTS.
-        pipe_fast = reason in ("buffer-pool", "bufs-size-storm")
-        debounce = 8.0 if pipe_fast else 20.0
+        debounce = impairment_debounce_seconds(reason)
         if now - last < debounce:
             return
         if getattr(self, "restarting", False):
@@ -408,6 +431,8 @@ class WlrootsMixin:
                     low = line.lower()
                     if "non monotonically" in low or "non-monotonically" in low:
                         self._maybe_rebind_for_impairment("dts")
+                    elif "encode stall" in low:
+                        self._maybe_rebind_for_impairment("encode-stall")
                     elif "buffer pool full" in low:
                         pool_hits += 1
                         if pool_hits >= 2:
@@ -758,6 +783,8 @@ class WlrootsMixin:
         self._lpcm_muxer = muxer
         self.processes.append(wf_proc)
         self.processes.append(aud_proc)
+        # DMA rchar stays flat; wchar is annex-B into the muxer pipe.
+        self._start_ffmpeg_io_watchdog(wf_proc, stall_seconds=8.0, watch="wchar")
         self._lpcm_video_fd = r_fd
         self._lpcm_audio_fd = ar_fd
         print(

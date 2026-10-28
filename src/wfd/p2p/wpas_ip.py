@@ -594,10 +594,10 @@ def _wait_for_lease(
 
 def _stop_go_dnsmasq() -> None:
     global _go_dnsmasq_lease_file
-    if _go_dnsmasq_lease_file is None:
-        return
     try:
-        _sudo_run(["pkill", "-f", f"dnsmasq.*{_go_dnsmasq_lease_file}"], timeout=5.0)
+        if _go_dnsmasq_lease_file:
+            _sudo_run(["pkill", "-f", f"dnsmasq.*{_go_dnsmasq_lease_file}"], timeout=5.0)
+        _sudo_run(["pkill", "-f", "dnsmasq.*fluxcast-dnsmasq"], timeout=5.0)
     except Exception as exc:
         print(f"[FluxCast WFD] Warning: could not stop dnsmasq: {exc}")
     _go_dnsmasq_lease_file = None
