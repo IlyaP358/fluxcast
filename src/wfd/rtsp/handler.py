@@ -9,7 +9,15 @@ from typing import Optional
 from ..config import WFDCEAMode, WFDMediaConfig, WFDNotReady, WFDVideoFormat
 from ..constants import WFD_AUDIO_AAC, WFD_AUDIO_LPCM_48K, WFD_UIBC_PORT
 from ..dump import schedule_ts_dump_report
-from ..encoding import _parse_resolution
+from ..encoding import (
+    _bitrate_to_kbits,
+    _parse_resolution,
+    link_allows_lpcm,
+    read_go_air_mbps,
+    read_go_oper_mhz,
+    read_go_radio_can_5ghz,
+    should_honor_idr_request,
+)
 from ..latency import _append_latency_log
 from ..media.pipeline import WFDMediaPipeline
 from ..mode_state import write_mode_state
@@ -19,7 +27,7 @@ from ..modes import (
     _parse_sink_video_format,
     _selected_video_format,
 )
-from ..net import _netdev_tx_bytes, _safe_source_port
+from ..net import _netdev_tx_bytes, _safe_source_port, harden_rtsp_socket
 from ..p2p.usb_dedicated import mark_p2p_persistent_ok
 from .message import (
     RTSPMessage, _parse_parameters, _parse_rtp_ports,
@@ -64,6 +72,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
         if hasattr(self.server, "parent_server"):
             self.server.parent_server.has_connected_client = True  # type: ignore[attr-defined]
 
+        harden_rtsp_socket(self.request)
         print(f"[FluxCast WFD RTSP] TV connected from {peer}; local={self.local_ip}")
         _append_latency_log(
             self.media_config.latency_log_path,
@@ -114,7 +123,7 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
     def _audio_codecs(self) -> str:
         if self.media_config.no_audio or self.negotiated_no_audio:
             return "none"
-        if self.negotiated_lpcm or "microsoft" in self.media_config.peer_name.lower():
+        if self.negotiated_lpcm:
             return WFD_AUDIO_LPCM_48K
         return WFD_AUDIO_AAC
 
@@ -310,43 +319,75 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
                         "input back-channel stays disabled for this session."
                     )
             audio = params.get("wfd_audio_codecs", "")
-            _is_microsoft = "microsoft" in self.media_config.peer_name.lower()
             _caps = (audio or "").upper()
             _has_aac = "AAC" in _caps
             _has_lpcm = "LPCM" in _caps
-            # Prefer AAC when advertised; else LPCM-only. FLUXCAST_WFD_FORCE_AAC=1
-            # keeps AAC even if the sink lists only LPCM.
             _force_aac = (os.environ.get("FLUXCAST_WFD_FORCE_AAC") or "").strip() in (
                 "1",
                 "true",
                 "yes",
+            )
+            _video_k = _bitrate_to_kbits(self.media_config.bitrate or "4M")
+            _air = read_go_air_mbps()
+            _go_mhz = read_go_oper_mhz()
+            _can5 = read_go_radio_can_5ghz()
+            _lpcm_ok = (
+                _has_lpcm
+                and not _force_aac
+                and link_allows_lpcm(
+                    _air,
+                    _video_k,
+                    go_mhz=_go_mhz,
+                    radio_can_5ghz=_can5,
+                )
             )
             if (
                 audio
                 and not self.media_config.no_audio
                 and not _has_aac
                 and not _has_lpcm
-                and not _is_microsoft
             ):
                 self.negotiated_no_audio = True
                 print(
                     "[FluxCast WFD RTSP] TV advertised no AAC/LPCM audio; "
                     "falling back to video-only WFD."
                 )
-            elif audio and not _has_aac and _has_lpcm and not _force_aac:
+            elif audio and _lpcm_ok:
                 self.negotiated_lpcm = True
+                extra = " and AAC" if _has_aac else " only"
+                air_s = f"{_air:.1f} Mbps" if _air else "unknown"
                 print(
-                    "[FluxCast WFD RTSP] TV advertised LPCM only; "
-                    "negotiating WFD LPCM (PIDs 0x1011/0x1100, stream_type 0x83)."
+                    f"[FluxCast WFD RTSP] TV advertised LPCM{extra}; "
+                    f"negotiating WFD LPCM (P2P air {air_s}; "
+                    "PIDs 0x1011/0x1100, stream_type 0x83)."
                 )
+            elif audio and _has_aac:
+                self.negotiated_lpcm = False
+                why = "FORCE_AAC" if _force_aac else "P2P air tight for LPCM"
+                if (
+                    not _force_aac
+                    and _go_mhz is not None
+                    and int(_go_mhz) >= 5000
+                    and _can5 is False
+                ):
+                    why = "5 GHz GO; phy cannot carry 5 GHz WFD payload"
+                if _has_lpcm and not _force_aac:
+                    air_s = f"{_air:.1f} Mbps" if _air else "unknown"
+                    print(
+                        "[FluxCast WFD RTSP] Sink advertised LPCM+AAC; "
+                        f"using AAC ({why}, air {air_s})"
+                    )
+                elif _has_lpcm and _force_aac:
+                    print(
+                        "[FluxCast WFD RTSP] TV advertised LPCM; "
+                        "FLUXCAST_WFD_FORCE_AAC=1 — using AAC."
+                    )
             elif audio and not _has_aac and _has_lpcm and _force_aac:
                 self.negotiated_lpcm = False
                 print(
                     "[FluxCast WFD RTSP] TV advertised LPCM only; "
                     "FLUXCAST_WFD_FORCE_AAC=1 — using AAC path."
                 )
-            if _is_microsoft and audio:
-                print(f"[FluxCast WFD RTSP] Microsoft adapter audio caps: {audio}")
             mode = self._cea_mode()
             print(
                 f"[FluxCast WFD RTSP] TV RTP port: {self.sink_rtp_port}; "
@@ -394,15 +435,23 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
 
         if method == "SET_PARAMETER":
             if "wfd_idr_request" in msg.body:
-                # AOSP WifiDisplaySource: requestIDRFrame() only — do NOT tear
-                # down capture. With GOP≈1s (vaapiGop=30 @ 30fps) the next
-                # keyframe satisfies WFD §4.10.5 recovery. Bitrate adaptation
-                # stays on the latency loop (×0.6 / ×1.1), not on every IDR.
-                print(
-                    "[FluxCast WFD RTSP] Sink requested IDR "
-                    "(AOSP-style: next keyframe satisfies; no pipeline restart)"
-                )
-                self._request_idr_frame()
+                # WFD §4.10.5: next IDR recovers the decoder. Do not restart
+                # capture. Coalesce — a starved sink re-requests faster than
+                # GOP, and extra I-frames make the air worse.
+                now = time.time()
+                last = float(getattr(self, "_last_idr_ts", 0.0) or 0.0)
+                if should_honor_idr_request(last, now):
+                    self._last_idr_ts = now
+                    print(
+                        "[FluxCast WFD RTSP] Sink requested IDR "
+                        "(next keyframe; no pipeline restart)"
+                    )
+                    self._request_idr_frame()
+                else:
+                    print(
+                        "[FluxCast WFD RTSP] Sink requested IDR "
+                        f"(coalesced; {now - last:.1f}s since last)"
+                    )
             self._send_response(msg, headers=self._session_header())
             return
 
@@ -538,6 +587,10 @@ class _WFDRTSPHandler(socketserver.StreamRequestHandler):
             self.media.start()
             print("[FluxCast WFD RTSP] PLAY accepted; media stream started.")
             mark_p2p_persistent_ok(self.media_config.peer_address)
+            from ..p2p.usb_dedicated import schedule_mid_session_csa
+            schedule_mid_session_csa(
+                delay_s=2.0, peer_mac=self.media_config.peer_address
+            )
             if self.media_config.uibc and getattr(self, "sink_supports_uibc", False):
                 self._maybe_start_uibc(mode)
                 self._schedule_uibc_enable(1.5)

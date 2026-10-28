@@ -1,8 +1,27 @@
 import shutil
+import socket
 import subprocess
 from typing import Optional
 
 from .proc import _run
+
+
+def harden_rtsp_socket(sock: socket.socket) -> None:
+    """Keep RTSP TCP through a short 802.11 CSA radio gap (no new 4-way).
+
+    Linux: keepalive after 1s idle, 1s interval, 20 probes; USER_TIMEOUT 25s
+    so a 1–3s beacon countdown does not RST. A new association still kills
+    the PCB — CSA must not deauth.
+    """
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 20)
+        # TCP_USER_TIMEOUT is 18 on Linux
+        sock.setsockopt(socket.IPPROTO_TCP, 18, 25_000)
+    except OSError:
+        pass
 
 
 def _safe_source_port(requested: int, sink_port: int, sink_rtcp_port: int = 0) -> int:

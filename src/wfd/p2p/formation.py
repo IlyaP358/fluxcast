@@ -39,6 +39,23 @@ def peer_listen_freq(
     return default
 
 
+def listen_freq_for_wps(
+    peer_info: Mapping[str, str],
+    cached_listen_mhz: int | None,
+    default: int = 2437,
+) -> int:
+    """Listen channel for GO Neg / WPS.
+
+    A 2.4 GHz social find can snapshot a probe while the sink still
+    listens on 5 GHz. Prefer the scan-cache 5 GHz listen so WPS stays
+    on the Neg channel (Wi-Fi Direct).
+    """
+    live = peer_listen_freq(peer_info, default=default)
+    if cached_listen_mhz and cached_listen_mhz >= 5000 and live < 5000:
+        return int(cached_listen_mhz)
+    return live
+
+
 def freq_to_p2p_class_channel(freq: int) -> tuple[str, str]:
     """Map MHz → (global oper class, channel) for p2p_listen_* / p2p_pref_chan.
 
@@ -109,6 +126,360 @@ def parse_iw_phy_caps(iw_phy_text: str) -> dict[str, bool]:
         "has_vht": has_vht,
         "has_vht80": has_vht80,
     }
+
+
+def parse_iw_phy_radio(iw_phy_text: str) -> dict[str, object]:
+    """Phy capabilities used for P2P GO Neg (Wi-Fi Direct Channel List / width).
+
+    Bus (USB vs PCI) is not an input. NSS, antenna mask, and per-band TX
+    power come from ``iw phy``. Defaults are conservative (1 stream).
+    """
+    t = iw_phy_text or ""
+    caps = parse_iw_phy_caps(t)
+    nss = 1
+    for m in re.finditer(
+        r"HT TX/RX MCS rate indexes supported:\s*0-(\d+)", t
+    ):
+        hi = int(m.group(1))
+        if hi >= 23:
+            nss = max(nss, 3)
+        elif hi >= 15:
+            nss = max(nss, 2)
+        else:
+            nss = max(nss, 1)
+    for m in re.finditer(r"^(\d+) streams:", t, re.M):
+        nss = max(nss, int(m.group(1)))
+    antennas_tx = 1
+    m = re.search(r"Available Antennas:\s*TX\s*(0x[0-9a-fA-F]+)", t)
+    if m:
+        bits = bin(int(m.group(1), 16)).count("1")
+        if bits:
+            antennas_tx = bits
+
+    def _max_tx(lo: int, hi: int) -> float | None:
+        best: float | None = None
+        for tm in re.finditer(
+            r"\*\s+(\d+)\.0 MHz \[(\d+)\]\s*\(([\d.]+)\s*dBm\)", t
+        ):
+            freq = int(tm.group(1))
+            if lo <= freq < hi:
+                dbm = float(tm.group(3))
+                best = dbm if best is None else max(best, dbm)
+        return best
+
+    return {
+        **caps,
+        "nss": nss,
+        "antennas_tx": antennas_tx,
+        "tx_dbm_24": _max_tx(2400, 2500),
+        "tx_dbm_5": _max_tx(5000, 5925),
+        "has_he": "HE Capabilities" in t or "HE Iftypes" in t or "HE PHY" in t,
+    }
+
+
+def radio_can_stream_5ghz(radio: Mapping[str, object]) -> bool:
+    """True if this phy can reasonably carry WFD on 5 GHz (not a bus check)."""
+    if not radio.get("has_5ghz"):
+        return False
+    nss = int(radio.get("nss") or 1)
+    ants = int(radio.get("antennas_tx") or 1)
+    if nss >= 2 or ants >= 2:
+        return True
+    tx5 = radio.get("tx_dbm_5")
+    tx24 = radio.get("tx_dbm_24")
+    try:
+        tx5f = float(tx5) if tx5 is not None else None
+        tx24f = float(tx24) if tx24 is not None else None
+    except (TypeError, ValueError):
+        tx5f = tx24f = None
+    # 5 GHz has extra path loss. 1ss needs a real EIRP advantage to stay.
+    if tx5f is not None and tx5f >= 20:
+        return True
+    if tx5f is not None and tx24f is not None and tx5f >= tx24f + 6:
+        return True
+    return False
+
+
+def radio_meets_wfd_24ghz(radio: Mapping[str, object]) -> bool:
+    """2.4 GHz 20 MHz 1ss is enough at short range (hotyeah ~−46 dBm)."""
+    if not radio.get("has_2ghz"):
+        return False
+    tx = radio.get("tx_dbm_24")
+    if tx is None:
+        return True
+    try:
+        return float(tx) >= 10.0
+    except (TypeError, ValueError):
+        return True
+
+
+def wfd_radio_reject_reason(
+    radio: Mapping[str, object],
+    oper_mhz: int,
+    *,
+    allow_weak: bool = False,
+    peer_has_24: bool = True,
+) -> str | None:
+    """Why this phy cannot carry a *reliable* WFD payload, or None.
+
+    WFD does not define a TX-power minimum. Refuse 5 GHz *payload* on a
+    1-stream / &lt;20 dBm phy (−80 dBm MCS 2 on LG). Do **not** refuse
+    the session if 2.4 GHz payload is viable (same phy, hotyeah ~−46 dBm;
+    LG still forms on 5 GHz listen for WPS then CSA). ``allow_weak`` is
+    FLUXCAST_WFD_ALLOW_WEAK_RADIO (5 GHz payload on a weak phy).
+    """
+    if allow_weak or oper_mhz <= 0:
+        return None
+    nss = int(radio.get("nss") or 1)
+    ants = int(radio.get("antennas_tx") or 1)
+    tx5 = radio.get("tx_dbm_5")
+    tx24 = radio.get("tx_dbm_24")
+    if oper_mhz >= 5000 and not radio_can_stream_5ghz(radio):
+        if peer_has_24 and radio_meets_wfd_24ghz(radio):
+            return None
+        return (
+            f"phy below 5 GHz WFD baseline (nss={nss} antennas={ants} "
+            f"tx_5ghz={tx5} dBm; need 2 streams or ≥20 dBm) and no "
+            "usable 2.4 GHz payload path. "
+            "FLUXCAST_WFD_ALLOW_WEAK_RADIO=1 to override"
+        )
+    if 2400 <= oper_mhz < 2500 and not radio_meets_wfd_24ghz(radio):
+        return (
+            f"phy below 2.4 GHz WFD baseline (nss={nss} antennas={ants} "
+            f"tx_2ghz={tx24} dBm; need ≥10 dBm). "
+            "FLUXCAST_WFD_ALLOW_WEAK_RADIO=1 to override"
+        )
+    return None
+
+
+def go_width_flags_for_radio(radio: Mapping[str, object]) -> tuple[str, str]:
+    """``(p2p_go_ht40, p2p_go_vht)`` from this phy.
+
+    WFD requires 802.11n (HT20). HT40/VHT are optional; wpa intersects with
+    the peer Channel List during GO Neg. A 1-stream radio stays 20 MHz.
+    """
+    nss = int(radio.get("nss") or 1)
+    if nss <= 1:
+        return "0", "0"
+    return p2p_go_width_flags(radio)
+
+
+def go_intents_for_radio(
+    go_intent: int, radio: Mapping[str, object]
+) -> list[int]:
+    """GO intent list. WFD: either source or sink may be GO (single sink).
+
+    1-stream / 1-antenna radios often drop client Confirm TX (SoftMAC
+    remain-on-channel), so they stay GO (15). Stronger radios honor the
+    requested intent and can fall back.
+    """
+    nss = int(radio.get("nss") or 1)
+    ants = int(radio.get("antennas_tx") or 1)
+    if nss <= 1 and ants <= 1:
+        return [15]
+    if go_intent <= 0:
+        return [0, 15]
+    if go_intent >= 15:
+        return [15, 0]
+    return [go_intent]
+
+
+def peer_advertises_24ghz(peer_info: Mapping[str, str]) -> bool:
+    """True unless the peer Channel List is present and 5 GHz-only.
+
+    listen_freq=5745 with no channel_list is not proof the sink lacks
+    2.4 GHz social channels (1/6/11). That snapshot used to skip CSA.
+    """
+    blob = " ".join(
+        str(peer_info.get(k) or "")
+        for k in ("channels", "channel_list", "freq_list")
+    )
+    if re.search(r"\b81:", blob):
+        return True
+    for key in ("listen_freq", "oper_freq", "freq"):
+        try:
+            freq = int(peer_info.get(key) or 0)
+        except ValueError:
+            continue
+        if 2400 <= freq < 2500:
+            return True
+    if re.search(r"\b(115|118|121|124|125):", blob):
+        return False
+    return True
+
+
+# Wi-Fi Direct formation vs 802.11 payload CSA vs WFD L3 (DHCP/RTSP).
+FORMATION_STA_WAIT_S = 15.0
+FORMATION_L3_TRY_S = 12.0  # DHCP on formation channel before any CSA
+POST_CSA_STA_WAIT_S = 32.0  # first 2.4 AP-STA-CONNECTED after CSA
+POST_CSA_CHURN_S = 32.0  # LG second 4-way ~28s after first 2.4 join
+POST_CSA_SETTLE_S = 8.0  # quiet time after the last 4-way before DHCP
+PAYLOAD_CSA_24_MHZ = 2437
+PAYLOAD_STAY = "stay"
+PAYLOAD_CSA_24 = "csa_2437"
+
+
+def go_sta_is_present(log_delta: str, station_dump: str) -> bool:
+    """True if a P2P client is associated with this GO.
+
+    Wi-Fi Direct WPS + 4-way run on the negotiated operating channel
+    (typically the peer listen channel). 802.11 CSA is for an *already
+    associated* STA. CSA before AP-STA-CONNECTED is why LG formation
+    failed after 5 GHz WPS (GROUP-REMOVED FORMATION_FAILED, no STA).
+    """
+    dump = station_dump or ""
+    if re.search(r"(?m)^Station ", dump):
+        return True
+    delta = log_delta or ""
+    conn = delta.rfind("AP-STA-CONNECTED")
+    if conn < 0:
+        return False
+    disc = delta.rfind("AP-STA-DISCONNECTED")
+    return conn > disc
+
+
+def ap_sta_connect_count(log_delta: str) -> int:
+    """Unprefixed CTRL-EVENT lines only (hostapd also logs ``p2p-0:``)."""
+    return len(re.findall(r"(?m)^AP-STA-CONNECTED ", log_delta or ""))
+
+
+def go_sta_connected_in_delta(log_delta: str) -> bool:
+    """True if this log slice has a CONNECT after any DISCONNECT.
+
+    Post-CSA L3 must not use ``iw station dump``: the 5 GHz association
+    stays listed (zombie, low inactive time for ~1s) and would start the
+    DHCP clock before the sink rejoins on 2.4.
+    """
+    delta = log_delta or ""
+    conn = delta.rfind("AP-STA-CONNECTED")
+    if conn < 0:
+        return False
+    disc = delta.rfind("AP-STA-DISCONNECTED")
+    return conn > disc
+
+
+def csa_sta_followed(
+    *,
+    go_mhz: int,
+    target_mhz: int,
+    disconnected: bool,
+    inactive_ms: int | None,
+    sta_present: bool,
+    max_inactive_ms: int = 2000,
+) -> bool:
+    """True only if the same association is live on the CSA target channel.
+
+    A single sample right after chan_switch is not enough (LG looked
+    followed at 2.5s then went MCS 0 / 10s inactive and TCP timed out).
+    """
+    if disconnected or not sta_present or go_mhz != target_mhz:
+        return False
+    if inactive_ms is None:
+        return False
+    return inactive_ms < max_inactive_ms
+
+
+def csa_dhcp_still_waiting(
+    *,
+    connected: bool,
+    seconds_since_last_connect: float | None,
+    seconds_since_first_connect: float,
+    extra_four_ways: int,
+    churn_s: float = POST_CSA_CHURN_S,
+    settle_s: float = POST_CSA_SETTLE_S,
+) -> bool:
+    """True if DHCP would still land on an association LG is about to replace.
+
+    After CSA the sink often 4-way once (DHCP/RTSP start), then a full
+    re-auth ~28s later which kills TCP, then deauth reason 3. Wait until
+    either a second 4-way has settled, or the churn window has passed
+    with one stable join (hotyeah / no extra auth).
+    """
+    if not connected or seconds_since_last_connect is None:
+        return True
+    if seconds_since_last_connect < settle_s:
+        return True
+    if extra_four_ways < 1 and seconds_since_first_connect < churn_s:
+        return True
+    return False
+
+
+def go_sta_ready_for_l3(
+    log_delta: str,
+    station_dump: str,
+    *,
+    max_inactive_ms: int = 5000,
+) -> bool:
+    """STA is on the *current* BSS and recently active (safe for DHCP/RTSP).
+
+    After CSA the dump can still list the 5 GHz association with a large
+    inactive time while the sink scans 2.4. Starting DHCP then burns the
+    lease timer (LG ~24s rejoin).
+    """
+    dump = station_dump or ""
+    if not go_sta_is_present(log_delta, dump):
+        return False
+    m = re.search(r"inactive time:\s*(\d+)\s*ms", dump)
+    if m and int(m.group(1)) > max_inactive_ms:
+        return False
+    return True
+
+
+def plan_payload_channel(
+    *,
+    go_mhz: int,
+    radio: Mapping[str, object],
+    sta_signal_dbm: int | None,
+    peer_has_24: bool,
+    prefer_5ghz: bool,
+    sta_present: bool,
+) -> str:
+    """Payload channel after formation. CSA without a STA is unrepresentable.
+
+    Formation (WPS/4-way) stays on the negotiated oper channel. CSA is
+    802.11 for an associated STA only (hotyeah usually already on 2.4;
+    LG 5 GHz listen must associate before any hop).
+    """
+    if not sta_present:
+        return PAYLOAD_STAY
+    if should_csa_go_to_2ghz(
+        go_mhz=go_mhz,
+        radio=radio,
+        sta_signal_dbm=sta_signal_dbm,
+        peer_has_24=peer_has_24,
+        prefer_5ghz=prefer_5ghz,
+    ):
+        return PAYLOAD_CSA_24
+    return PAYLOAD_STAY
+
+
+def should_csa_go_to_2ghz(
+    *,
+    go_mhz: int,
+    radio: Mapping[str, object],
+    sta_signal_dbm: int | None,
+    peer_has_24: bool,
+    prefer_5ghz: bool,
+) -> bool:
+    """Move a 5 GHz GO to 2.4 when this phy cannot carry WFD there.
+
+    Formation stays on the peer listen channel for WPS (Wi-Fi Direct).
+    CSA is payload only. A 1-stream radio CSAs unless the caller opted
+    to stay on 5 GHz. A stronger radio stays unless STA RSSI is poor.
+    """
+    if go_mhz < 5000:
+        return False
+    if not peer_has_24:
+        return False
+    if not radio_can_stream_5ghz(radio):
+        # Weak 5 GHz phy: payload must be 2.4 if the peer has it.
+        # prefer_5ghz keeps 5 GHz in the *formation* set (WPS), not payload.
+        return bool(peer_has_24)
+    if prefer_5ghz and (sta_signal_dbm is None or sta_signal_dbm > -82):
+        return False
+    if sta_signal_dbm is not None and sta_signal_dbm <= -80:
+        return True
+    return False
 
 
 def peer_advertises_5ghz(peer_info: Mapping[str, str]) -> bool:
@@ -343,6 +714,33 @@ def peer_wps_not_ready(peer_info: Mapping[str, str]) -> bool:
     return wps in ("not-ready", "not_ready", "")
 
 
+def usb_discovery_steps(cached_listen_mhz: int | None) -> list[dict[str, object]]:
+    """Discovery plan: search the known listen channel first.
+
+    A 5 GHz-listen sink was invisible for a full 12 s social find, then
+    appeared in ~2 s on ``p2p_find freq=<listen>``. Social find is the
+    fallback (TV scanning 1/6/11). Listen-only is last.
+    """
+    if cached_listen_mhz and cached_listen_mhz >= 5000:
+        mhz = int(cached_listen_mhz)
+        return [
+            {"mode": "find_freq", "seconds": 8, "freq": mhz},
+            {"mode": "find_social", "seconds": 8, "freq": None},
+            {"mode": "listen", "seconds": 8, "freq": mhz},
+            {"mode": "find", "seconds": 8, "freq": None},
+        ]
+    freq = (
+        int(cached_listen_mhz)
+        if cached_listen_mhz and 2400 <= cached_listen_mhz < 2500
+        else 2437
+    )
+    return [
+        {"mode": "find_social", "seconds": 8, "freq": None},
+        {"mode": "listen", "seconds": 8, "freq": freq},
+        {"mode": "find", "seconds": 8, "freq": None},
+    ]
+
+
 def wait_peer_wps_ready(
     wpa_cli: WpaCli,
     peer: str,
@@ -375,8 +773,8 @@ def sync_before_go_neg(
     peer: str,
     listen_freq: int,
     *,
-    listen_seconds: int = 8,
-    prov_disc_settle_s: float = 2.5,
+    listen_seconds: int = 2,
+    prov_disc_settle_s: float = 0.6,
 ) -> None:
     """Park on peer listen_freq, then Provision Discovery before GO Neg.
 

@@ -9,6 +9,10 @@ The payoff is control that NetworkManager's own API doesn't expose: we can
 set the WFD Device Info IE and the P2P operating channel ourselves, and
 watch each step of the negotiation up close when something needs debugging.
 
+On a shared STA radio, NM keeps the uplink (wlp*) and must not own P2P
+(p2p-dev-*, p2p-*); see meta/99-fluxcast-p2p.conf. USB dedicated wpa is
+still a second phy.
+
 See wpas_ip.py for everything that happens once a group exists - role
 detection and IP configuration live there to keep this file focused.
 
@@ -20,10 +24,13 @@ _connect_peer / _wait_for_nm_activation from nm.py.
 
 import subprocess
 import time
+from pathlib import Path
 from typing import Optional
 
 from ..config import WFDNotReady
 from ..constants import WFD_RTSP_PORT
+from ..ie import wfd_wpa_cli_device_info_hex, wfd_wpa_cli_local_ip_hex
+from ..privileged import run_privileged
 from .dbus import (
     WPA_DEST, _gdbus_call, _object_paths, _variant_byte_array, _wfd_source_ie,
     _wpas_get_property, _wpas_get_string,
@@ -31,7 +38,8 @@ from .dbus import (
 from .device import _p2p_device_iface_paths, _set_p2p_go_intent, _set_p2p_oper_channel
 from .peers import _default_wifi_interface
 from .wpas_ip import (
-    configure_ip, get_p2p_role, mark_managed, mark_unmanaged, release_ip_config,
+    configure_ip, get_p2p_role, mark_unmanaged,
+    parse_p2p_group_started_addrs, release_ip_config,
 )
 WPA_IFACE = "fi.w1.wpa_supplicant1.Interface"
 WPA_P2P_IFACE = "fi.w1.wpa_supplicant1.Interface.P2PDevice"
@@ -84,6 +92,84 @@ def _set_wfd_ies(rtsp_port: int) -> None:
     if result.returncode != 0:
         raise WFDNotReady(
             f"Failed to set WFD Device Info IE: {(result.stderr or result.stdout).strip()}"
+        )
+
+
+def enable_wifi_display(physical_iface: Optional[str], rtsp_port: int) -> None:
+    """Turn on wpa ``wifi_display`` + WFD subelements on the P2P ifaces.
+
+    D-Bus WFDIEs alone is not enough: if ``wifi_display=0``, Connect is a
+    generic Wi-Fi Direct pair (TV shows Wi-Fi Direct, no RTSP/Miracast).
+    """
+    if not physical_iface:
+        return
+    ifaces = [physical_iface, p2p_dev_ctrl_ifname(physical_iface)]
+    hex0 = wfd_wpa_cli_device_info_hex(rtsp_port)
+    hex8 = wfd_wpa_cli_local_ip_hex()
+    enabled = False
+    for iface in ifaces:
+        r = run_privileged(["wpa_cli", "-i", iface, "set", "wifi_display", "1"], timeout=5.0)
+        if r.returncode != 0:
+            print(
+                f"[FluxCast WFD] wifi_display set on {iface} failed: "
+                f"{(r.stderr or r.stdout or '').strip()}"
+            )
+            continue
+        run_privileged(
+            ["wpa_cli", "-i", iface, "wfd_subelem_set", "0", hex0], timeout=5.0
+        )
+        run_privileged(
+            ["wpa_cli", "-i", iface, "wfd_subelem_set", "8", hex8], timeout=5.0
+        )
+        chk = run_privileged(
+            ["wpa_cli", "-i", iface, "get", "wifi_display"], timeout=5.0
+        )
+        val = (chk.stdout or "").strip().splitlines()
+        shown = val[-1] if val else "?"
+        print(f"[FluxCast WFD] wifi_display={shown} on {iface} (need 1 for Miracast)")
+        if shown.strip() == "1":
+            enabled = True
+    if not enabled:
+        print(
+            "[FluxCast WFD] Warning: wifi_display is not 1; the sink may "
+            "treat this as plain Wi-Fi Direct instead of Miracast"
+        )
+
+
+def flush_stale_p2p_groups(physical_iface: Optional[str]) -> None:
+    """Drop leftover persistent DIRECT-* groups before a WFD Connect.
+
+    Rejoining a previous Wi-Fi Direct persistent group looks like a
+    generic P2P pair on the TV (no RTSP) and often DEAUTH_LEAVING right
+    after P2P-GROUP-STARTED.
+    """
+    if not physical_iface:
+        return
+    for cmd in (
+        ["p2p_cancel"],
+        ["p2p_flush"],
+        ["set", "persistent_reconnect", "0"],
+    ):
+        run_privileged(["wpa_cli", "-i", physical_iface, *cmd], timeout=5.0)
+    listed = run_privileged(
+        ["wpa_cli", "-i", physical_iface, "list_networks"], timeout=5.0
+    )
+    removed = 0
+    for line in (listed.stdout or "").splitlines()[1:]:
+        low = line.lower()
+        if "direct-" not in low and "[p2p-persistent]" not in low:
+            continue
+        nid = line.split()[0]
+        if not nid.isdigit():
+            continue
+        run_privileged(
+            ["wpa_cli", "-i", physical_iface, "remove_network", nid], timeout=5.0
+        )
+        removed += 1
+    if removed:
+        print(f"[FluxCast WFD] Removed {removed} persistent DIRECT-* network(s)")
+        run_privileged(
+            ["wpa_cli", "-i", physical_iface, "save_config"], timeout=5.0
         )
 
 
@@ -153,7 +239,7 @@ def _wpas_connect(iface_path: str, peer_path: str, go_intent: int = 0,
         f"'wps_method': <'{wps_method}'>, "
         f"'go_intent': <int32 {go_intent}>, "
         f"{freq_part}"
-        "'persistent': <true>"
+        "'persistent': <false>"
         "}"
     )
     result = _gdbus_call([
@@ -164,6 +250,30 @@ def _wpas_connect(iface_path: str, peer_path: str, go_intent: int = 0,
     ], timeout=10.0, privileged=True)
     if result.returncode != 0:
         raise WFDNotReady((result.stderr or result.stdout).strip())
+
+
+def _wpas_cli_connect(
+    p2p_dev: str,
+    peer_mac: str,
+    go_intent: int,
+    frequency_mhz: Optional[int],
+) -> None:
+    """Connect via P2P-device ctrl socket (not STA D-Bus Interfaces/0)."""
+    extra = [f"freq={int(frequency_mhz)}"] if frequency_mhz else []
+    print(f"[FluxCast WFD] wpa_cli -i {p2p_dev} p2p_connect …")
+    result = _wpa_cli_iface(
+        p2p_dev,
+        "p2p_connect",
+        peer_mac.lower(),
+        "pbc",
+        f"go_intent={go_intent}",
+        *extra,
+        timeout=15.0,
+    )
+    out = (result.stdout or result.stderr or "").strip()
+    print(f"[FluxCast WFD] p2p_connect: {out or '(no output)'} rc={result.returncode}")
+    if result.returncode != 0 or "FAIL" in out.upper():
+        raise WFDNotReady(f"p2p_connect on {p2p_dev} failed: {out}")
 
 
 def _list_wpas_interfaces() -> set[str]:
@@ -216,18 +326,199 @@ def _wait_for_go_peer_associated(data_iface: str, peer_mac: str,
     )
 
 
+def _wpa_cli_iface(iface: str, *args: str, timeout: float = 5.0):
+    return run_privileged(["wpa_cli", "-i", iface, *args], timeout=timeout)
+
+
+def _wpa_ctrl_alive(iface: str) -> bool:
+    r = _wpa_cli_iface(iface, "ping", timeout=3.0)
+    return r.returncode == 0 and "PONG" in (r.stdout or "").upper()
+
+
+def _nm_drop_wifi_p2p_placeholder(physical_iface: str) -> None:
+    """Drop NM's wifi-p2p *device object* so it cannot handle GroupStarted.
+
+    Does not delete the kernel P2P-device wdev or unmanage STA. NM may
+    recreate an unmanaged placeholder; that is OK.
+    """
+    names = [f"p2p-dev-{physical_iface}", p2p_dev_ctrl_ifname(physical_iface)]
+    seen: set[str] = set()
+    for name in names:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        r = run_privileged(["nmcli", "device", "delete", name], timeout=8.0)
+        out = (r.stdout or r.stderr or "").strip()
+        if r.returncode == 0:
+            print(f"[FluxCast WFD] Dropped NM wifi-p2p placeholder {name}")
+        elif out and "not found" not in out.lower() and "No such" not in out:
+            print(f"[FluxCast WFD] nmcli device delete {name}: {out}")
+
+
+def p2p_dev_ctrl_ifname(physical_iface: str) -> str:
+    """P2P-device ctrl ifname. Kernel IFNAMSIZ is 16; NM's p2p-dev-<sta>
+    is often truncated (p2p-dev-wlp0s20f3 → p2p-dev-wlp0s20)."""
+    full = f"p2p-dev-{physical_iface}"
+    seen: list[str] = []
+    for name in (full, full[:16], full[:15]):
+        if name and name not in seen:
+            seen.append(name)
+    for name in seen:
+        if _wpa_ctrl_alive(name):
+            return name
+    return seen[-1] if seen else full
+
+
+def ensure_p2p_device(physical_iface: Optional[str]) -> None:
+    """Ensure a P2P-device wdev for WFD IEs without giving it to NM.
+
+    STA stays NM-managed. p2p-dev-* is unmanaged via 99-fluxcast-p2p.conf.
+    Recreate via wpa interface_add if the ctrl socket is missing — do not
+    nmcli managed yes (that undoes the split).
+    """
+    if not physical_iface:
+        return
+    p2p_dev = p2p_dev_ctrl_ifname(physical_iface)
+    if _wpa_ctrl_alive(p2p_dev):
+        print(f"[FluxCast WFD] P2P device {p2p_dev} is live (NM does not own it)")
+        _nm_drop_wifi_p2p_placeholder(physical_iface)
+        return
+    print(f"[FluxCast WFD] Recreating {p2p_dev} (wpa P2P-device was missing)")
+    # Per-iface wpa_cli has no interface_add (UNKNOWN COMMAND). D-Bus
+    # CreateInterface is how NM-spawned wpa grows a P2P-device object.
+    created = run_privileged(
+        [
+            "gdbus", "call", "--system",
+            "--dest", WPA_DEST,
+            "--object-path", "/fi/w1/wpa_supplicant1",
+            "--method", f"{WPA_DEST}.CreateInterface",
+            f"{{'Ifname': <'{p2p_dev}'>, 'Driver': <'nl80211'>}}",
+        ],
+        timeout=8.0,
+    )
+    print(
+        f"[FluxCast WFD] CreateInterface {p2p_dev}: "
+        f"{(created.stdout or created.stderr or '').strip() or '(no output)'} "
+        f"rc={created.returncode}"
+    )
+    time.sleep(0.3)
+    if _wpa_ctrl_alive(p2p_dev):
+        print(f"[FluxCast WFD] P2P device {p2p_dev} recreated")
+    else:
+        print(
+            f"[FluxCast WFD] Warning: {p2p_dev} still has no wpa ctrl; "
+            "WFD IEs will go on the STA iface"
+        )
+
+
+def peer_oper_or_listen_mhz(physical_iface: Optional[str], peer_mac: str) -> int:
+    """Peer oper_freq, else listen_freq, from wpa_cli p2p_peer."""
+    if not physical_iface or not peer_mac:
+        return 0
+    mac = peer_mac.lower()
+    text = ""
+    for iface in (p2p_dev_ctrl_ifname(physical_iface), physical_iface):
+        r = _wpa_cli_iface(iface, "p2p_peer", mac, timeout=5.0)
+        if r.returncode == 0 and (r.stdout or "").strip():
+            text = r.stdout or ""
+            break
+    listen = oper = 0
+    for line in text.splitlines():
+        if line.startswith("listen_freq="):
+            try:
+                listen = int(line.split("=", 1)[1].strip())
+            except ValueError:
+                pass
+        elif line.startswith("oper_freq="):
+            try:
+                oper = int(line.split("=", 1)[1].strip())
+            except ValueError:
+                pass
+    if 2400 <= oper <= 6000:
+        return oper
+    if 2400 <= listen <= 6000:
+        return listen
+    return 0
+
+
+def should_force_connect_freq(force_mhz: int, peer_mhz: int) -> bool:
+    """SCC-force only when the peer already lives on that primary.
+
+    Forcing ChrisNet ch 44 (5220) onto an LG whose Miracast listen is
+    5745 makes webOS start Smart Share (Wi-Fi Direct) instead of
+    Screen Share (WFD).
+    """
+    if force_mhz <= 0:
+        return False
+    if peer_mhz <= 0:
+        return True
+    return abs(peer_mhz - force_mhz) < 10
+
+
+def wait_for_p2p_carrier(iface: str, timeout: float = 20.0) -> None:
+    """Wait until the group netdev has carrier / operstate=up.
+
+    The D-Bus group iface appears during WPS, *before* the 4-way. Starting
+    dhcpcd then races WPS and NM, which locally DEAUTH_LEAVING and leaves
+    the netdev DOWN.
+    """
+    sysdir = Path(f"/sys/class/net/{iface}")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not sysdir.exists():
+            raise WFDNotReady(
+                f"{iface} disappeared before carrier "
+                "(P2P group torn down — often NM ignoring GroupStarted)"
+            )
+        try:
+            oper = (sysdir / "operstate").read_text().strip()
+        except OSError:
+            oper = ""
+        try:
+            carrier = (sysdir / "carrier").read_text().strip()
+        except OSError:
+            carrier = "0"
+        # dormant + carrier=1 is WPS-in-progress, not a finished BSS.
+        if oper == "up":
+            print(f"[FluxCast WFD] {iface} carrier up (operstate={oper})")
+            return
+        try:
+            journal = subprocess.run(
+                [
+                    "journalctl", "-b", "--since", "30 sec ago",
+                    "_COMM=wpa_supplicant", "--no-pager",
+                ],
+                capture_output=True, text=True, timeout=3.0, check=False,
+            )
+            jtxt = journal.stdout or ""
+        except (OSError, subprocess.TimeoutExpired):
+            jtxt = ""
+        if f"P2P-GROUP-REMOVED {iface}" in jtxt and "FREQ_CONFLICT" in jtxt:
+            raise WFDNotReady(
+                f"{iface} P2P-GROUP-REMOVED reason=FREQ_CONFLICT "
+                "(STA and P2P on different channels; wpa keeps STA and "
+                "deauths the group). Pin P2P to the STA channel (SCC) "
+                "or use a second radio."
+            )
+        if (
+            f"P2P-GROUP-STARTED {iface}" in jtxt
+            and "nl80211: deinit ifname=" + iface
+            not in jtxt.split(f"P2P-GROUP-STARTED {iface}")[-1]
+        ):
+            print(f"[FluxCast WFD] {iface} GROUP-STARTED (waiting for operstate=up)")
+        time.sleep(0.2)
+    raise WFDNotReady(
+        f"{iface} never got carrier (operstate stayed down; no 4-way / GROUP-STARTED)"
+    )
+
+
 def _wait_for_group_interface(before: set[str], timeout: float = 40.0) -> str:
     """Detect the new wpa_supplicant Interface object GO Negotiation creates,
     then read its Ifname to get the real OS network interface name.
 
-    wpa_supplicant also fires a GroupStarted signal carrying the interface
-    object directly, which would be a more direct way to get this - but
-    this module drives D-Bus via synchronous `gdbus call` subprocesses
-    throughout (see dbus.py), and parsing `gdbus monitor` output reliably
-    for a single signal is more fragile than polling the same
-    Properties.Get calls used everywhere else here. Worth revisiting with a
-    proper dbus_next signal subscription (already a project dependency) if
-    this polling ever proves too slow in practice.
+    Do not mark the group unmanaged here: that nmcli call during WPS locally
+    deauths the client (reason 3 DEAUTH_LEAVING). Unmanage p2p-dev *before*
+    Connect, then the group iface after carrier.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -235,11 +526,6 @@ def _wait_for_group_interface(before: set[str], timeout: float = 40.0) -> str:
         for path in new_paths:
             ifname = _wpas_get_string(path, WPA_IFACE, "Ifname", privileged=True)
             if ifname:
-                # Mark unmanaged before WPS completes so NM does not take the iface.
-                try:
-                    mark_unmanaged(ifname)
-                except Exception as exc:
-                    print(f"[FluxCast WFD] Warning: could not mark {ifname} unmanaged: {exc}")
                 return ifname
         time.sleep(0.5)
     raise WFDNotReady(
@@ -255,42 +541,82 @@ def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
     """Full connect flow bypassing NetworkManager. Returns the data interface
     name once it has a real IP address, ready for the RTSP server to use.
     """
+    physical_iface = interface or _default_wifi_interface()
+    ensure_p2p_device(physical_iface)
     paths = _p2p_device_iface_paths(interface, privileged=True)
     if not paths:
         raise WFDNotReady("wpa_supplicant P2P interface not found.")
     iface_path = paths[0]
-    physical_iface = interface or _default_wifi_interface()
+    print(f"[FluxCast WFD] P2P Connect via {iface_path}")
 
     # Must happen before Find/Connect - see _set_wfd_ies's docstring.
     _set_wfd_ies(rtsp_port)
+    enable_wifi_display(physical_iface, rtsp_port)
+    flush_stale_p2p_groups(physical_iface)
 
     force_freq: Optional[int] = None
     if p2p_channel is not None:
-        _set_p2p_oper_channel(interface, p2p_channel)
         try:
             force_freq = _channel_to_freq_mhz(p2p_channel)
         except ValueError as exc:
             print(f"[FluxCast WFD] Warning: {exc}; Connect will not hard-force freq")
+            force_freq = None
 
     # GO intent only matters for GO Negotiation (Connect()), so it's set
     # right before that call rather than up here alongside discovery.
     # Setting it earlier raced wpa_supplicant's P2P state machine: Find()
     # would report success, but Peers stayed empty.
     previous_intent = None
-    p2p_dev_iface = f"p2p-dev-{physical_iface}" if physical_iface else None
     try:
         peer_path = _wait_for_peer(iface_path, peer_mac)
 
         previous_intent = _set_p2p_go_intent(interface, go_intent, privileged=True)
+        _wpa_cli_iface(physical_iface, "set", "p2p_ignore_shared_freq", "0")
+        _wpa_cli_iface(physical_iface, "set", "p2p_group_idle", "0")
+        peer_mhz = peer_oper_or_listen_mhz(physical_iface, peer_mac)
+        # On the STA phy, wpa deletes a different-channel P2P group
+        # immediately (P2P-GROUP-REMOVED FREQ_CONFLICT / DEAUTH_LEAVING)
+        # because STA has priority. USB (no STA on that phy) can follow
+        # the peer's 5745. Same-phy wpas must SCC with ChrisNet.
+        sta_shared = False
+        try:
+            from .usb_dedicated import iface_is_sta_uplink
+
+            sta_shared = iface_is_sta_uplink(physical_iface or "")
+        except Exception:
+            sta_shared = False
+        if sta_shared and force_freq:
+            print(
+                f"[FluxCast WFD] STA-shared wpas: pinning P2P to {force_freq} MHz "
+                f"(SCC with uplink). Peer listen/oper {peer_mhz or '?'} MHz "
+                "would FREQ_CONFLICT and DEAUTH the group."
+            )
+            _set_p2p_oper_channel(interface, p2p_channel)
+        elif force_freq is not None and not should_force_connect_freq(force_freq, peer_mhz):
+            print(
+                f"[FluxCast WFD] Not forcing {force_freq} MHz; "
+                f"peer listen/oper is {peer_mhz} MHz"
+            )
+            force_freq = None
+        elif force_freq is not None:
+            _set_p2p_oper_channel(interface, p2p_channel)
+        # Do not unmanage p2p-dev: that destroyed NM's P2P device (unavailable,
+        # no ctrl socket) so WFD IEs never left the P2P-device wdev.
         interfaces_before = _list_wpas_interfaces()
         print(f"[FluxCast WFD] Connecting to {peer_mac} directly via wpa_supplicant "
               "(NetworkManager not involved in this step)...")
         if force_freq is not None:
             print(f"[FluxCast WFD] Connect frequency={force_freq} MHz "
                   f"(channel {p2p_channel})")
-        _wpas_connect(
-            iface_path, peer_path, go_intent=go_intent, frequency_mhz=force_freq
-        )
+        p2p_dev = p2p_dev_ctrl_ifname(physical_iface) if physical_iface else ""
+        if p2p_dev and _wpa_ctrl_alive(p2p_dev):
+            print(f"[FluxCast WFD] Connect on P2P-device {p2p_dev} (not STA D-Bus)")
+            _wpas_cli_connect(p2p_dev, peer_mac, go_intent, force_freq)
+        else:
+            print(f"[FluxCast WFD] Connect via D-Bus {iface_path} (no P2P-device ctrl)")
+            _wpas_connect(
+                iface_path, peer_path, go_intent=go_intent, frequency_mhz=force_freq
+            )
 
         data_iface = _wait_for_group_interface(interfaces_before)
         role = get_p2p_role(data_iface)
@@ -309,7 +635,11 @@ def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
 
         if role == "P2P-GO":
             _wait_for_go_peer_associated(data_iface, peer_mac)
-        mark_unmanaged(data_iface)
+            mark_unmanaged(data_iface)
+        else:
+            wait_for_p2p_carrier(data_iface)
+            # Do not nmcli-unmanage the client group iface: that locally
+            # DEAUTH_LEAVING + nl80211 deinit right after GROUP-STARTED.
 
         try:
             configure_ip(data_iface, peer_mac, role, physical_iface)
@@ -323,11 +653,11 @@ def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
 
         print(f"[FluxCast WFD] {data_iface} is up and IP-configured. "
               "Handing off to the RTSP server.")
-        p2p_dev_iface = None
+        # Keep GO intent as used for this group until release_*; restoring
+        # P2PDeviceConfig here races GROUP-STARTED and can DEAUTH the BSS.
+        previous_intent = None
         return data_iface
     except Exception:
-        if p2p_dev_iface:
-            mark_managed(p2p_dev_iface)
         raise
     finally:
         if previous_intent is not None:
@@ -336,12 +666,9 @@ def connect_via_wpa_supplicant(interface: Optional[str], peer_mac: str,
 
 
 def release_wpa_supplicant_connection(interface: Optional[str], data_iface: str) -> None:
-    """Undo connect_via_wpa_supplicant(): release the IP configuration, tear
-    down the P2P group, and hand the data interface back to NetworkManager.
+    """Undo connect_via_wpa_supplicant(): release IP and GroupRemove.
 
-    Mirrors nm.py's _disconnect_device, but for the raw-supplicant path -
-    there is no NetworkManager active connection to deactivate here since
-    NM was never involved in bringing this link up.
+    Do not remanage p2p-dev-* / p2p-* — NM owns STA only (99-fluxcast-p2p.conf).
     """
     release_ip_config(data_iface)
 
@@ -357,8 +684,3 @@ def release_wpa_supplicant_connection(interface: Optional[str], data_iface: str)
             print("[FluxCast WFD] wpa_supplicant P2P group removed.")
         except Exception as exc:
             print(f"[FluxCast WFD] Warning: GroupRemove failed: {exc}")
-
-    if interface:
-        mark_managed(f"p2p-dev-{interface}")
-    if data_iface:
-        mark_managed(data_iface)

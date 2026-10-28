@@ -105,8 +105,16 @@ python3 src/main.py --protocol wfd --wfd-p2p-backend wpas --wfd-p2p-channel 6
 
 USB / secondary-radio GO (dedicated wpa on `--wfd-interface`): 2.4 GHz by
 default. Keep 5 GHz in the GO set with `--wfd-go-5ghz` (or
-`FLUXCAST_WFD_GO_5GHZ=1`). Do not use `--wfd-p2p-channel` to pin USB GO;
-that sets FORCE_FREQ and hops off the peer listen channel during GO Neg.
+`FLUXCAST_WFD_GO_5GHZ=1`). After GO Neg, both P2P device and interface MACs are added to the GO
+ACL (wpa otherwise allows only ``peer_iface``; probes from ``peer_dev``
+fail WPS). Formation and PLAY stay on the peer listen
+channel; after PLAY, FluxCast may 802.11-CSA to 2.4 if the phy cannot
+carry 5 GHz WFD, then revert (and skip the hop next time) if the STA
+does not follow. Do not use `--wfd-p2p-channel` to pin USB GO; that
+sets FORCE_FREQ and hops off the peer listen channel during GO Neg.
+On dedicated connect, FluxCast applies chip workarounds from sysfs
+(USB runtime PM, mt76 USB scatter-gather) via ``wfd.p2p.stability``;
+plan or apply on demand with ``python3 -m wfd.p2p.stability IFACE``.
 
 Needs the D-Bus policy in `meta/zz-dev.fluxcast.wpa-supplicant.conf`
 installed to `/usr/share/dbus-1/system.d/`. On Debian/Ubuntu, a user in the

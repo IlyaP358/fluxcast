@@ -37,6 +37,9 @@ done < <(cd "$SRCDIR/src/assets" && find . -type f | sed 's|^\./||' | sort)
 install -Dm644 "$SRCDIR/meta/fluxcast.desktop" -t "$DESTDIR/usr/share/applications/"
 install -Dm644 "$SRCDIR/src/assets/flcast_logo_512x512.png" "$DESTDIR/usr/share/icons/hicolor/512x512/apps/fluxcast.png"
 install -Dm644 "$SRCDIR/meta/zz-dev.fluxcast.wpa-supplicant.conf" -t "$DESTDIR/usr/share/dbus-1/system.d/"
+install -Dm644 "$SRCDIR/meta/zz-fluxcast-deny-remove-iface.conf" -t "$DESTDIR/usr/share/dbus-1/system.d/"
+install -Dm644 "$SRCDIR/meta/99-fluxcast-p2p.conf" -t "$DESTDIR/etc/NetworkManager/conf.d/"
+install -Dm644 "$SRCDIR/meta/85-fluxcast-p2p-unmanaged.rules" -t "$DESTDIR/etc/udev/rules.d/"
 install -Dm755 "$SRCDIR/meta/fluxcast" "$DESTDIR/usr/bin/fluxcast"
 install -Dm755 "$SRCDIR/meta/fluxcast-askpass" "$DESTDIR/usr/libexec/fluxcast-askpass"
 

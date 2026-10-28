@@ -205,13 +205,38 @@ and protocol selection remain controlled by the tray and cannot be set here.
   - Does not claim or require that the TV becomes the group owner or that the
     P2P address range changes.
 - `--wfd-go-5ghz`
-  - USB / secondary-radio GO only. Default USB GO drops 5 GHz from the
-    channel set unless the *peer listen frequency* is 5 GHz (WPS stays on
-    the Neg channel; Wi-Fi Direct). Never `p2p_connect freq=`. After
-    GROUP-STARTED, 1-stream 5 GHz GOs CSA to 2.4 GHz before RTSP (weak
-    USB TX). This flag keeps 5 GHz in the set even when the peer listens
-    on 2.4.
-  - Ignored on NetworkManager / non-USB ifaces. Equivalent env:
+  - Dedicated-radio GO only (second phy, not NM's STA daemon). Bus
+    (USB vs PCI) is not an input. Channel / width / GO intent come from
+    this phy ∩ the peer Channel List (Wi-Fi Direct / WFD). Never
+    `p2p_connect freq=`. Three phases: (1) formation on peer listen ∩
+    local Channel List until AP-STA-CONNECTED. After GO-NEG-SUCCESS,
+    wpa's GO MAC ACL is the P2P *interface* address (``peer_iface``);
+    sinks often Probe Request as the *device* address (``peer_dev``).
+    Those probes are ``ACL reject`` and WPS never starts
+    (``P2P-GROUP-FORMATION-FAILURE`` ~45s later). Dedicated GO adds
+    both addresses via ``accept_acl ADD_MAC`` (validated MACs only).
+    (2) DHCP/RTSP PLAY on
+    that same BSS (one 4-way), (3) after PLAY, optional 802.11 CSA on
+    the *same* GO BSS if this phy cannot carry 5 GHz WFD. If the STA
+    deauths or goes inactive (did not follow CSA IEs), revert to the
+    formation channel so RTSP TCP is not bound to a new 4-way, and
+    record ``p2p-csa-nofollow/<mac>`` so the next PLAY skips the hop.
+    After DHCP, the GO announces its IPv4 (gratuitous ARP) and WFD Local
+    IP IE so the sink can SYN RTSP; if the STA leaves before M1,
+    ``p2p_invite`` on the same BSS (not a new GO Neg).
+    Dedicated connect applies chip workarounds from sysfs
+    (``wfd.p2p.stability``). Iface, MAC, and IPv4 strings are validated
+    before sudo argv and state-file names (``wfd.p2p.safety``): ``all`` /
+    ``default`` are rejected so sysctl cannot target global knobs, and
+    marker files are only ``aa-bb-cc-dd-ee-ff``. WFD ``wfd_idr_request`` is honored at most
+    once per GOP (~1s); extra requests are ACKed but not turned into
+    more I-frames (WFD §4.10.5 recovery without flooding the air).
+    LPCM is used only when air can carry video+LPCM *and* a 5 GHz GO is
+    on a phy that can carry 5 GHz WFD (else AAC — LPCM has no concealment).
+    CSA before association tears the GO (FORMATION_FAILED). This flag
+    keeps 5 GHz in the GO channel set. Discovery uses ``p2p_find``
+    first; ``p2p_invite`` only after a prior invite succeeded.
+  - Ignored on NetworkManager / non-dedicated ifaces. Equivalent env:
     `FLUXCAST_WFD_GO_5GHZ=1`.
   - Dedicated USB `wpa_supplicant` sets WFD Device Info as Source +
     session available with a length-prefixed `wfd_subelem_set` (RTSP
@@ -303,8 +328,10 @@ and protocol selection remain controlled by the tray and cannot be set here.
     is passed as `--wfd-audio-device`; capture uses `pw-cat --target` with
     `media.role=Abstract` (not `Video` — stream-restore remapped that onto the
     default mic → feedback; also not `ffmpeg -f pulse` / Lavf).
-  - Escape hatch: `FLUXCAST_WFD_FORCE_AAC=1` keeps the DMA+AAC path (picture often
-    works; speakers stay silent on true LPCM-only TVs).
+  - AAC on DMA-BUF: wf-recorder H.264 in NUT, ffmpeg encodes AAC-LC **ADTS**
+    into MPEG-TS (WFD stream_type ``0x0F``). Do not copy AAC from NUT.
+  - Escape hatch: `FLUXCAST_WFD_FORCE_AAC=1` keeps that DMA+ADTS AAC path
+    (speakers stay silent on true LPCM-only TVs).
   - Sender stderr is watched for `buffer pool full` / non-monotonic DTS; after a
     short debounce FluxCast auto-rebinds desktop capture (keeps RTSP up).
   - Unit coverage: `tests/test_wfd_lpcm_mux.py` (AU framing, AOSP-style PIDs);
@@ -392,6 +419,9 @@ historical software encode pipeline (`libx264` over a raw pipe).
 | `FLUXCAST_WFD_VAAPI_PIPE_LOW_LATENCY` | unset | When `1`/`true`, pipe ffmpeg uses `nobuffer`/`low_delay` and may shrink `thread_queue_size`. Leave unset for production; stack with tiny VBV caused lockups in A/B. |
 | `FLUXCAST_WFD_INTERFACE` | auto | Managed Wi‑Fi iface for P2P. Unset/`auto` prefers P2P-GO-capable ifaces that are not already NM-connected (e.g. idle USB vs STA). |
 | `FLUXCAST_WFD_GO_5GHZ` | unset | USB GO only. `1`/`true`/`yes`/`on` keeps 5 GHz in the GO channel set (same as `--wfd-go-5ghz`). Default USB GO is 2.4 GHz only. |
+| `FLUXCAST_WFD_ALLOW_WEAK_RADIO` | unset | Dedicated P2P. `1` keeps *payload* on 5 GHz even when the phy is below the 5 GHz WFD floor (1-stream / &lt;20 dBm). Default: still form on a 5 GHz-listen sink if 2.4 GHz payload is viable (CSA after PLAY); refuse only when neither band is reliable. |
+| `FLUXCAST_WFD_NO_MID_CSA` | unset | Dedicated P2P. `1` skips the post-PLAY 802.11 CSA hop. Peers that already failed to follow CSA IEs are skipped via ``p2p-csa-nofollow/<mac>`` even when this is unset. |
+| `FLUXCAST_WFD_NO_RADIO_STABILITY` | unset | Dedicated P2P. `1` skips chip workarounds from ``wfd.p2p.stability`` (USB runtime PM, mt76 USB scatter-gather). Selected from sysfs driver/bus/module params, not iface names. |
 | `FLUXCAST_WFD_GO_2GHZ_MHZ` | unset | USB GO only. Integer MHz (2400–2499) to keep as the sole 2.4 GHz GO channel when it is enabled on the phy (e.g. `2462` for channel 11). Still not `p2p_connect freq=`. |
 | `FLUXCAST_USB_WPA` | `wpa_supplicant` on `PATH` | Absolute path to the `wpa_supplicant` binary used for dedicated USB P2P. NetworkManager keeps the system daemon on the primary STA iface. |
 | `FLUXCAST_ASKPASS` / `SUDO_ASKPASS` | bundled `meta/fluxcast-askpass` | Graphical password helper for `sudo -A` when stdin is not a TTY (tray/panel). GTK4/GTK3 via PyGObject on desktops without zenity/Tk. |

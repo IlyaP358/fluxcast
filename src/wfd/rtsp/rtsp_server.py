@@ -25,6 +25,7 @@ class WFDRTSPServer:
         self._server: Optional[socketserver.ThreadingTCPServer] = None
         self._thread: Optional[threading.Thread] = None
         self.has_connected_client = False
+        self.join_abandoned = threading.Event()
         self._media_lock = threading.Lock()
         self._active_media: list[WFDMediaPipeline] = []
         self._uibc_server = None  # opt-in UIBC input server; None unless enabled

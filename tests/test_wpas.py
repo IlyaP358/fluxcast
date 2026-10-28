@@ -183,9 +183,9 @@ class RunAsGoDnsmasqCommandTest(unittest.TestCase):
     def test_dhcp_host_includes_associated_interface_mac(self):
         sta = "66:ab:14:3d:6e:e4"
         with mock.patch.object(wpas_ip, "mark_unmanaged"), \
-             mock.patch.object(wpas_ip, "_sudo_run", return_value=_completed()), \
+             mock.patch.object(wpas_ip, "_sudo_run", return_value=_completed()) as sudo, \
              mock.patch.object(wpas_ip, "_wait_for_link_running", return_value=True), \
-             mock.patch.object(wpas_ip.shutil, "which", return_value="/usr/sbin/dnsmasq"), \
+             mock.patch.object(wpas_ip.shutil, "which", side_effect=lambda n: "/usr/sbin/dnsmasq" if n == "dnsmasq" else "/usr/bin/arping"), \
              mock.patch.object(wpas_ip, "_associated_sta_macs", return_value=[sta]), \
              mock.patch("builtins.open", mock.mock_open()), \
              mock.patch.object(wpas_ip.subprocess, "Popen") as popen, \
@@ -196,6 +196,17 @@ class RunAsGoDnsmasqCommandTest(unittest.TestCase):
         hosts = [a for a in cmd if a.startswith("--dhcp-host=")]
         self.assertTrue(any("62:ab:14:3d:6e:e4" in a for a in hosts))
         self.assertTrue(any("66:ab:14:3d:6e:e4" in a for a in hosts))
+        joined = [" ".join(c.args[0]) for c in sudo.call_args_list if c.args]
+        self.assertTrue(any("arp_notify=1" in j for j in joined))
+
+    def test_announce_go_ipv4_sets_arp_notify(self):
+        with mock.patch.object(wpas_ip, "_sudo_run", return_value=_completed()) as sudo, \
+             mock.patch.object(wpas_ip.shutil, "which", return_value="/usr/bin/arping"):
+            wpas_ip._announce_go_ipv4("p2p-0", "192.168.49.1")
+        cmds = [" ".join(c.args[0]) for c in sudo.call_args_list if c.args]
+        self.assertTrue(any("arp_notify=1" in c for c in cmds))
+        self.assertTrue(any("addr change 192.168.49.1/24" in c for c in cmds))
+        self.assertTrue(any("arping" in c and "-U" in c for c in cmds))
 
 
 def _access_denied():
@@ -353,6 +364,75 @@ class WaitForLeaseTest(unittest.TestCase):
                     extra_macs=["66:ab:14:3d:6e:e4"],
                 )
             self.assertEqual(ip, "192.168.49.7")
+
+
+class NmP2pSplitTest(unittest.TestCase):
+    def test_p2p_ifaces_are_split(self):
+        self.assertTrue(wpas_ip.is_p2p_split_iface("p2p-dev-wlp0s20f3"))
+        self.assertTrue(wpas_ip.is_p2p_split_iface("p2p-wlp0s20-0"))
+
+    def test_sta_is_not_split(self):
+        self.assertFalse(wpas_ip.is_p2p_split_iface("wlp0s20f3"))
+        self.assertFalse(wpas_ip.is_p2p_split_iface("wlan0"))
+
+    def test_mark_managed_skips_p2p(self):
+        calls: list = []
+
+        def fake_sudo(cmd, timeout=5.0):
+            calls.append(list(cmd))
+            return _completed()
+
+        with mock.patch.object(wpas_ip, "_sudo_run", side_effect=fake_sudo):
+            wpas_ip.mark_managed("p2p-dev-wlp0s20f3")
+            wpas_ip.mark_unmanaged("wlp0s20f3")
+            wpas_ip.mark_unmanaged("p2p-wlp0s20-1")
+        joined = [" ".join(c) for c in calls]
+        self.assertFalse(any("device set wlp0s20f3" in j for j in joined))
+        self.assertTrue(any("device set p2p-wlp0s20-1 managed no" in j for j in joined))
+
+
+class P2pDevIfnameTest(unittest.TestCase):
+    def test_truncation_candidates_include_16(self):
+        # IFNAMSIZ 16: p2p-dev-wlp0s20f3 is 18 chars; live ctrl is p2p-dev-wlp0s20
+        full = "p2p-dev-wlp0s20f3"
+        self.assertEqual(full[:15], "p2p-dev-wlp0s20")
+        self.assertEqual(len("p2p-dev-wlp0s20"), 15)
+
+
+class ConnectFreqPolicyTest(unittest.TestCase):
+    def test_force_when_peer_on_same_primary(self):
+        self.assertTrue(wpas.should_force_connect_freq(5220, 5220))
+
+    def test_no_force_when_lg_listen_5745(self):
+        self.assertFalse(wpas.should_force_connect_freq(5220, 5745))
+
+    def test_force_when_peer_freq_unknown(self):
+        self.assertTrue(wpas.should_force_connect_freq(5220, 0))
+
+    def test_no_force_when_force_unset(self):
+        self.assertFalse(wpas.should_force_connect_freq(0, 5745))
+
+
+class P2pClientCarrierTest(unittest.TestCase):
+    def test_parse_group_started_persistent_ip(self):
+        line = (
+            'P2P-GROUP-STARTED p2p-wlp0s20-1 client ssid="DIRECT-rq" '
+            "freq=5220 go_dev_addr=62:ab:14:3d:6e:e4 [PERSISTENT] "
+            "ip_addr=192.168.49.10 ip_mask=255.255.255.0 go_ip_addr=192.168.49.1"
+        )
+        self.assertEqual(
+            wpas_ip.parse_p2p_group_started_addrs(line),
+            ("192.168.49.10", "255.255.255.0", "192.168.49.1"),
+        )
+
+    def test_parse_group_started_without_ip(self):
+        line = 'P2P-GROUP-STARTED p2p-wlp0s20-0 GO ssid="DIRECT-xx" freq=2437'
+        self.assertIsNone(wpas_ip.parse_p2p_group_started_addrs(line))
+
+    def test_wait_carrier_missing_iface(self):
+        with self.assertRaises(WFDNotReady) as ctx:
+            wpas.wait_for_p2p_carrier("p2p-does-not-exist-xyz", timeout=0.2)
+        self.assertIn("disappeared", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -23,10 +23,11 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from ..config import WFDNotReady
 from ..privileged import run_privileged, wrap_privileged
+from .safety import safe_iface, safe_ipv4, safe_mac
 
 # Standard Wi-Fi Direct convention subnet (matches diagnostics.py's own
 # "P2P subnet" check, and Android's own WiFi Direct GO addressing) - used
@@ -41,6 +42,67 @@ def _sudo_run(args: list[str], timeout: float) -> subprocess.CompletedProcess[st
     return run_privileged(args, timeout=timeout)
 
 
+def parse_p2p_group_started_addrs(text: str) -> Optional[Tuple[str, str, str]]:
+    """Parse ip_addr / ip_mask / go_ip_addr from a P2P-GROUP-STARTED line."""
+    if "P2P-GROUP-STARTED" not in text:
+        return None
+    ip_m = re.search(r"\bip_addr=(\d+\.\d+\.\d+\.\d+)", text)
+    mask_m = re.search(r"\bip_mask=(\d+\.\d+\.\d+\.\d+)", text)
+    go_m = re.search(r"\bgo_ip_addr=(\d+\.\d+\.\d+\.\d+)", text)
+    if not ip_m:
+        return None
+    return (
+        ip_m.group(1),
+        mask_m.group(1) if mask_m else "255.255.255.0",
+        go_m.group(1) if go_m else "",
+    )
+
+
+def _p2p_ip_from_wpa_journal(iface: str) -> Optional[Tuple[str, str, str]]:
+    try:
+        journal = subprocess.run(
+            [
+                "journalctl", "-b", "--since", "2 min ago",
+                "_COMM=wpa_supplicant", "--no-pager",
+            ],
+            capture_output=True, text=True, timeout=5.0, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in reversed((journal.stdout or "").splitlines()):
+        if iface not in line:
+            continue
+        parsed = parse_p2p_group_started_addrs(line)
+        if parsed:
+            return parsed
+    return None
+
+
+def _mask_to_prefix(mask: str) -> int:
+    try:
+        parts = [int(p) for p in mask.split(".")]
+        if len(parts) != 4:
+            return 24
+        n = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
+        return bin(n).count("1")
+    except ValueError:
+        return 24
+
+
+def _apply_static_ipv4(iface: str, ipv4: str, mask: str) -> None:
+    prefix = _mask_to_prefix(mask)
+    oper = ""
+    try:
+        oper = Path(f"/sys/class/net/{iface}/operstate").read_text().strip()
+    except OSError:
+        oper = ""
+    # ip link set up on an already-associated client can DEAUTH_LEAVING.
+    if oper != "up":
+        _sudo_run(["ip", "link", "set", iface, "up"], timeout=5.0)
+    _sudo_run(["ip", "addr", "replace", f"{ipv4}/{prefix}", "dev", iface], timeout=5.0)
+    print(f"[FluxCast WFD] {iface} static P2P IPv4 {ipv4}/{prefix} (from GROUP-STARTED)")
+
+
 def get_p2p_role(iface: str) -> str:
     """Returns 'P2P-GO', 'P2P-client', or 'unknown'."""
     result = subprocess.run(["iw", "dev", iface, "info"],
@@ -53,7 +115,9 @@ def get_p2p_role(iface: str) -> str:
 
 
 def configure_ip(iface: str, peer_mac: str, role: str,
-                  physical_iface: Optional[str] = None) -> None:
+                  physical_iface: Optional[str] = None,
+                  *,
+                  lease_timeout: float = 40.0) -> None:
     """Bring up a working IP on iface for the given P2P role.
 
     physical_iface (e.g. wlp0s20f3) is only used in the GO branch - some
@@ -62,16 +126,27 @@ def configure_ip(iface: str, peer_mac: str, role: str,
     interface, so dnsmasq needs to listen there too (see _run_as_go).
     """
     if role == "P2P-GO":
-        _run_as_go(iface, peer_mac, physical_iface)
-    else:
-        # Genuine P2P-client role: a real DHCP server (the projector,
-        # correctly acting as GO) should be on the other end. Deliberately
-        # not marking the interface NM-unmanaged here - telling NM to
-        # release a device it just discovered (rather than never managing
-        # it via a static conf.d rule matched at interface-creation time)
-        # was observed bouncing the interface down/up ("carrier lost"
-        # mid-DHCP on an earlier run).
-        _run_dhcp_client(iface)
+        _run_as_go(iface, peer_mac, physical_iface, timeout=lease_timeout)
+        return
+    # P2P-client: persistent groups often already negotiated 192.168.49.10.
+    assigned = _p2p_ip_from_wpa_journal(iface)
+    if assigned:
+        ipv4, mask, go_ip = assigned
+        _apply_static_ipv4(iface, ipv4, mask)
+        if go_ip:
+            try:
+                _sudo_run(
+                    ["ip", "neigh", "replace", go_ip, "nud", "reachable",
+                     "dev", iface],
+                    timeout=5.0,
+                )
+            except Exception:
+                pass
+        _strip_default_route(iface)
+        return
+    # Genuine DHCP from the GO. Do not nmcli-unmanage here — that bounces
+    # carrier mid-DHCP. p2p-dev is unmanaged before Connect instead.
+    _run_dhcp_client(iface, timeout=lease_timeout)
 
 
 def release_ip_config(iface: str) -> None:
@@ -192,11 +267,14 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
                 f"[FluxCast WFD] GO {iface} already serving {existing}; "
                 "not restarting dnsmasq"
             )
+            _prepare_go_rtsp_input(iface)
+            _announce_go_ipv4(iface, gateway_ip)
+            _seed_go_peer_neigh(iface, existing, peer_mac)
             subprocess.run(
-                ["ping", "-c", "1", "-W", "2", "-I", iface, existing],
+                ["ping", "-c", "1", "-W", "1", "-I", iface, existing],
                 capture_output=True,
                 text=True,
-                timeout=5.0,
+                timeout=3.0,
             )
             return
     # Kill leftover dnsmasq *before* flushing the GO address. A stale
@@ -205,7 +283,7 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
     # address", and the sink gives up before the new daemon can ACK.
     _sudo_run(["pkill", "-f", f"dnsmasq.*{lease_file}"], timeout=5.0)
     _sudo_run(["pkill", "-f", f"dnsmasq.*--interface={iface}"], timeout=5.0)
-    time.sleep(0.3)
+    time.sleep(0.1)
     _sudo_run(["ip", "addr", "flush", "dev", iface], timeout=5.0)
     add = _sudo_run(["ip", "addr", "add", f"{gateway_ip}/24", "dev", iface], timeout=5.0)
     if add.returncode != 0:
@@ -214,7 +292,11 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
             f"{(add.stderr or add.stdout).strip()}"
         )
     _sudo_run(["ip", "link", "set", iface, "up"], timeout=5.0)
-    if not _wait_for_link_running(iface, timeout=10.0):
+    # Sink SYNs 7236 immediately after DHCPACK (WFD). Do this *before*
+    # dnsmasq so the first SYN is not racing INPUT DROP / rp_filter.
+    _prepare_go_rtsp_input(iface)
+    _announce_go_ipv4(iface, gateway_ip)
+    if not _wait_for_link_running(iface, timeout=2.0):
         print(f"[FluxCast WFD] Warning: {iface} never reported LOWER_UP "
               "(carrier) - proceeding anyway, but this may be why dnsmasq "
               "fails to bind.")
@@ -286,6 +368,7 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
             f"--dhcp-option=3,{WFD_P2P_SUBNET}.1",
             f"--dhcp-option=6,{WFD_P2P_SUBNET}.1",
             f"--dhcp-leasefile={lease_file}",
+            "--dhcp-authoritative",
             "--port=0",
             "--no-resolv", "--no-hosts",
         ]
@@ -353,6 +436,48 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
             "not have real client-mode network logic to fall back on)."
         )
     print(f"[FluxCast WFD] Projector leased {peer_ip}. Seeding ARP entry...")
+    _prepare_go_rtsp_input(iface)
+    _announce_go_ipv4(iface, gateway_ip)
+    _seed_go_peer_neigh(iface, peer_ip, peer_mac)
+    subprocess.run(
+        ["ping", "-c", "1", "-W", "1", "-I", iface, peer_ip],
+        capture_output=True,
+        text=True,
+        timeout=3.0,
+    )
+
+
+def _announce_go_ipv4(iface: str, ipv4: str) -> None:
+    """Gratuitous ARP so the sink can unicast RTSP to the GO after DHCPACK.
+
+    DHCP is UDP broadcast; RTSP is TCP to the GO IPv4. Without a GARP the
+    sink's ARP for the gateway/WFD Local IP can miss the 10s post-lease
+    window and the STA deauths (reason 3) with no M1.
+    """
+    iface = safe_iface(iface)
+    ipv4 = safe_ipv4(ipv4)
+    if not iface or not ipv4:
+        return
+    _sudo_run(
+        ["sysctl", "-w", f"net.ipv4.conf.{iface}.arp_notify=1"],
+        timeout=3.0,
+    )
+    _sudo_run(
+        ["ip", "addr", "change", f"{ipv4}/24", "dev", iface],
+        timeout=3.0,
+    )
+    if shutil.which("arping"):
+        _sudo_run(
+            ["arping", "-c", "2", "-U", "-I", iface, ipv4],
+            timeout=5.0,
+        )
+
+
+def _prepare_go_rtsp_input(iface: str) -> None:
+    """Accept WFD RTSP on this GO iface before the sink's first SYN."""
+    iface = safe_iface(iface)
+    if not iface:
+        return
     _sudo_run(
         ["sysctl", "-w", f"net.ipv4.conf.{iface}.rp_filter=0"],
         timeout=3.0,
@@ -377,10 +502,25 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
             "ufw", "allow", "in", "on", iface, "to", "any", "port", "7236",
             "proto", "tcp",
         ],
-        timeout=8.0,
+        timeout=3.0,
     )
-    subprocess.run(["ping", "-c", "1", "-W", "2", "-I", iface, peer_ip],
-                    capture_output=True, text=True, timeout=5.0)
+
+
+def _seed_go_peer_neigh(iface: str, peer_ip: str, peer_mac: str) -> None:
+    """Install a neighbour so SYN-ACK to the sink is not waiting on ARP."""
+    iface = safe_iface(iface)
+    peer_ip = safe_ipv4(peer_ip)
+    if not iface or not peer_ip:
+        return
+    macs = [m for m in _dhcp_host_macs(iface, peer_mac) if safe_mac(m)]
+    for mac in macs:
+        _sudo_run(
+            [
+                "ip", "neigh", "replace", peer_ip, "lladdr", mac,
+                "nud", "reachable", "dev", iface,
+            ],
+            timeout=3.0,
+        )
 
 
 def _wait_for_link_running(iface: str, timeout: float) -> bool:
@@ -480,7 +620,23 @@ def _run_dhcp_client(iface: str, timeout: float = 20.0) -> None:
         # -G: never install a default route from this lease. This link is to
         # an external, untrusted P2P peer (the sink) - it must never become
         # the machine's route to the internet/office LAN.
-        result = _sudo_run(["dhcpcd", "-G", iface], timeout=timeout + 10.0)
+        oper = ""
+        try:
+            oper = Path(f"/sys/class/net/{iface}/operstate").read_text().strip()
+        except OSError:
+            oper = ""
+        if oper != "up":
+            try:
+                _sudo_run(["ip", "link", "set", iface, "up"], timeout=5.0)
+            except Exception as exc:
+                print(f"[FluxCast WFD] Warning: ip link set {iface} up: {exc}")
+        try:
+            result = _sudo_run(["dhcpcd", "-G", iface], timeout=timeout + 10.0)
+        except subprocess.TimeoutExpired as exc:
+            raise WFDNotReady(
+                f"dhcpcd timed out on {iface} (no carrier/lease). "
+                "P2P-client netdev was likely deauthed (DEAUTH_LEAVING)."
+            ) from exc
         if result.returncode != 0:
             raise WFDNotReady(
                 f"dhcpcd failed to start on {iface}: {(result.stderr or result.stdout).strip()}"
@@ -561,14 +717,19 @@ def _strip_default_route(iface: str) -> None:
         pass
 
 
-def mark_unmanaged(iface: str) -> None:
-    """Keep NetworkManager off the interface we're about to hand-configure.
+def is_p2p_split_iface(iface: str) -> bool:
+    """P2P netdevs NM must not own (see meta/99-fluxcast-p2p.conf)."""
+    return bool(iface) and iface.startswith("p2p-")
 
-    Used in the GO branch (see _run_as_go); the client branch deliberately
-    skips this - see configure_ip's comment for why. A static conf.d
-    unmanaged-devices rule would be a cleaner long-term replacement for
-    this reactive nmcli call, if that turns out to matter in practice.
-    """
+
+def mark_unmanaged(iface: str) -> None:
+    """Keep NetworkManager off a P2P iface. Never call this on the STA uplink."""
+    if not iface or not is_p2p_split_iface(iface):
+        print(
+            f"[FluxCast WFD] Refusing to unmanage {iface!r} "
+            "(STA stays with NetworkManager)"
+        )
+        return
     try:
         _sudo_run(["nmcli", "device", "set", iface, "managed", "no"], timeout=5.0)
     except Exception as exc:
@@ -576,7 +737,13 @@ def mark_unmanaged(iface: str) -> None:
 
 
 def mark_managed(iface: str) -> None:
-    """Hand an interface back to NetworkManager after a wpas-session."""
+    """Hand a *non-P2P* iface back to NetworkManager.
+
+    p2p-dev-* / p2p-* stay unmanaged (NM STA / wpas P2P split). Remanaging
+    them is how GroupStarted became unexpected and DEAUTH_LEAVING fired.
+    """
+    if is_p2p_split_iface(iface):
+        return
     try:
         _sudo_run(["nmcli", "device", "set", iface, "managed", "yes"], timeout=5.0)
     except Exception as exc:

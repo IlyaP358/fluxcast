@@ -1,0 +1,5 @@
+# FluxCast: mark P2P netdevs unmanaged at kernel add, before NM races.
+# STA ifaces (wlp*, wlan*) are not matched.
+
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="p2p-*", \
+  ENV{NM_UNMANAGED}="1", ENV{ID_NET_MANAGED}="0"
