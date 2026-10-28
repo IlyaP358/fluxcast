@@ -78,6 +78,12 @@ class WlrootsDamageFlagTest(unittest.TestCase):
         os.environ.pop("FLUXCAST_WFD_ENCODE_BIAS", None)
         os.environ.pop("FLUXCAST_WFD_POWER_PLAN", None)
         os.environ.pop("FLUXCAST_WFD_VAAPI_GOP", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_RC", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_QP", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_QUALITY", None)
+        os.environ.pop("FLUXCAST_WFD_BITRATE", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_BITRATE", None)
+        os.environ.pop("FLUXCAST_WFD_VBV_MULTIPLIER", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE_FILE", None)
         os.environ.pop("FLUXCAST_WFD_CAPTURE_ENCODE_PREF", None)
@@ -86,7 +92,14 @@ class WlrootsDamageFlagTest(unittest.TestCase):
         wr._icc_cache.clear()
 
     def _capture_cmds(
-        self, *, encoder="libx264", capture_encode=None, power_plan="performance", icc=False
+        self,
+        *,
+        encoder="libx264",
+        capture_encode=None,
+        power_plan="performance",
+        icc=False,
+        no_audio=True,
+        audio_device=None,
     ):
         from types import SimpleNamespace
 
@@ -136,8 +149,9 @@ class WlrootsDamageFlagTest(unittest.TestCase):
                 self.config = SimpleNamespace(
                     monitor=SimpleNamespace(name="HEADLESS-2", width=1920, height=1080, scale=1),
                     output_resolution="1920x1080",
-                    audio_device=None,
-                    no_audio=True,
+                    audio_device=audio_device,
+                    no_audio=no_audio,
+                    prefer_lpcm=False,
                     bitrate="4M",
                     fps=30,
                     h264_profile="baseline",
@@ -171,36 +185,36 @@ class WlrootsDamageFlagTest(unittest.TestCase):
             index=0,
         )
         throttled = _throttle_name(power_plan)
-        with mock.patch("wfd.media.wlroots.find_wf_recorder", return_value="/usr/bin/wf-recorder"):
-            with mock.patch("wfd.media.wlroots.subprocess.Popen", side_effect=fake_popen):
-                with mock.patch("wfd.media.wlroots.time.sleep", return_value=None):
-                    with mock.patch(
-                        "wfd.media.wlroots.active_power_plan", return_value=fake_plan
-                    ), mock.patch(
-                        "wfd.hw_encode.active_power_plan", return_value=fake_plan
-                    ), mock.patch(
-                        "wfd.power_plan.active_power_plan", return_value=fake_plan
-                    ), mock.patch(
-                        "wfd.media.wlroots.encode_throttled",
-                        return_value=throttled,
-                    ), mock.patch(
-                        "wfd.hw_encode.encode_throttled",
-                        return_value=throttled,
-                    ), mock.patch(
-                        "wfd.power_plan.encode_throttled",
-                        return_value=throttled,
-                    ), mock.patch(
-                        "wfd.media.wlroots.prefer_wf_recorder_vaapi_dmabuf"
-                    ) as pref:
-                        from wfd import hw_encode
-                        pref.side_effect = (
-                            lambda monitor=None: hw_encode.prefer_wf_recorder_vaapi_dmabuf(monitor)
-                        )
-                        with mock.patch(
-                            "wfd.media.wlroots.wf_recorder_supports_icc",
-                            return_value=bool(icc),
-                        ):
-                            harness._start_desktop_wf_recorder()
+        with mock.patch(
+            "wfd.media.wlroots.find_wf_recorder", return_value="/usr/bin/wf-recorder"
+        ), mock.patch(
+            "wfd.media.wlroots.subprocess.Popen", side_effect=fake_popen
+        ), mock.patch(
+            "wfd.media.wlroots.WlrootsMixin._enlarge_pipe_fd", return_value=65536
+        ), mock.patch(
+            "wfd.media.wlroots.time.sleep", return_value=None
+        ), mock.patch(
+            "wfd.media.wlroots.active_power_plan", return_value=fake_plan
+        ), mock.patch(
+            "wfd.hw_encode.active_power_plan", return_value=fake_plan
+        ), mock.patch(
+            "wfd.power_plan.active_power_plan", return_value=fake_plan
+        ), mock.patch(
+            "wfd.media.wlroots.encode_throttled", return_value=throttled
+        ), mock.patch(
+            "wfd.hw_encode.encode_throttled", return_value=throttled
+        ), mock.patch(
+            "wfd.power_plan.encode_throttled", return_value=throttled
+        ), mock.patch(
+            "wfd.media.wlroots.prefer_wf_recorder_vaapi_dmabuf"
+        ) as pref, mock.patch(
+            "wfd.media.wlroots.wf_recorder_supports_icc", return_value=bool(icc)
+        ):
+            from wfd import hw_encode
+            pref.side_effect = (
+                lambda monitor=None: hw_encode.prefer_wf_recorder_vaapi_dmabuf(monitor)
+            )
+            harness._start_desktop_wf_recorder()
         return captured
 
     def _capture_wf_cmd(self):
@@ -208,8 +222,13 @@ class WlrootsDamageFlagTest(unittest.TestCase):
 
     def test_default_includes_continuous_capture_flag(self):
         os.environ.pop("FLUXCAST_WFD_WF_RECORDER_DAMAGE", None)
-        wf_cmd = self._capture_wf_cmd()
-        self.assertIn("-D", wf_cmd)
+        with mock.patch("wfd.hw_encode._vaapi_usable", return_value=True):
+            with mock.patch("wfd.hw_encode._requested_gpu_encode", return_value=True):
+                with mock.patch("wfd.hw_encode.monitor_scale", return_value=1.0):
+                    cmds = self._capture_cmds(
+                        encoder="auto", capture_encode="vaapi", power_plan="power-saver"
+                    )
+        self.assertIn("-D", cmds["wf"])
 
     def test_damage_env_omits_continuous_capture_flag(self):
         os.environ["FLUXCAST_WFD_WF_RECORDER_DAMAGE"] = "1"
@@ -217,6 +236,9 @@ class WlrootsDamageFlagTest(unittest.TestCase):
         self.assertNotIn("-D", wf_cmd)
 
     def test_dmabuf_path_uses_wf_recorder_vaapi_and_ffmpeg_copy(self):
+        os.environ.pop("FLUXCAST_WFD_BITRATE", None)
+        os.environ.pop("FLUXCAST_WFD_VAAPI_BITRATE", None)
+        os.environ.pop("FLUXCAST_WFD_VBV_MULTIPLIER", None)
         os.environ["FLUXCAST_WFD_VAAPI_GOP"] = "60"
         with mock.patch("wfd.hw_encode._vaapi_usable", return_value=True):
             with mock.patch("wfd.hw_encode._requested_gpu_encode", return_value=True):
@@ -229,16 +251,60 @@ class WlrootsDamageFlagTest(unittest.TestCase):
         self.assertIn("scale_vaapi=format=nv12:out_range=tv", wf)
         self.assertIn("bf=0", wf)
         self.assertIn("constrained_baseline", wf)
-        # DMA uses CQP for steady desktop sharpness (bitrate modes undershoot).
+        # DMA default is CQP; QVBR is opt-in via FLUXCAST_WFD_VAAPI_RC.
         self.assertIn("rc_mode=CQP", wf)
         self.assertIn("qp=18", wf)
-        self.assertIn("quality=4", wf)
-        # Explicit 2s GOP via FLUXCAST_WFD_VAAPI_GOP (fps=30 → 60).
+        # Explicit GOP via FLUXCAST_WFD_VAAPI_GOP (fps=30 → 60).
         self.assertIn("gop_size=60", wf)
         self.assertNotIn("-r", cmds["wf"])  # stock: -r appends fps= after vaapi and glitches
         self.assertNotIn("rawvideo", cmds["wf"])
         self.assertEqual(cmds["ffmpeg"][cmds["ffmpeg"].index("-c:v") + 1], "copy")
         self.assertNotIn("hwupload", " ".join(cmds["ffmpeg"]))
+        self.assertNotIn("-C", cmds["wf"])
+        self.assertNotIn("--audio=", " ".join(cmds["wf"]))
+
+    def test_qvbr_dmabuf_uses_2s_vbv_and_i_qfactor(self):
+        os.environ["FLUXCAST_WFD_VAAPI_RC"] = "QVBR"
+        os.environ["FLUXCAST_WFD_BITRATE"] = "4M"
+        os.environ["FLUXCAST_WFD_VAAPI_BITRATE"] = "4M"
+        os.environ.pop("FLUXCAST_WFD_VBV_MULTIPLIER", None)
+        os.environ["FLUXCAST_WFD_VAAPI_GOP"] = "60"
+        with mock.patch("wfd.hw_encode._vaapi_usable", return_value=True):
+            with mock.patch("wfd.hw_encode._requested_gpu_encode", return_value=True):
+                with mock.patch("wfd.hw_encode.monitor_scale", return_value=1.0):
+                    cmds = self._capture_cmds(
+                        encoder="auto", capture_encode="vaapi", power_plan="power-saver"
+                    )
+        wf = " ".join(cmds["wf"])
+        self.assertIn("rc_mode=QVBR", wf)
+        self.assertIn("i_qfactor=1.0", wf)
+        self.assertIn("bufsize=8000000", wf)
+        self.assertIn("gop_size=60", wf)
+
+    def test_dmabuf_aac_is_encoded_in_ffmpeg_not_copied_from_nut(self):
+        """WFD AAC is ADTS in MPEG-TS; NUT AAC copy leaves an empty sink plane."""
+        os.environ["FLUXCAST_WFD_VAAPI_GOP"] = "60"
+        with mock.patch("wfd.hw_encode._vaapi_usable", return_value=True):
+            with mock.patch("wfd.hw_encode._requested_gpu_encode", return_value=True):
+                with mock.patch("wfd.hw_encode.monitor_scale", return_value=1.0):
+                    cmds = self._capture_cmds(
+                        encoder="auto",
+                        capture_encode="vaapi",
+                        power_plan="power-saver",
+                        no_audio=False,
+                        audio_device="miracast.monitor",
+                    )
+        wf = " ".join(cmds["wf"])
+        ff = cmds["ffmpeg"]
+        self.assertIsNotNone(ff)
+        self.assertNotIn("-C", cmds["wf"])
+        self.assertNotIn("--audio=", wf)
+        self.assertIn("h264_vaapi", cmds["wf"])
+        self.assertEqual(ff[ff.index("-c:v") + 1], "copy")
+        self.assertIn("pulse", ff)
+        self.assertEqual(ff[ff.index("-c:a") + 1], "aac")
+        self.assertIn("aac_low", ff)
+        self.assertNotEqual(ff[ff.index("-c:a") + 1], "copy")
 
     def test_dmabuf_icc_binary_passes_capture_rate(self):
         """ICC builds need -r for capture cadence; stock must not get -r on DMA.
@@ -255,9 +321,9 @@ class WlrootsDamageFlagTest(unittest.TestCase):
                         power_plan="power-saver",
                         icc=True,
                     )
-        self.assertIn("-r", cmds["wf"])
-        # Harness config.fps defaults to 30 (typical 720p30 / 1080p30 profile).
-        self.assertEqual(cmds["wf"][cmds["wf"].index("-r") + 1], "30")
+        # DMA VAAPI omits -r even on ICC (fps is -p framerate=; -r after
+        # scale_vaapi forces a software convert).
+        self.assertNotIn("-r", cmds["wf"])
         self.assertIn("h264_vaapi", cmds["wf"])
 
     def test_dmabuf_failure_falls_back_to_vaapi_pipe(self):

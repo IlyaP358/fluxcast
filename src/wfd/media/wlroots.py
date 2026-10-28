@@ -7,8 +7,8 @@ import time
 from ..config import WFDNotReady
 from ..wf_recorder import find_wf_recorder, wf_recorder_supports_icc
 from ..encoding import (
-    _bitrate_to_kbits, _calculate_gop, _kbits_to_bitrate_text, _letterbox_vf,
-    _parse_resolution, _quality_floor_kbits, _vbv_bufsize,
+    _bitrate_to_kbits, _calculate_gop, cap_kbits_to_link, _kbits_to_bitrate_text,
+    _letterbox_vf, _parse_resolution, read_go_air_mbps, _vbv_bufsize,
 )
 from ..env import _detect_audio_monitor
 from ..hw_encode import (
@@ -44,7 +44,10 @@ class WlrootsMixin:
             if raw.isdigit():
                 size = max(65536, int(raw))
             else:
-                size = 8 << 20
+                # Latency-first: 256 KiB ≈ 0.85 s at 2.4 Mbps. 1–8 MiB
+                # filled the nut pipe (~3–27 s) and showed up as pointer lag
+                # after VBV was already 0.25 s.
+                size = 256 * 1024
         try:
             fcntl.fcntl(fd, fcntl.F_SETPIPE_SZ, size)
             return size
@@ -260,33 +263,26 @@ class WlrootsMixin:
         gop = _calculate_gop(self.config)
         parsed_out = _parse_resolution(out_res) or (monitor.width, monitor.height)
         requested_kbits = _bitrate_to_kbits(self.config.bitrate)
-        floor_kbits = _quality_floor_kbits(parsed_out[0], parsed_out[1], self.config.fps)
         plan = active_power_plan()
         throttled = encode_throttled(plan)
-        # AOSP/Miracast adaptive bitrate (encode.env / congestion-cut) must not
-        # be silently raised back to the 8 Mbps "desktop clarity" floor — that
-        # fought every ×0.6 cut and left artifacts while settings said 3M.
-        honor = (
-            (os.environ.get("FLUXCAST_WFD_HONOR_BITRATE") or "").strip().lower()
-            in ("1", "true", "yes", "on")
-            or (os.environ.get("FLUXCAST_WFD_ENCODE_ENV_FILE") or "").strip() != ""
+        air = read_go_air_mbps()
+        audio_kbps = 1536 if getattr(self.config, "prefer_lpcm", False) else 128
+        effective_kbits = cap_kbits_to_link(
+            requested_kbits, air, audio_kbps=audio_kbps
         )
-        if throttled or honor:
-            effective_kbits = requested_kbits
-        else:
-            effective_kbits = max(requested_kbits, floor_kbits)
+        if air and effective_kbits < requested_kbits:
+            print(
+                "[FluxCast WFD Media] Capping encode to P2P air "
+                f"{air:.1f} Mbps: {self.config.bitrate} -> "
+                f"{_kbits_to_bitrate_text(effective_kbits)} "
+                f"(audio {audio_kbps} kbps)"
+            )
+            # Keep ~1s GOP at 60 fps (GOP 60). Only shorten IDR at ≤30 fps.
+            if int(self.config.fps or 30) <= 30:
+                gop = min(gop, max(8, int(self.config.fps or 30) // 2))
         effective_bitrate = _kbits_to_bitrate_text(effective_kbits)
         effective_bitrate = apply_bitrate_plan(effective_bitrate, throttled=throttled)
-        if effective_kbits > requested_kbits and not throttled and not honor:
-            print(
-                "[FluxCast WFD Media] Raising bitrate for desktop clarity: "
-                f"{self.config.bitrate} -> {effective_bitrate}"
-            )
-        elif honor and requested_kbits < floor_kbits:
-            print(
-                "[FluxCast WFD Media] Honoring adaptive bitrate "
-                f"{effective_bitrate} (below clarity floor {_kbits_to_bitrate_text(floor_kbits)})"
-            )
+        effective_kbits = _bitrate_to_kbits(effective_bitrate)
         return {
             "src_res": src_res,
             "out_res": out_res,
@@ -503,15 +499,18 @@ class WlrootsMixin:
             if peak_bits < br_bits:
                 peak_bits = br_bits
                 peak = target
-            # Intel HRD needs bufsize or BRC undershoots (~2–3 Mbps). QVBR
-            # needs a larger VBV than CBR or it sits at ~3 Mbps despite b=.
+            # QVBR quality-first HRD (~2 s). CQP/CBR stay latency-first.
+            # FLUXCAST_WFD_VBV_MULTIPLIER still wins (omarchy encode.env).
             try:
-                default_vbv = "2.0" if rc == "QVBR" else "0.5"
-                vbv_mult = float(
-                    (os.environ.get("FLUXCAST_WFD_VBV_MULTIPLIER", "") or default_vbv).strip()
-                    or default_vbv
-                )
-            except ValueError:
+                env_vbv = (os.environ.get("FLUXCAST_WFD_VBV_MULTIPLIER", "") or "").strip()
+                if env_vbv:
+                    vbv_mult = float(env_vbv)
+                elif rc == "QVBR":
+                    vbv_mult = 2.0
+                else:
+                    from ..encoding import latency_first_vbv_multiplier
+                    vbv_mult = float(latency_first_vbv_multiplier(br_bits / 1_000_000.0))
+            except (ValueError, Exception):
                 vbv_mult = 2.0 if rc == "QVBR" else 0.5
             vbv_mult = max(0.25, min(4.0, vbv_mult))
             buf_bits = max(br_bits // 4, int(peak_bits * vbv_mult))
@@ -610,7 +609,7 @@ class WlrootsMixin:
         try:
             import fcntl
 
-            pipe_sz = 1 << 20  # 1 MiB
+            pipe_sz = 256 * 1024
             fcntl.fcntl(r_fd, fcntl.F_SETPIPE_SZ, pipe_sz)
             fcntl.fcntl(w_fd, fcntl.F_SETPIPE_SZ, pipe_sz)
         except OSError:
@@ -735,7 +734,11 @@ class WlrootsMixin:
         )
 
     def _start_wf_recorder_vaapi_dmabuf(self, wf_recorder: str, monitor) -> None:
-        """Capture+encode on GPU (DMA-BUF); ffmpeg only remuxes to RTP.
+        """Capture+encode H.264 on GPU (DMA-BUF); ffmpeg remuxes video and encodes AAC.
+
+        WFD AAC is MPEG-2 AAC-LC in ADTS (TS stream_type 0x0F). Do not
+        ``-C aac`` into NUT and ``-c:a copy`` — NUT AAC is not ADTS and
+        picky sinks never start the video plane.
 
         Encode flags:
         - scale_vaapi → NV12 with out_range=tv (limited).
@@ -771,34 +774,48 @@ class WlrootsMixin:
             "-m", "nut",
             "-f", "/dev/stdout",
         ]
-        # AAC in the same nut container as video (single ffmpeg input).
-        if not self.config.no_audio and audio_monitor:
-            wf_cmd[1:1] = [f"--audio={audio_monitor}", "-C", "aac", "-R", "48000"]
 
         # Keep demux queue small — 4096 buffered nut packets can add hundreds of
         # ms of glass-to-glass lag. Override with FLUXCAST_WFD_THREAD_QUEUE_SIZE.
-        _tqs = (os.environ.get("FLUXCAST_WFD_THREAD_QUEUE_SIZE", "") or "64").strip() or "64"
+        _tqs = (os.environ.get("FLUXCAST_WFD_THREAD_QUEUE_SIZE", "") or "8").strip() or "8"
         ffmpeg_cmd = [
             *_ffmpeg_sender_args(self.config.ffmpeg_stats),
             "-fflags", "+genpts",
             "-thread_queue_size", _tqs,
             "-f", "nut",
             "-i", "pipe:0",
-            "-map", "0:v:0",
-            "-c:v", "copy",
         ]
         if not self.config.no_audio and audio_monitor:
+            # Pulse on a second input; encode AAC-LC ADTS here (WFD 0x0F).
             ffmpeg_cmd += [
-                "-map", "0:a:0",
-                "-c:a", "copy",
+                "-thread_queue_size", _tqs,
+                "-f", "pulse",
+                "-i", audio_monitor,
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-c:v", "copy",
+                "-af", "aresample=async=1",
+                "-c:a", "aac",
+                "-profile:a", "aac_low",
+                "-b:a", "128k",
+                "-ac", "2",
+                "-ar", "48000",
                 "-streamid", "1:4352",
+            ]
+        else:
+            ffmpeg_cmd += [
+                "-map", "0:v:0",
+                "-c:v", "copy",
             ]
 
         ffmpeg_cmd += self._common_output_args()
 
         print(f"[FluxCast WFD Media] Capturing screen : {monitor.name} ({meta['src_res']})")
-        if not self.config.no_audio:
-            print(f"[FluxCast WFD Media] Capturing audio  : {audio_monitor} (via wf-recorder)")
+        if not self.config.no_audio and audio_monitor:
+            print(
+                f"[FluxCast WFD Media] Capturing audio  : {audio_monitor} "
+                "(ffmpeg AAC-LC ADTS, not NUT copy)"
+            )
         if meta["out_res"] != meta["src_res"]:
             print(f"[FluxCast WFD Media] Scaling output  : {meta['out_res']}")
         proto = "icc" if icc else "wlr-screencopy"
@@ -903,7 +920,7 @@ class WlrootsMixin:
         try:
             import fcntl
 
-            pipe_sz = 1 << 20
+            pipe_sz = 256 * 1024
             fcntl.fcntl(r_fd, fcntl.F_SETPIPE_SZ, pipe_sz)
             fcntl.fcntl(w_fd, fcntl.F_SETPIPE_SZ, pipe_sz)
         except OSError:
@@ -974,7 +991,7 @@ class WlrootsMixin:
             "-f", "/dev/stdout",
         ]
 
-        _tqs = (os.environ.get("FLUXCAST_WFD_THREAD_QUEUE_SIZE", "") or "64").strip() or "64"
+        _tqs = (os.environ.get("FLUXCAST_WFD_THREAD_QUEUE_SIZE", "") or "8").strip() or "8"
         _pipe_ll = (os.environ.get("FLUXCAST_WFD_VAAPI_PIPE_LOW_LATENCY", "") or "").strip().lower() in (
             "1", "true", "yes", "on",
         )
@@ -1121,7 +1138,7 @@ class WlrootsMixin:
             "-f", "/dev/stdout",
         ]
 
-        _tqs = (os.environ.get("FLUXCAST_WFD_THREAD_QUEUE_SIZE", "") or "64").strip() or "64"
+        _tqs = (os.environ.get("FLUXCAST_WFD_THREAD_QUEUE_SIZE", "") or "8").strip() or "8"
         # VAAPI pipe low-latency input: skip demux probing / extra buffering.
         # Enable with FLUXCAST_WFD_VAAPI_PIPE_LOW_LATENCY=1 (test before defaulting).
         _pipe_ll = (os.environ.get("FLUXCAST_WFD_VAAPI_PIPE_LOW_LATENCY", "") or "").strip().lower() in (
