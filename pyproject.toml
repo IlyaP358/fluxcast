@@ -56,6 +56,7 @@ include = [
     "src/i18n/*.json",
     "src/i18n/**/*.json",
 ]
+exclude = ["src/i18n/sync_translations.py"]  # maintainer tool, not shipped
 
 [tool.hatch.build.targets.wheel.force-include]
 "meta/pypi/pypi_sysinstall.py"             = "pypi_sysinstall.py"
