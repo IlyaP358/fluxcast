@@ -14,7 +14,7 @@ FluxCast streams a Linux desktop to a TV.
 
 ## Demo
 
-https://github.com/user-attachments/assets/ce01804c-2f86-4a5d-8ecf-d6f2a72f55d1
+https://github.com/user-attachments/assets/0082972a-072a-4ad9-b37d-16150efc0291
 
 ## Project Status
 

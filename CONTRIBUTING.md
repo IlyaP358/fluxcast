@@ -51,37 +51,56 @@ description rather than hoping it goes unnoticed.
 
 ## Translations
 
-Everything lives in one file, `src/i18n/translations.json`. Each entry is keyed
-by the English source string:
+Each language is one file in `src/i18n/translations/`, named by its code:
+`de.json`, `fr.json`. `en.json` is the source of truth; its keys are the exact
+English strings the code asks for.
 
-```json
-"Stop Casting": {
-    "en": "Stop Casting",
-    "ru": "Остановить трансляцию",
-    "cs": "Zastavit vysílání"
-}
+**To add a language**, create the file with every key already in it:
+
+```bash
+python3 src/i18n/sync_translations.py uk
 ```
 
-To add a language, append your code to every entry. There is no new file to
-create and no template to copy.
+Then translate the values in `src/i18n/translations/uk.json`. The script leaves
+the English text in place as the placeholder, so anything you have not reached
+yet still reads English.
+
+**To update an existing language** after new strings land, run the same command.
+It adds only the keys your file is missing and does not touch what you already
+translated:
+
+```bash
+python3 src/i18n/sync_translations.py de
+```
 
 Four rules. Each one fails silently if you break it, so please read them:
 
-- **Never change the key or the `en` value.** The key has to match the string in
-  the source code character for character, trailing spaces included.
-- **Keep `{placeholders}` exactly as they are.** Translating `{target}` into
-  your own language raises a runtime error, and only for users of that language.
-- **Keep `en` listed first** in each entry.
-- **Stay consistent inside your language.** If you translate "cast" one way in
-  the menu, use the same word in the notifications.
+- **Never change a key, and never edit `en.json`.** A key has to match the string
+  in the source character for character, trailing spaces included. One of them
+  really does end in three spaces:
+  `"Cast via Miracast (WFD, portal dialog)   "`.
+- **Keep `{placeholders}` exactly as they are.** Four strings carry them:
+  `{target}`, `{rc}` and `{path}`. Translating the name inside the braces raises a
+  runtime error, and only for users of your language.
+- **Do not reformat the file.** The script writes it sorted, two-space indent,
+  non-ASCII left as-is. Keeping that shape is what makes the diffs readable.
+- **Stay consistent inside your language.** If you translate "cast" one way in the
+  menu, use the same word in the notifications.
 
-Test without touching your system locale:
+You do not have to finish. A key with no translation falls back to English, so a
+partial file is a perfectly good pull request.
+
+Check your work:
 
 ```bash
-FLUXCAST_LANG=de python3 src/main.py --tray
+FLUXCAST_LANG=uk python3 src/main.py --tray   # see it without changing your locale
+python3 -m unittest discover -s tests
 ```
 
-Then add your language to the table in the README.
+`tests/test_i18n.py` compares every language against `en.json` and warns about
+missing keys instead of failing, so an incomplete translation will not block CI.
+
+Finally, add your language to the table in the README.
 
 ## Reporting Bugs
 

@@ -17,3 +17,4 @@ dist/
 /fluxcast_*.changes
 fluxcast_domains
 tools/
+.vscode
