@@ -1,4 +1,5 @@
 import sys
+import time
 import uuid
 from typing import Optional
 
@@ -11,6 +12,10 @@ except ImportError:
     print("[FluxCast] ERROR: pychromecast is not installed. "
           "Run: pip install pychromecast")
     sys.exit(1)
+
+
+# Default Media Receiver; MediaController only LOADs into the foreground app.
+APP_MEDIA_RECEIVER = "CC1AD845"
 
 
 class _MediaListener:
@@ -134,8 +139,22 @@ def prompt_device(devices: list, device_name: Optional[str] = None):
         return devices[default_idx]
 
 
+def _ensure_media_receiver(device, timeout: float = 10.0) -> None:
+    if device.status and device.status.app_id == APP_MEDIA_RECEIVER:
+        return
+    device.start_app(APP_MEDIA_RECEIVER)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if device.status and device.status.app_id == APP_MEDIA_RECEIVER:
+            return
+        time.sleep(0.2)
+    print("[FluxCast] WARNING: The TV did not switch to the Default Media "
+          "Receiver in time; the cast may not start.")
+
+
 def start_cast(device, stream_url: str) -> None:
     device.wait()
+    _ensure_media_receiver(device)
     device.register_connection_listener(_ConnectionListener())
     mc = device.media_controller
     mc.register_status_listener(_MediaListener())
