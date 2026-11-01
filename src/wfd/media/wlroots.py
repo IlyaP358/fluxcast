@@ -560,7 +560,11 @@ class WlrootsMixin:
             vbv_mult = max(0.05, min(0.25, vbv_mult))
             # CBR fills, so HRD time is real delay. 0.1 s pumped quality on
             # this Intel path; 0.25 s (Intel LD) was the last good picture.
-            hrd_frames = 15 if rc == "CBR" else 4
+            # QVBR used 4 frames (~67 ms) which block-encoded cursor/bar
+            # motion. 15 frames is Intel low-delay (0.25 s at peak) and
+            # matches CBR. low_delay_hrd_bits still caps at max_s so a
+            # QVBR undershoot cannot turn this into seconds of lag.
+            hrd_frames = 15
             buf_bits = low_delay_hrd_bits(
                 peak_bits,
                 float(self.config.fps or 30),
