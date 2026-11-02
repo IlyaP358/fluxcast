@@ -1,0 +1,46 @@
+#!/bin/sh
+set -e
+
+[ "$1" = "configure" ] || exit 0
+
+SOURCES=/etc/apt/sources.list.d/fluxcast.sources
+KEYRING=/usr/share/keyrings/fluxcast-archive-keyring.gpg
+RELEASES=https://github.com/IlyaP358/fluxcast/releases/latest
+
+ARCH=$(dpkg --print-architecture)
+if [ "$ARCH" != "amd64" ]; then
+    echo "fluxcast-repo: FluxCast is built for amd64 only, this system is $ARCH." >&2
+    echo "fluxcast-repo: no repository configured. See $RELEASES" >&2
+    exit 0
+fi
+
+# Each .deb bundles a virtualenv tagged for one python3 minor, so the suite is
+# picked from python3 rather than the codename: derivatives land on a build that works.
+PY=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)
+case "$PY" in
+    3.11) SUITE=bookworm ;;
+    3.12) SUITE=noble ;;
+    3.13) SUITE=trixie ;;
+    3.14) SUITE=resolute ;;
+    *)    SUITE= ;;
+esac
+
+if [ -z "$SUITE" ]; then
+    echo "fluxcast-repo: no FluxCast build matches python3 ${PY:-unknown} on this system." >&2
+    echo "fluxcast-repo: builds exist for python3 3.11, 3.12, 3.13 and 3.14." >&2
+    echo "fluxcast-repo: no repository configured. Use the AppImage: $RELEASES" >&2
+    exit 0
+fi
+
+cat > "$SOURCES" <<SOURCESEOF
+Types: deb
+URIs: https://apt.fluxcast.dev
+Suites: $SUITE
+Components: main
+Architectures: amd64
+Signed-By: $KEYRING
+SOURCESEOF
+
+echo "fluxcast-repo: configured for $SUITE (python3 $PY)."
+echo "fluxcast-repo: now run: sudo apt update && sudo apt install fluxcast"
+exit 0

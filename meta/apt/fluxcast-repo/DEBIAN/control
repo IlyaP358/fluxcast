@@ -1,0 +1,14 @@
+Package: fluxcast-repo
+Version: 1.0
+Architecture: all
+Depends: python3
+Maintainer: Illia Pukalov <illia@fluxcast.dev>
+Section: misc
+Priority: optional
+Homepage: https://fluxcast.dev
+Description: FluxCast apt repository and signing key
+ Points apt at apt.fluxcast.dev and installs the key the packages there are
+ signed with. The right suite is chosen from this system's python3 version.
+ .
+ Installing this package does not install FluxCast. Afterwards run:
+ sudo apt update && sudo apt install fluxcast

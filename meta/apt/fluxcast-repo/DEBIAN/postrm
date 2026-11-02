@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|purge)
+        # Without this every apt update fails: the keyring goes with the package.
+        rm -f /etc/apt/sources.list.d/fluxcast.sources
+        ;;
+esac
+exit 0

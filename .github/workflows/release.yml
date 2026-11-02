@@ -149,3 +149,73 @@ jobs:
           ssh_keyscan_types: rsa,ecdsa,ed25519
           updpkgsums: true
           test: true
+
+  apt:
+    needs: deb
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends apt-utils gnupg rsync
+
+      - name: Download this release's .deb files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          mkdir -p incoming
+          gh release download "$TAG" --dir incoming --pattern 'fluxcast_*_amd64.deb'
+          ls -l incoming
+
+      - name: Import the signing key
+        env:
+          KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: printf '%s\n' "$KEY" | gpg --batch --quiet --import
+
+      - name: Prepare ssh
+        env:
+          SSH_KEY: ${{ secrets.APT_SSH_KEY }}
+          HOST: ${{ secrets.APT_SSH_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          ssh-keyscan -H "$HOST" > ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Fetch the pool that is already published
+        env:
+          HOST: ${{ secrets.APT_SSH_HOST }}
+          USER: ${{ secrets.APT_SSH_USER }}
+        run: |
+          mkdir -p repo/pool
+          rsync -a -e "ssh -i $HOME/.ssh/deploy" \
+            "$USER@$HOST:/var/www/apt/pool/" repo/pool/ \
+            || echo "nothing published yet, starting a fresh pool"
+
+      - name: Build and sign the repository
+        env:
+          KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
+        run: bash meta/apt/build-repo.sh
+
+      - name: Build fluxcast-repo.deb
+        run: bash meta/apt/build-config-package.sh
+
+      - name: Publish
+        env:
+          HOST: ${{ secrets.APT_SSH_HOST }}
+          USER: ${{ secrets.APT_SSH_USER }}
+        run: |
+          # dists/ is replaced wholesale so stale indices cannot linger, while
+          # pool/ only ever grows, which is what keeps older versions available.
+          rsync -a --delete -e "ssh -i $HOME/.ssh/deploy" \
+            repo/dists/ "$USER@$HOST:/var/www/apt/dists/"
+          rsync -a -e "ssh -i $HOME/.ssh/deploy" \
+            repo/pool/ "$USER@$HOST:/var/www/apt/pool/"
+          rsync -a -e "ssh -i $HOME/.ssh/deploy" \
+            repo/fluxcast-repo.deb repo/fluxcast-archive-keyring.gpg \
+            "$USER@$HOST:/var/www/apt/"

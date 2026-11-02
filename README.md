@@ -155,7 +155,16 @@ Depending on your desktop environment, you may need to install:
 
 ### Debian / Ubuntu - .deb
 
-Download the `.deb` matching your release from the [Releases](https://github.com/IlyaP358/fluxcast/releases) page and install it:
+Add the repository once and FluxCast updates with the rest of the system. The
+build matching your machine is picked for you:
+
+```bash
+curl -fsSLO https://apt.fluxcast.dev/fluxcast-repo.deb
+sudo apt install ./fluxcast-repo.deb
+sudo apt update && sudo apt install fluxcast
+```
+
+Or download the `.deb` matching your release from the [Releases](https://github.com/IlyaP358/fluxcast/releases) page and install it:
 
 ```bash
 sudo apt install ./fluxcast_<version>~<codename>_amd64.deb
