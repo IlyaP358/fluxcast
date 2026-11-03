@@ -48,6 +48,13 @@ class TestWFDLPCMFraming(unittest.TestCase):
         self.assertTrue(packer.feed(bytes(LPCM_PCM_BYTES_PER_PES - 100)))
         self.assertEqual(packer.feed(b""), [])
 
+    def test_packer_skip_frames_advances_sample_clock(self):
+        packer = LPCMAudioPacker()
+        packer.skip_frames(480)
+        out = packer.feed(bytes(LPCM_PCM_BYTES_PER_PES))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][1], 480)
+
     def test_pmt_matches_aosp_layout(self):
         pmt = _build_pmt(0)
         self.assertIn(bytes([STREAM_TYPE_LPCM]), pmt)

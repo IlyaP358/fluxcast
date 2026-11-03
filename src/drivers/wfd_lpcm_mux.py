@@ -382,6 +382,11 @@ class LPCMAudioPacker:
         self._buf.clear()
         self._frame_index = 0
 
+    def skip_frames(self, n: int) -> None:
+        """Advance the sample clock past PCM that was dropped, not sent."""
+        if n > 0:
+            self._frame_index += n
+
     def feed(self, pcm: bytes) -> list[tuple[bytes, int]]:
         out: list[tuple[bytes, int]] = []
         if not pcm:
@@ -466,8 +471,10 @@ class WFDLPCMMuxer:
 
         # Video: maxsize=2; Full → drop-oldest in _on_new_video_sample.
         self._video_q: queue.Queue = queue.Queue(maxsize=2)
-        # Audio: maxsize=2000; Full → drop chunk in _on_sample (put_nowait).
-        self._audio_q: queue.Queue = queue.Queue(maxsize=2000)
+        # ~240 ms at 10 ms / 1920-byte AU. Full → drop-oldest (not new) so
+        # PTS/PCR cannot drift tens of seconds; dropping new left the sink
+        # playing stale LPCM until it went unintelligible.
+        self._audio_q: queue.Queue = queue.Queue(maxsize=24)
 
         self._video_pipeline = None
         self._audio_pipeline = None
@@ -543,8 +550,8 @@ class WFDLPCMMuxer:
         if sink is None:
             raise RuntimeError("Audio pipeline must contain appsink named 'sink'")
         sink.set_property("emit-signals", True)
-        sink.set_property("max-buffers", 32)
-        sink.set_property("drop", False)
+        sink.set_property("max-buffers", 8)
+        sink.set_property("drop", True)
 
         def _on_sample(appsink):
             sample = appsink.emit("pull-sample")
@@ -553,10 +560,7 @@ class WFDLPCMMuxer:
             buf = sample.get_buffer()
             ok, mapinfo = buf.map(Gst.MapFlags.READ)
             if ok:
-                try:
-                    self._audio_q.put_nowait(bytes(mapinfo.data))
-                except queue.Full:
-                    self.audio_chunks_dropped += 1
+                self._enqueue_audio(bytes(mapinfo.data))
                 buf.unmap(mapinfo)
             return Gst.FlowReturn.OK
 
@@ -623,6 +627,28 @@ class WFDLPCMMuxer:
                     self._revive_socket()
                 break
         return ok
+
+    def _enqueue_audio(self, pcm: bytes) -> None:
+        try:
+            self._audio_q.put_nowait(pcm)
+            return
+        except queue.Full:
+            pass
+        try:
+            dropped = self._audio_q.get_nowait()
+            self._audio_packer.skip_frames(len(dropped) // LPCM_FRAME_BYTES)
+            self.audio_chunks_dropped += 1
+            if self.audio_chunks_dropped == 1 or self.audio_chunks_dropped % 250 == 0:
+                log.warning(
+                    "LPCM audio queue full; dropped oldest (%d chunks)",
+                    self.audio_chunks_dropped,
+                )
+        except queue.Empty:
+            pass
+        try:
+            self._audio_q.put_nowait(pcm)
+        except queue.Full:
+            self.audio_chunks_dropped += 1
 
     def _drain_audio_packets(self) -> list[bytes]:
         """Return TS packets for any complete LPCM access units."""

@@ -716,7 +716,7 @@ class WlrootsMixin:
             "layout=interleaved ! "
             "audioconvert ! audio/x-raw,format=S16BE ! "
             "audiobuffersplit output-buffer-size=1920 ! "
-            "appsink name=sink sync=false max-buffers=32 drop=false"
+            "appsink name=sink sync=false max-buffers=8 drop=true"
         )
 
         try:
@@ -1036,7 +1036,7 @@ class WlrootsMixin:
             "layout=interleaved ! "
             "audioconvert ! audio/x-raw,format=S16BE ! "
             "audiobuffersplit output-buffer-size=1920 ! "
-            "appsink name=sink sync=false max-buffers=32 drop=false"
+            "appsink name=sink sync=false max-buffers=8 drop=true"
         )
         try:
             muxer.start(vid_pipeline, aud_pipeline)
