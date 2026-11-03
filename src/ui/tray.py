@@ -72,6 +72,12 @@ def _notify(title: str, body: str) -> None:
     )
 
 
+def _tk_missing(title: str, exc: Exception) -> None:
+    _log(f"{title} unavailable: {exc}")
+    _notify(title, _l("This window needs the Tk libraries: install python3-tk "
+                      "on Debian and Ubuntu, or tk on Arch."))
+
+
 def _refresh() -> None:
     global _refresh_pending
     if _icon is None:
@@ -395,10 +401,7 @@ def _show_about() -> None:
             from tkinter import font as tkfont
             from PIL import ImageTk
         except ImportError as exc:
-            _log(f"About window unavailable: {exc}")
-            _notify(_l("About FluxCast"),
-                    _l("The About window needs the Tk libraries "
-                       "(install the 'tk' package)."))
+            _tk_missing(_l("About FluxCast"), exc)
             return
 
         BG = "#0a120d"
@@ -591,7 +594,11 @@ def _show_about() -> None:
 
 def _show_settings() -> None:
     # Imported late so the tray still starts without tkinter installed.
-    from ui.settings import show_settings
+    try:
+        from ui.settings import show_settings
+    except ImportError as exc:
+        _tk_missing(_l("Settings"), exc)
+        return
     show_settings()
 
 
