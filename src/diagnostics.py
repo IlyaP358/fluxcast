@@ -506,8 +506,22 @@ def _iw_phy_p2p_facts() -> tuple[Optional[bool], Optional[bool]]:
 
     p2p_capable = bool(re.search(r"P2P-(client|GO|device)", text))
 
-    # Capture the "valid interface combinations:" block: lines indented deeper
-    # than the header, until the section ends.
+    # Concurrent if a single entry allows both a managed and a P2P interface.
+    concurrent = any(
+        "managed" in chunk and re.search(r"P2P-(client|GO|device)", chunk)
+        for chunk in _iw_combination_entries(text)
+    )
+    return (p2p_capable, concurrent)
+
+
+def _iw_combination_entries(text: str) -> list[str]:
+    """Raw entries of the first "valid interface combinations:" block in text.
+
+    Captures the lines indented deeper than the header, until the section ends.
+    Each combination is a '*'-led entry that may wrap onto continuation lines;
+    the text before the first '*' (normally empty) is returned too, so callers
+    must tolerate an entry with no limits in it.
+    """
     combo_lines: list[str] = []
     capturing = False
     header_indent = 0
@@ -522,13 +536,7 @@ def _iw_phy_p2p_facts() -> tuple[Optional[bool], Optional[bool]]:
             if (len(line) - len(line.lstrip())) <= header_indent:
                 break
             combo_lines.append(line)
-    # Each combination is a '*'-led entry (may wrap onto continuation lines).
-    # Concurrent if a single entry allows both a managed and a P2P interface.
-    concurrent = any(
-        "managed" in chunk and re.search(r"P2P-(client|GO|device)", chunk)
-        for chunk in "\n".join(combo_lines).split("*")
-    )
-    return (p2p_capable, concurrent)
+    return "\n".join(combo_lines).split("*")
 
 
 def _iw_p2p_group_interfaces(output: str) -> list[tuple[str, str]]:
@@ -630,6 +638,200 @@ def _iw_p2p_check() -> Check:
             )
         return Check("iw P2P", STATUS_WARN, "Wi-Fi interfaces exist, but no P2P-device was shown", output)
     return Check("iw P2P", STATUS_WARN, "no Wi-Fi interfaces were shown", output)
+
+
+# Interface types cfg80211 leaves out of combination accounting (iw lists them
+# as "software interface modes"), so they never use up a slot.
+_IW_UNCOUNTED_IFTYPES = frozenset({"monitor", "AP/VLAN"})
+# The interface a Wi-Fi Direct session adds: P2P-client when the TV ends up as
+# group owner (FluxCast asks for that with GO intent 0), P2P-GO otherwise.
+_P2P_GROUP_IFTYPES = ("P2P-client", "P2P-GO")
+_P2P_SLOT_CHECK = "P2P group slot"
+
+# One "valid interface combinations" entry: ([(interface types, max)], total).
+_IwCombination = tuple[list[tuple[tuple[str, ...], int]], int]
+
+
+def _iw_phy_combinations(text: str) -> dict[str, list[_IwCombination]]:
+    """Valid interface combinations of every wiphy in `iw phy` output.
+
+    Keyed by phy index ("0" for "Wiphy phy0") so it lines up with the "phy#0"
+    headers of `iw dev`. A wiphy that lists no combinations maps to [].
+    """
+    combinations: dict[str, list[_IwCombination]] = {}
+    sections = re.split(r"^Wiphy\s+phy(\d+)\b.*$", text, flags=re.M)
+    for index, body in zip(sections[1::2], sections[2::2]):
+        parsed: list[_IwCombination] = []
+        for entry in _iw_combination_entries(body):
+            limits = [
+                (tuple(t.strip() for t in types.split(",") if t.strip()), int(maximum))
+                for types, maximum in re.findall(r"#\{([^}]*)\}\s*<=\s*(\d+)", entry)
+            ]
+            total = re.search(r"total\s*<=\s*(\d+)", entry)
+            if limits and total:
+                parsed.append((limits, int(total.group(1))))
+        combinations[index] = parsed
+    return combinations
+
+
+def _iw_dev_interfaces(output: str) -> dict[str, list[tuple[str, str]]]:
+    """(name, type) of every interface in `iw dev` output, keyed by phy index.
+
+    A wdev without a netdev (iw prints "Unnamed/non-netdev interface", e.g. a
+    P2P-device) gets the name "".
+    """
+    phys: dict[str, list[tuple[str, str]]] = {}
+    phy: Optional[str] = None
+    name: Optional[str] = None
+    for line in output.splitlines():
+        header = re.match(r"phy#(\d+)", line)
+        if header:
+            phy, name = header.group(1), None
+            phys.setdefault(phy, [])
+            continue
+        interface = re.match(r"\s*Interface\s+(\S+)", line)
+        if interface:
+            name = interface.group(1)
+            continue
+        if re.match(r"\s*Unnamed/non-netdev interface", line):
+            name = ""
+            continue
+        kind = re.match(r"\s*type\s+(.+?)\s*$", line)
+        if kind and phy is not None and name is not None:
+            phys[phy].append((name, kind.group(1)))
+            name = None
+    return phys
+
+
+def _netdev_is_up(name: str) -> bool:
+    """Whether a netdev is administratively up (IFF_UP).
+
+    cfg80211 counts only running interfaces against the combinations, so a
+    configured-but-down hotspot interface does not block anything. A wdev with
+    no netdev, or one whose flags cannot be read, is assumed to be up.
+    """
+    if not name or "/" in name:
+        return True
+    try:
+        with open(f"/sys/class/net/{name}/flags", encoding="ascii") as flags:
+            return bool(int(flags.read().strip(), 16) & 0x1)
+    except (OSError, ValueError):
+        return True
+
+
+def _combination_admits(combination: _IwCombination, iftypes: list[str]) -> bool:
+    """Whether one combination allows this multiset of interface types at once.
+
+    Mirrors cfg80211_iter_combinations: every type must appear in some limit,
+    each limit caps the interfaces of the types it names, and total caps them
+    all. #channels is not checked: the channel a Wi-Fi Direct group lands on is
+    not known until the group forms.
+    """
+    limits, total = combination
+    if len(iftypes) > total:
+        return False
+    if any(not any(iftype in types for types, _ in limits) for iftype in iftypes):
+        return False
+    return all(
+        sum(1 for iftype in iftypes if iftype in types) <= maximum
+        for types, maximum in limits
+    )
+
+
+def _format_combination(combination: _IwCombination) -> str:
+    limits, total = combination
+    parts = [f"#{{ {', '.join(types)} }} <= {maximum}" for types, maximum in limits]
+    return ", ".join(parts + [f"total <= {total}"])
+
+
+def _p2p_slot_check() -> Check:
+    """Warn when the adapter has no room left for a Wi-Fi Direct group.
+
+    A session adds a P2P-client or P2P-GO interface next to the ones already up.
+    Many adapters share a single slot between AP and P2P (rtw89 lists
+    `#{ AP, P2P-client, P2P-GO } <= 1`), so a running hotspot leaves none.
+    NetworkManager then sits in the config state without starting GO
+    negotiation, and the session times out with nothing pointing at the
+    hotspot, while every other row of the report is ok.
+
+    Adapters that cannot run a Wi-Fi connection and Wi-Fi Direct together at
+    all are the `iw P2P` row's concern; this row only reports a slot taken by
+    something that could be stopped.
+    """
+    iw = _find_binary("iw", IW_PATHS)
+    if not iw:
+        return Check(_P2P_SLOT_CHECK, STATUS_SKIP, "iw was not found",
+                     "cannot inspect Wi-Fi interface limits")
+    try:
+        phy_result = _run([iw, "phy"], timeout=4.0)
+        dev_result = _run([iw, "dev"], timeout=3.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return Check(_P2P_SLOT_CHECK, STATUS_SKIP, "could not query iw", str(exc))
+    if phy_result.returncode != 0 or dev_result.returncode != 0:
+        failed = phy_result if phy_result.returncode != 0 else dev_result
+        return Check(_P2P_SLOT_CHECK, STATUS_SKIP, "iw failed", failed.stderr.strip())
+
+    interfaces = _iw_dev_interfaces(dev_result.stdout)
+    blocked: list[tuple[list[tuple[str, str]], list[_IwCombination]]] = []
+    for phy, combinations in _iw_phy_combinations(phy_result.stdout).items():
+        p2p_combinations = [
+            combination for combination in combinations
+            if any(group in types for types, _ in combination[0] for group in _P2P_GROUP_IFTYPES)
+        ]
+        if not p2p_combinations:
+            continue
+
+        def fits(iftypes: list[str]) -> bool:
+            return any(
+                _combination_admits(combination, iftypes + [group])
+                for combination in p2p_combinations
+                for group in _P2P_GROUP_IFTYPES
+            )
+
+        # Types the driver leaves out of every combination (a P2P-device on
+        # some drivers) are handled outside them; counting them would make
+        # every combination fail.
+        listed = {iftype for combination in combinations for types, _ in combination[0] for iftype in types}
+        up = [
+            (name, kind) for name, kind in interfaces.get(phy, [])
+            if kind not in _IW_UNCOUNTED_IFTYPES and kind in listed and _netdev_is_up(name)
+        ]
+        kinds = [kind for _, kind in up]
+        if fits(kinds):
+            return Check(_P2P_SLOT_CHECK, STATUS_OK,
+                         "the Wi-Fi adapter has room for a Wi-Fi Direct group",
+                         f"phy{phy}: " + "; ".join(_format_combination(c) for c in p2p_combinations))
+        # The Wi-Fi connection is not something to give up for casting, and an
+        # adapter that cannot add a group even next to that alone is reported
+        # by the `iw P2P` row; only report a slot taken by something else.
+        if not fits(["managed"] if "managed" in kinds else []):
+            continue
+        uplink = next((entry for entry in up if entry[1] == "managed"), None)
+        others = [entry for entry in up if entry is not uplink and entry[1] != "P2P-device"]
+        blocked.append((others or up, p2p_combinations))
+
+    if not blocked:
+        return Check(_P2P_SLOT_CHECK, STATUS_SKIP,
+                     "no Wi-Fi adapter lists a P2P interface combination to check")
+
+    culprits = [entry for entries, _ in blocked for entry in entries]
+    listing = ", ".join(f"{name or 'unnamed'} ({kind})" for name, kind in culprits)
+    limits = "; ".join(_format_combination(c) for _, combinations in blocked for c in combinations)
+    hotspots = [name or "unnamed" for name, kind in culprits if kind == "AP"]
+    if hotspots:
+        advice = (
+            f"A Wi-Fi hotspot is running on {', '.join(hotspots)}. Stop it while "
+            "casting (NetworkManager hotspot: nmcli connection down <hotspot>; "
+            "hostapd: stop its service), then start the cast again."
+        )
+    else:
+        advice = "Bring these interfaces down while casting, then start the cast again."
+    return Check(
+        _P2P_SLOT_CHECK, STATUS_WARN,
+        f"no free Wi-Fi slot for a Wi-Fi Direct group: in use by {listing}",
+        f"The adapter allows only: {limits}. Without a free slot, NetworkManager "
+        f"never starts Wi-Fi Direct negotiation and the cast times out. {advice}",
+    )
 
 
 def _subnet_conflict_check() -> Check:
@@ -1034,6 +1236,7 @@ def run_diagnostics(skip_firewall: bool = False) -> DiagnosticReport:
         _nmcli_check(),
         _subnet_conflict_check(),
         _iw_p2p_check(),
+        _p2p_slot_check(),
         _supplicant_capability_check(),
         _supplicant_wfd_check(),
         _wpa_dbus_set_check(),
@@ -1052,7 +1255,17 @@ def run_diagnostics(skip_firewall: bool = False) -> DiagnosticReport:
     dnsmasq_ok = by_name.get("dnsmasq", Check("", STATUS_WARN, "")).status == STATUS_OK
     wfd_candidate = network_hw_ok and media_ok and dnsmasq_ok
 
-    if wfd_candidate:
+    # A taken slot does not clear wfd_candidate: it is usually a hotspot that
+    # can be stopped, and refusing to start over a heuristic would be worse
+    # than a timeout. It must not hide behind an all-clear summary either.
+    slot_blocked = by_name.get(_P2P_SLOT_CHECK, Check("", STATUS_SKIP, "")).status == STATUS_WARN
+    if wfd_candidate and slot_blocked:
+        summary = (
+            "Miracast/WFD looks possible via NetworkManager, but the Wi-Fi "
+            f"adapter has no free slot for a Wi-Fi Direct group right now; see "
+            f"the '{_P2P_SLOT_CHECK}' row."
+        )
+    elif wfd_candidate:
         summary = (
             "Miracast/WFD looks possible via NetworkManager; raw supplicant "
             "access is optional for this backend."
