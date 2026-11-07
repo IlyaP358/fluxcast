@@ -162,6 +162,12 @@ class RunAsGoDnsmasqCommandTest(unittest.TestCase):
         self.assertNotIn("set:wfdsink", range_arg)
         self.assertIn("set:wfdsink", host_arg)
         self.assertIn(PEER_MAC, host_arg)
+        self.assertIn("--bridge-interface=p2p-wlan0-5,wlan0", dnsmasq_cmd)
+        self.assertIn("--log-dhcp", dnsmasq_cmd)
+        self.assertEqual(
+            [a for a in dnsmasq_cmd if a.startswith("--dhcp-range=") and "tag:wfdsink" not in a],
+            [],
+        )
 
     def test_dedicated_go_without_physical_uses_untagged_range(self):
         with mock.patch.object(wpas_ip, "mark_unmanaged"), \
@@ -179,6 +185,8 @@ class RunAsGoDnsmasqCommandTest(unittest.TestCase):
         self.assertNotIn("tag:wfdsink", range_arg)
         self.assertIn("192.168.49.2", range_arg)
         self.assertFalse(any(a.startswith("--interface=wlp") for a in cmd))
+        self.assertFalse(any(a.startswith("--bridge-interface=") for a in cmd))
+        self.assertNotIn("--log-dhcp", cmd)
 
     def test_dhcp_host_includes_associated_interface_mac(self):
         sta = "66:ab:14:3d:6e:e4"
@@ -198,6 +206,23 @@ class RunAsGoDnsmasqCommandTest(unittest.TestCase):
         self.assertTrue(any("66:ab:14:3d:6e:e4" in a for a in hosts))
         joined = [" ".join(c.args[0]) for c in sudo.call_args_list if c.args]
         self.assertTrue(any("arp_notify=1" in j for j in joined))
+
+    def test_refused_discover_line_yields_the_client_mac(self):
+        log = (
+            "dnsmasq-dhcp: DHCPDISCOVER(p2p-wlp0s20-11) "
+            "de:84:03:8d:51:17 no address available\n"
+        )
+        self.assertEqual(
+            wpas_ip._macs_refused_in_log(log),
+            ["de:84:03:8d:51:17"],
+        )
+
+    def test_range_via_interface_line_has_no_mac(self):
+        log = (
+            "dnsmasq-dhcp: no address range available for DHCP request "
+            "via wlp0s20f3\n"
+        )
+        self.assertEqual(wpas_ip._macs_refused_in_log(log), [])
 
     def test_announce_go_ipv4_sets_arp_notify(self):
         with mock.patch.object(wpas_ip, "_sudo_run", return_value=_completed()) as sudo, \

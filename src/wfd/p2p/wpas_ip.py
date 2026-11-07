@@ -277,41 +277,19 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
                 timeout=3.0,
             )
             return
-    # Kill leftover dnsmasq *before* flushing the GO address. A stale
-    # instance (previous attempt, missing dhcp-host) answers DISCOVER with
-    # "no address available" and "packet received on p2p-0 which has no
-    # address", and the sink gives up before the new daemon can ACK.
-    _sudo_run(["pkill", "-f", f"dnsmasq.*{lease_file}"], timeout=5.0)
-    _sudo_run(["pkill", "-f", f"dnsmasq.*--interface={iface}"], timeout=5.0)
-    time.sleep(0.1)
-    _sudo_run(["ip", "addr", "flush", "dev", iface], timeout=5.0)
-    add = _sudo_run(["ip", "addr", "add", f"{gateway_ip}/24", "dev", iface], timeout=5.0)
-    if add.returncode != 0:
-        raise WFDNotReady(
-            f"Could not assign {gateway_ip}/24 to {iface}: "
-            f"{(add.stderr or add.stdout).strip()}"
-        )
-    _sudo_run(["ip", "link", "set", iface, "up"], timeout=5.0)
-    # Sink SYNs 7236 immediately after DHCPACK (WFD). Do this *before*
-    # dnsmasq so the first SYN is not racing INPUT DROP / rp_filter.
-    _prepare_go_rtsp_input(iface)
-    _announce_go_ipv4(iface, gateway_ip)
-    if not _wait_for_link_running(iface, timeout=2.0):
-        print(f"[FluxCast WFD] Warning: {iface} never reported LOWER_UP "
-              "(carrier) - proceeding anyway, but this may be why dnsmasq "
-              "fails to bind.")
-
+    # The sink deauths about 8s after AP-STA-CONNECTED if it has no lease.
+    # Address, DHCP firewall, and the lease file have to be ready in one
+    # sudo. Separate nmcli/iptables/ufw/arping calls were still running
+    # when the stick left, and ufw drops UDP 67 on a new group interface.
     if not shutil.which("dnsmasq"):
         raise WFDNotReady("dnsmasq not found - needed to serve DHCP while we're P2P GO.")
-
-    # Previous GO runs start dnsmasq via sudo; the lease file is root-owned.
-    # os.remove then raises PermissionError and aborts after GROUP-STARTED.
-    _sudo_run(["rm", "-f", lease_file], timeout=5.0)
-    _sudo_run(["touch", lease_file], timeout=5.0)
-    _sudo_run(["chmod", "a+rw", lease_file], timeout=5.0)
-    _sudo_run(["rm", "-f", dnsmasq_log], timeout=5.0)
-    _sudo_run(["touch", dnsmasq_log], timeout=5.0)
-    _sudo_run(["chmod", "a+rw", dnsmasq_log], timeout=5.0)
+    prepared = _prepare_go_listener(iface, gateway_ip, lease_file, dnsmasq_log)
+    if prepared.returncode != 0:
+        detail = (prepared.stderr or prepared.stdout or "").strip()
+        raise WFDNotReady(
+            f"Could not assign {gateway_ip}/24 to {iface} "
+            f"(exit {prepared.returncode}): {detail}"
+        )
     _go_dnsmasq_lease_file = lease_file
 
     # dnsmasq is scoped by the sink's MAC address (--dhcp-host + a tagged
@@ -326,6 +304,19 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
     #   DHCP server for every other device on that network. Scoping by MAC
     #   means we only ever answer this one specific sink, on whichever
     #   interface its broadcast happens to land on.
+    #
+    # Listening on physical_iface is not enough. dnsmasq only applies a
+    # range to an interface that has an address in that subnet. 192.168.49.1
+    # is on the group interface; the STA interface is on the office LAN, so
+    # a discover that lands there is dropped as "no address range available
+    # for DHCP request via <sta>" before the MAC tag is considered.
+    # --bridge-interface treats that packet as if it arrived on the group
+    # interface (the reply goes back out on the GO BSS). Do not assign
+    # 192.168.49.1 to the STA interface.
+    #
+    # --log-dhcp records "DHCPDISCOVER(<iface>) <mac> no address available"
+    # when the tag does not match, so the retry below can add the sink's
+    # interface MAC. The "no address range" line has no MAC; do not parse it.
     #
     # Note that listing an interface explicitly disables --bind-dynamic's
     # usual auto-detection for any *other* interface, so once physical_iface
@@ -349,8 +340,12 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
                        f"--interface={iface}"]
         if physical_iface:
             # Parent STA radio: MAC-tag the range so we are not a rogue
-            # DHCP server on the office LAN.
+            # DHCP server on the office LAN. bridge-interface attributes
+            # discovers that the driver delivered on the STA netdev to the
+            # group interface, which owns 192.168.49.1.
             dnsmasq_cmd.append(f"--interface={physical_iface}")
+            dnsmasq_cmd.append(f"--bridge-interface={iface},{physical_iface}")
+            dnsmasq_cmd.append("--log-dhcp")
             range_arg = (
                 f"--dhcp-range=tag:wfdsink,{WFD_P2P_SUBNET}.2,"
                 f"{WFD_P2P_SUBNET}.254,255.255.255.0,1h"
@@ -377,6 +372,8 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
         extra_note = f" (also {', '.join(extra)})" if extra else ""
         print(f"[FluxCast WFD] Starting dnsmasq on {iface}{extra_note}...")
         log_fp = open(dnsmasq_log, "ab", buffering=0)
+        # RTSP accept and gratuitous ARP are for after DHCPACK. Doing them
+        # first costs several seconds of sudo and the sink is already gone.
         subprocess.Popen(
             dnsmasq_cmd,
             stdout=log_fp,
@@ -384,6 +381,9 @@ def _run_as_go(iface: str, peer_mac: str, physical_iface: Optional[str] = None,
             start_new_session=True,
             env=dnsmasq_env,
         )
+        # Persist the DHCP holes. iptables already accepted 67/68 before
+        # the daemon was spawned; ufw is slow and must not precede it.
+        _persist_go_dhcp_ufw(iface)
         print(
             f"[FluxCast WFD] Waiting up to {remaining:.0f}s for DHCP lease "
             f"from {peer_mac}..."
@@ -471,6 +471,70 @@ def _announce_go_ipv4(iface: str, ipv4: str) -> None:
             ["arping", "-c", "2", "-U", "-I", iface, ipv4],
             timeout=5.0,
         )
+
+
+def _prepare_go_listener(iface: str, gateway_ip: str, lease_file: str,
+                         dnsmasq_log: str) -> subprocess.CompletedProcess[str]:
+    """One sudo: kill a stale daemon, own 192.168.49.1, accept DHCP.
+
+    A stale dnsmasq answers DISCOVER with "no address available" and the
+    sink gives up before the new daemon can ACK. iptables is inserted at
+    the head of INPUT so ufw's later drop does not eat the discover.
+    """
+    # pkill -f with the lease path matches this sudo command line (it
+    # contains both "dnsmasq" and the path) and SIGTERMs the script. Only
+    # the dnsmasq binary is a candidate.
+    script = r"""
+set -eu
+iface=$1
+gw=$2
+lease=$3
+log=$4
+for pid in $(pgrep -x dnsmasq || true); do
+  cmd=$(tr '\0' ' ' < "/proc/${pid}/cmdline" || true)
+  case "$cmd" in
+    *"$lease"*|*"--interface=${iface}"*) kill "$pid" || true ;;
+  esac
+done
+ip addr flush dev "$iface" || true
+ip addr replace "${gw}/24" dev "$iface"
+ip link set "$iface" up
+sysctl -w "net.ipv4.conf.${iface}.rp_filter=0" >/dev/null
+for port in 67 68; do
+  if ! iptables -C INPUT -i "$iface" -p udp --dport "$port" -j ACCEPT 2>/dev/null; then
+    iptables -I INPUT 1 -i "$iface" -p udp --dport "$port" -j ACCEPT
+  fi
+done
+i=0
+while [ "$i" -lt 10 ]; do
+  if ip -o link show "$iface" | grep -q LOWER_UP; then
+    break
+  fi
+  i=$((i + 1))
+  sleep 0.1
+done
+rm -f "$lease" "$log"
+touch "$lease" "$log"
+chmod a+rw "$lease" "$log"
+"""
+    return _sudo_run(
+        ["sh", "-c", script, "fluxcast-go-dhcp", iface, gateway_ip, lease_file, dnsmasq_log],
+        timeout=8.0,
+    )
+
+
+def _persist_go_dhcp_ufw(iface: str) -> None:
+    """Record the DHCP allow in ufw after dnsmasq is already listening."""
+    iface = safe_iface(iface)
+    if not iface:
+        return
+    script = r"""
+iface=$1
+for port in 67 68; do
+  ufw allow in on "$iface" to any port "$port" proto udp >/dev/null || true
+done
+"""
+    _sudo_run(["sh", "-c", script, "fluxcast-dhcp-ufw", iface], timeout=8.0)
 
 
 def _prepare_go_rtsp_input(iface: str) -> None:
