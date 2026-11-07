@@ -266,6 +266,12 @@ class HLSRequestHandler(http.server.BaseHTTPRequestHandler):
             if not path.startswith(prefix):
                 self._send_empty(404)
                 return False
+
+        # Only a GET proves the renderer is actually pulling media; a HEAD
+        # probe only proves it looked at the URL.
+        tracker = getattr(self.server, "request_tracker", None)
+        if tracker is not None and self.command == "GET":
+            tracker.record_request()
         return True
 
     def _local_path(self) -> Optional[str]:
@@ -793,11 +799,20 @@ class StreamServer:
         self.allowed_client = allowed_client
         self._server: Optional[socketserver.TCPServer] = None
         self._thread: Optional[threading.Thread] = None
+        # Number of authorized HTTP requests received.  The DLNA path uses it
+        # to distinguish "renderer is pulling the stream" from "renderer
+        # accepted the URL and then silently ignored it".
+        self.request_count = 0
+        self._request_lock = threading.Lock()
 
     def allow_client(self, client_ip: str) -> None:
         self.allowed_client = client_ip
         if self._server is not None:
             self._server.allowed_client = client_ip
+
+    def record_request(self) -> None:
+        with self._request_lock:
+            self.request_count += 1
 
     def start(self, capture_process=None) -> None:
         os.makedirs(HLS_DIR, mode=0o700, exist_ok=True)
@@ -811,6 +826,9 @@ class StreamServer:
         )
         self._server.session_id = self.session_id
         self._server.allowed_client = self.allowed_client
+        self._server.request_tracker = self
+        with self._request_lock:
+            self.request_count = 0
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
 
