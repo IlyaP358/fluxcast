@@ -674,3 +674,177 @@ class P2pRowIsEvidenceTest(unittest.TestCase):
         ):
             check = diagnostics.Check("iw P2P", diagnostics.STATUS_WARN, message, "")
             self.assertFalse(diagnostics._p2p_row_is_evidence(check), message)
+
+
+# `iw phy` excerpt from an RTL8852BE (rtw89): AP and P2P share one slot.
+IW_PHY_RTW89 = "\n".join([
+    "Wiphy phy0",
+    "\tmax # scan SSIDs: 4",
+    "\tSupported interface modes:",
+    "\t\t * managed",
+    "\t\t * AP",
+    "\t\t * AP/VLAN",
+    "\t\t * monitor",
+    "\t\t * P2P-client",
+    "\t\t * P2P-GO",
+    "\tsoftware interface modes (can always be added):",
+    "\t\t * AP/VLAN",
+    "\t\t * monitor",
+    "\tvalid interface combinations:",
+    "\t\t * #{ managed } <= 1, #{ AP, P2P-client, P2P-GO } <= 1,",
+    "\t\t   total <= 2, #channels <= 1",
+    "\t\t * #{ managed } <= 1, #{ P2P-client, P2P-GO } <= 1,",
+    "\t\t   total <= 2, #channels <= 2",
+    "\tHT Capability overrides:",
+    "\t\t * MCS: ff ff ff ff ff ff ff ff ff ff",
+])
+
+# `iw phy` excerpt in the iwlwifi shape: a P2P-device wdev counted in the
+# combinations, and a separate slot for it.
+IW_PHY_IWLWIFI = "\n".join([
+    "Wiphy phy0",
+    "\tvalid interface combinations:",
+    "\t\t * #{ managed } <= 1, #{ AP, P2P-client, P2P-GO } <= 1, #{ P2P-device } <= 1,",
+    "\t\t   total <= 3, #channels <= 2",
+    "\tHT Capability overrides:",
+])
+
+IW_DEV_STA_AND_HOTSPOT = "\n".join([
+    "phy#0",
+    "\tInterface ap0",
+    "\t\tifindex 9",
+    "\t\twdev 0x3",
+    "\t\tssid ArchHotspot",
+    "\t\ttype AP",
+    "\t\tchannel 11 (2462 MHz), width: 20 MHz, center1: 2462 MHz",
+    "\tInterface wlan0",
+    "\t\tifindex 2",
+    "\t\twdev 0x1",
+    "\t\tssid Palm Tree",
+    "\t\ttype managed",
+])
+
+IW_DEV_STA_ONLY = "\n".join([
+    "phy#0",
+    "\tInterface wlan0",
+    "\t\tifindex 2",
+    "\t\ttype managed",
+])
+
+
+def _run_p2p_slot_check(phy_output, dev_output, down=()):
+    """Run _p2p_slot_check against canned `iw phy` / `iw dev` output."""
+    def fake_run(args, timeout=None):
+        return _completed(phy_output if args[1] == "phy" else dev_output)
+
+    with (
+        mock.patch("diagnostics._find_binary", return_value="/usr/sbin/iw"),
+        mock.patch("diagnostics._run", side_effect=fake_run),
+        mock.patch("diagnostics._netdev_is_up", side_effect=lambda name: name not in down),
+    ):
+        return diagnostics._p2p_slot_check()
+
+
+class P2pSlotCheckTest(unittest.TestCase):
+    """A hotspot holding the adapter's only AP/P2P slot must be reported.
+
+    Without a free slot NetworkManager stays in the config state, never starts
+    GO negotiation, and the cast times out while every other row is ok.
+    """
+
+    def test_running_hotspot_blocks_the_group(self):
+        check = _run_p2p_slot_check(IW_PHY_RTW89, IW_DEV_STA_AND_HOTSPOT)
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("ap0 (AP)", check.message)
+        # The Wi-Fi uplink is not something to give up; it must not be blamed.
+        self.assertNotIn("wlan0", check.message)
+        self.assertIn("hotspot is running on ap0", check.detail)
+        self.assertIn("#{ AP, P2P-client, P2P-GO } <= 1", check.detail)
+
+    def test_wifi_connection_alone_leaves_room(self):
+        check = _run_p2p_slot_check(IW_PHY_RTW89, IW_DEV_STA_ONLY)
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+
+    def test_hotspot_interface_that_is_down_does_not_count(self):
+        check = _run_p2p_slot_check(IW_PHY_RTW89, IW_DEV_STA_AND_HOTSPOT, down={"ap0"})
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+
+    def test_monitor_interfaces_never_use_a_slot(self):
+        dev = IW_DEV_STA_ONLY + "\n\tInterface mon0\n\t\ttype monitor"
+        check = _run_p2p_slot_check(IW_PHY_RTW89, dev)
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+
+    def test_p2p_device_wdev_counts_in_its_own_slot(self):
+        dev = IW_DEV_STA_ONLY + "\n\tUnnamed/non-netdev interface\n\t\twdev 0x2\n\t\ttype P2P-device"
+        self.assertEqual(_run_p2p_slot_check(IW_PHY_IWLWIFI, dev).status, diagnostics.STATUS_OK)
+        check = _run_p2p_slot_check(IW_PHY_IWLWIFI, dev + "\n\tInterface ap0\n\t\ttype AP")
+        self.assertEqual(check.status, diagnostics.STATUS_WARN)
+        self.assertIn("ap0 (AP)", check.message)
+        self.assertNotIn("P2P-device", check.message)
+
+    def test_p2p_device_missing_from_the_combinations_is_ignored(self):
+        dev = IW_DEV_STA_ONLY + "\n\tUnnamed/non-netdev interface\n\t\ttype P2P-device"
+        check = _run_p2p_slot_check(IW_PHY_RTW89, dev)
+        self.assertEqual(check.status, diagnostics.STATUS_OK)
+
+    def test_adapter_without_sta_p2p_concurrency_is_left_to_iw_p2p(self):
+        phy = "\n".join([
+            "Wiphy phy0",
+            "\tvalid interface combinations:",
+            "\t\t * #{ managed, P2P-client, P2P-GO } <= 1,",
+            "\t\t   total <= 1, #channels <= 1",
+        ])
+        check = _run_p2p_slot_check(phy, IW_DEV_STA_ONLY)
+        self.assertEqual(check.status, diagnostics.STATUS_SKIP)
+
+    def test_adapter_without_combinations_is_skipped(self):
+        check = _run_p2p_slot_check("Wiphy phy0\n\tSupported interface modes:\n\t\t * managed\n", IW_DEV_STA_ONLY)
+        self.assertEqual(check.status, diagnostics.STATUS_SKIP)
+
+    def test_missing_iw_is_skipped(self):
+        with mock.patch("diagnostics._find_binary", return_value=None):
+            check = diagnostics._p2p_slot_check()
+        self.assertEqual(check.status, diagnostics.STATUS_SKIP)
+
+    def test_iw_failure_is_skipped(self):
+        with (
+            mock.patch("diagnostics._find_binary", return_value="/usr/sbin/iw"),
+            mock.patch("diagnostics._run", return_value=_completed("", returncode=1, stderr="nl80211 not found")),
+        ):
+            check = diagnostics._p2p_slot_check()
+        self.assertEqual(check.status, diagnostics.STATUS_SKIP)
+        self.assertEqual(check.detail, "nl80211 not found")
+
+    def test_combinations_are_parsed_per_phy(self):
+        text = IW_PHY_RTW89 + "\n" + IW_PHY_IWLWIFI.replace("phy0", "phy1")
+        combinations = diagnostics._iw_phy_combinations(text)
+        self.assertEqual(sorted(combinations), ["0", "1"])
+        self.assertEqual(combinations["0"][0], ([(("managed",), 1), (("AP", "P2P-client", "P2P-GO"), 1)], 2))
+        self.assertEqual(len(combinations["0"]), 2)
+        self.assertEqual(combinations["1"][0][1], 3)
+
+    def test_concurrency_fact_still_reads_the_combinations(self):
+        with (
+            mock.patch("diagnostics._find_binary", return_value="/usr/sbin/iw"),
+            mock.patch("diagnostics._run", return_value=_completed(IW_PHY_RTW89)),
+        ):
+            self.assertEqual(diagnostics._iw_phy_p2p_facts(), (True, True))
+
+    def test_summary_points_at_a_blocked_slot(self):
+        def ok(name, *args, **kwargs):
+            return diagnostics.Check(name, diagnostics.STATUS_OK, "")
+
+        blocked = diagnostics.Check(diagnostics._P2P_SLOT_CHECK, diagnostics.STATUS_WARN, "in use by ap0 (AP)")
+        with (
+            mock.patch("diagnostics._nmcli_check", return_value=ok("NetworkManager")),
+            mock.patch("diagnostics._ffmpeg_encoders", return_value=ok("ffmpeg encoders")),
+            mock.patch("diagnostics._display_capture_check", return_value=ok("screen capture")),
+            mock.patch("diagnostics._command_check", side_effect=ok),
+            mock.patch("diagnostics._p2p_slot_check", return_value=blocked),
+            mock.patch("diagnostics._firewall_check"),
+        ):
+            report = diagnostics.run_diagnostics(skip_firewall=True)
+        # Still a candidate: a hotspot can be stopped, so this must not refuse.
+        self.assertTrue(report.wfd_candidate)
+        self.assertIn("no free slot", report.summary)
+        self.assertIn(diagnostics._P2P_SLOT_CHECK, report.summary)
