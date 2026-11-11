@@ -10,15 +10,23 @@ ROOT = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(ROOT))
 
 from drivers.wfd_lpcm_mux import (  # noqa: E402
+    AUDIO_AU_TICKS,
     AVC_VIDEO_DESCRIPTOR,
     LPCM_ES_DESCRIPTOR,
+    LPCM_FRAME_BYTES,
     LPCM_PCM_BYTES_PER_PES,
+    LPCM_SAMPLES_PER_AU,
     LPCMAudioPacker,
     PID_VID,
+    PROGRAM_LEAD_90K,
     STREAM_TYPE_LPCM,
     WFD_LPCM_HEADER,
+    WFDLPCMMuxer,
     _build_pmt,
     _pcr_packet,
+    ns_to_90k,
+    quantize_video_delta,
+    video_frame_ticks,
 )
 
 
@@ -72,6 +80,66 @@ class TestWFDLPCMFraming(unittest.TestCase):
         self.assertEqual(((pkt[1] & 0x1F) << 8) | pkt[2], 0x1000)
         # adaptation_field_control == 0b10 (adaptation only)
         self.assertEqual((pkt[3] >> 4) & 0x3, 0x2)
+        # Continuity counter is the low nibble and must advance per packet.
+        self.assertEqual(pkt[3] & 0x0F, 0)
+        nxt = _pcr_packet(180_000, continuity=1)
+        self.assertEqual(nxt[3] & 0x0F, 1)
+
+
+class TestProgramClock(unittest.TestCase):
+    def test_ns_to_90k_is_exact(self):
+        self.assertEqual(ns_to_90k(1_000_000_000), 90_000)
+        self.assertEqual(ns_to_90k(16_666_667), 1500)
+        self.assertEqual(video_frame_ticks(60), 1500)
+
+    def test_video_delta_snaps_to_frame_grid(self):
+        self.assertEqual(quantize_video_delta(0, 60), 0)
+        self.assertEqual(quantize_video_delta(200, 60), 0)
+        self.assertEqual(quantize_video_delta(1500, 60), 1500)
+        self.assertEqual(quantize_video_delta(1600, 60), 1500)
+        self.assertEqual(quantize_video_delta(3000, 60), 3000)
+
+    def _muxer(self):
+        return WFDLPCMMuxer("127.0.0.1", 9, fps=60)
+
+    def test_video_pts_advances_one_frame_even_when_capture_bunches(self):
+        m = self._muxer()
+        m._pcr_90k = 50_000
+        first = m._video_pts_for_ns(0)
+        # Same millisecond, then many seconds later. Both are real pictures.
+        second = m._video_pts_for_ns(1_000)
+        third = m._video_pts_for_ns(5_000_000_000)
+        self.assertEqual(first, PROGRAM_LEAD_90K)
+        self.assertEqual(second, first + 1500)
+        self.assertEqual(third, second + 1500)
+        self.assertEqual(m.video_frames_dropped_late, 0)
+
+    def test_audio_pts_steps_one_access_unit(self):
+        m = self._muxer()
+        m._pcr_90k = 0
+        first = m._take_audio_pts(0)
+        second = m._take_audio_pts(LPCM_SAMPLES_PER_AU)
+        self.assertEqual(first, PROGRAM_LEAD_90K)
+        self.assertEqual(second - first, AUDIO_AU_TICKS)
+        self.assertFalse(m._audio_discontinuity)
+
+    def test_late_audio_au_is_discarded_with_discontinuity(self):
+        m = self._muxer()
+        m._pcr_90k = 200_000
+        m._audio_pts_origin = 0
+        m._audio_au_base = 0
+        pts = m._take_audio_pts(0)
+        self.assertIsNone(pts)
+        self.assertTrue(m._audio_discontinuity)
+        self.assertEqual(m.audio_aus_discarded, 1)
+
+    def test_discarded_chunk_sets_discontinuity(self):
+        import queue
+        m = self._muxer()
+        m._audio_q = queue.Queue(maxsize=1)
+        m._enqueue_audio(b"\x00" * LPCM_FRAME_BYTES)
+        m._enqueue_audio(b"\x11" * LPCM_FRAME_BYTES)
+        self.assertTrue(m._audio_discontinuity)
 
     def test_short_ts_packet_uses_adaptation_stuffing(self):
         from drivers.wfd_lpcm_mux import _ts_packet

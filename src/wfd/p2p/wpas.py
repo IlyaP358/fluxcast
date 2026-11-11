@@ -107,23 +107,24 @@ def enable_wifi_display(physical_iface: Optional[str], rtsp_port: int) -> None:
     hex0 = wfd_wpa_cli_device_info_hex(rtsp_port)
     hex8 = wfd_wpa_cli_local_ip_hex()
     enabled = False
+    def _wpa(args: list[str]) -> subprocess.CompletedProcess[str]:
+        try:
+            return run_privileged(args, timeout=5.0)
+        except subprocess.TimeoutExpired:
+            print(f"[FluxCast WFD] wpa_cli timed out: {' '.join(args)}")
+            return subprocess.CompletedProcess(args, 1, "", "timeout")
+
     for iface in ifaces:
-        r = run_privileged(["wpa_cli", "-i", iface, "set", "wifi_display", "1"], timeout=5.0)
+        r = _wpa(["wpa_cli", "-i", iface, "set", "wifi_display", "1"])
         if r.returncode != 0:
             print(
                 f"[FluxCast WFD] wifi_display set on {iface} failed: "
                 f"{(r.stderr or r.stdout or '').strip()}"
             )
             continue
-        run_privileged(
-            ["wpa_cli", "-i", iface, "wfd_subelem_set", "0", hex0], timeout=5.0
-        )
-        run_privileged(
-            ["wpa_cli", "-i", iface, "wfd_subelem_set", "8", hex8], timeout=5.0
-        )
-        chk = run_privileged(
-            ["wpa_cli", "-i", iface, "get", "wifi_display"], timeout=5.0
-        )
+        _wpa(["wpa_cli", "-i", iface, "wfd_subelem_set", "0", hex0])
+        _wpa(["wpa_cli", "-i", iface, "wfd_subelem_set", "8", hex8])
+        chk = _wpa(["wpa_cli", "-i", iface, "get", "wifi_display"])
         val = (chk.stdout or "").strip().splitlines()
         shown = val[-1] if val else "?"
         print(f"[FluxCast WFD] wifi_display={shown} on {iface} (need 1 for Miracast)")
@@ -331,7 +332,17 @@ def _wpa_cli_iface(iface: str, *args: str, timeout: float = 5.0):
 
 
 def _wpa_ctrl_alive(iface: str) -> bool:
-    r = _wpa_cli_iface(iface, "ping", timeout=3.0)
+    """True when wpa_cli ping answers. A missing or wedged socket is not alive.
+
+    sudo wpa_cli can sit until the timeout instead of exiting. That used to
+    kill the whole connect with TimeoutExpired while the sink was already
+    visible. Treat a timeout as "not alive" so the caller can recreate the
+    P2P-device control interface.
+    """
+    try:
+        r = _wpa_cli_iface(iface, "ping", timeout=3.0)
+    except subprocess.TimeoutExpired:
+        return False
     return r.returncode == 0 and "PONG" in (r.stdout or "").upper()
 
 

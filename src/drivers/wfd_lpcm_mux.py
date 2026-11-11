@@ -2,7 +2,7 @@
 WFD LPCM MPEG-TS muxer for Microsoft Wireless Display Adapter.
 
 Microsoft requires LPCM audio in MPEG-TS with stream_type=0x83 (WFD/WIDI LPCM)
-and a 4-byte WIDI PES header (0xA0 0x06 0x00 0x09) before PCM samples.
+and a 4-byte WFD LPCM PES header (0xA0 0x06 0x00 0x11) before PCM samples.
 GStreamer mpegtsmux hardcodes stream_type=0x8b (Blu-ray LPCM) and cannot
 be patched at runtime --- hence this pure-Python muxer.
 """
@@ -79,6 +79,34 @@ LPCM_ES_DESCRIPTOR = bytes([
 RTP_PT_MP2T  = 33 # RFC 2250 — MPEG-TS over RTP
 RTP_CLOCK_HZ = 90_000 # 90 kHz clock
 RTP_MAX_PAYLOAD = 1316 # 7 × 188 bytes
+# One program clock for PCR, video PTS, and LPCM PTS.
+# 60 fps is exactly 1500 ticks. One LPCM PES (6×80 samples) is 10 ms = 900
+# ticks. The 100 ms lead keeps PTS ahead of PCR without stepping the clock.
+PROGRAM_LEAD_90K = 9000
+AUDIO_AU_TICKS = 900
+LPCM_SAMPLES_PER_AU = LPCM_AUS_PER_PES * LPCM_FRAMES_PER_AU  # 480
+PTS_MASK = 0x1FFFFFFFF
+
+
+def ns_to_90k(ns: int) -> int:
+    """Exact 90 kHz ticks. 1e9 ns -> 90000. Integer math, no float rounding."""
+    if ns <= 0:
+        return 0
+    return (int(ns) * 9) // 100_000
+
+
+def video_frame_ticks(fps: int) -> int:
+    rate = int(fps) if int(fps or 0) > 0 else 60
+    return 90_000 // rate
+
+
+def quantize_video_delta(delta_90k: int, fps: int) -> int:
+    """Snap a capture delta onto the exact frame grid (1500 ticks at 60 fps)."""
+    step = video_frame_ticks(fps)
+    if delta_90k <= 0 or step <= 0:
+        return 0
+    n = (int(delta_90k) + step // 2) // step
+    return n * step
 
 # PES stream IDs
 PES_SID_VIDEO = 0xE0
@@ -252,13 +280,18 @@ def _pcr_adaptation(pcr_90k: int) -> bytes:
     ])
 
 
-def _pcr_packet(pcr_90k: int) -> bytes:
-    """Dedicated PCR TS packet on PID 0x1000. Continuity stays 0."""
+def _pcr_packet(pcr_90k: int, continuity: int = 0) -> bytes:
+    """Dedicated PCR TS packet on PID 0x1000.
+
+    ISO 13818-1 increments the continuity counter on every packet of a PID,
+    including adaptation-only PCR. A receiver treats a repeated counter as a
+    duplicate and discards the clock.
+    """
     return _ts_packet(
         PID_PCR,
         b"",
         pusi=True,
-        continuity=0,
+        continuity=continuity & 0x0F,
         adaptation=_pcr_adaptation(pcr_90k),
     )
 
@@ -309,7 +342,8 @@ def _pes_header(stream_id: int, pts_90k: int,
 
 def _packetize_pes(pid: int, stream_id: int, pts_90k: int,
                    data: bytes, cc: list, *,
-                   stuffing: int = 0) -> list[bytes]:
+                   stuffing: int = 0,
+                   discontinuity: bool = False) -> list[bytes]:
     """Split PES into TS packets. cc is a mutable list [counter]."""
     pes_hdr = _pes_header(stream_id, pts_90k, len(data), stuffing=stuffing)
     payload  = pes_hdr + data
@@ -318,9 +352,14 @@ def _packetize_pes(pid: int, stream_id: int, pts_90k: int,
 
     while payload:
         max_payload = TS_PACKET_SIZE - 4  # 184 after header
+        if first and discontinuity:
+            max_payload -= 2  # adaptation length + discontinuity flag
         chunk    = payload[:max_payload]
         payload  = payload[max_payload:]
-        pkt      = _ts_packet(pid, chunk, pusi=first, continuity=cc[0])
+        adapt = bytes([0x80]) if first and discontinuity else None
+        pkt      = _ts_packet(
+            pid, chunk, pusi=first, continuity=cc[0], adaptation=adapt,
+        )
         cc[0]    = (cc[0] + 1) & 0x0F
         packets.append(pkt)
         first = False
@@ -425,6 +464,7 @@ class WFDLPCMMuxer:
         local_ip: str | None = None,
         local_port: int | None = None,
         bind_iface: str | None = None,
+        fps: int = 60,
     ):
         self._dest   = (dest_ip, dest_port)
         self._bind_ip = local_ip
@@ -466,6 +506,7 @@ class WFDLPCMMuxer:
         # Continuity counters (mutable lists so helpers can mutate in-place)
         self._cc_pat = [0]
         self._cc_pmt = [0]
+        self._cc_pcr = [0]
         self._cc_vid = [0]
         self._cc_aud = [0]
 
@@ -484,7 +525,20 @@ class WFDLPCMMuxer:
         self.frames_sent: int = 0
         self.frames_dropped_video: int = 0
         self.audio_frames_sent: int = 0
+        # PCR, video PTS, and LPCM PTS share this 90 kHz clock.
+        # A late access unit is discarded. discontinuity_indicator is set
+        # only for that discarded unit, not for a silent timestamp nudge.
+        self._fps = int(fps) if int(fps or 60) > 0 else 60
+        self._pcr_90k: int = 0
+        self._clock_origin_ns: Optional[int] = None
+        self._gst_origin_ns: Optional[int] = None
+        self._last_video_pts: Optional[int] = None
+        self._audio_pts_origin: Optional[int] = None
+        self._audio_au_base: Optional[int] = None
+        self._audio_discontinuity = False
         self.audio_chunks_dropped: int = 0
+        self.video_frames_dropped_late: int = 0
+        self.audio_aus_discarded: int = 0
         # PCR jitter tracking (ms); updated each frame
         self.pcr_jitter_last_ms: float = 0.0
         self.pcr_jitter_max_ms: float = 0.0
@@ -550,8 +604,10 @@ class WFDLPCMMuxer:
         if sink is None:
             raise RuntimeError("Audio pipeline must contain appsink named 'sink'")
         sink.set_property("emit-signals", True)
-        sink.set_property("max-buffers", 8)
-        sink.set_property("drop", True)
+        sink.set_property("max-buffers", 32)
+        # Do not drop here. A dropped buffer splices PCM and the dongle
+        # hears a click. The mux queue drop-oldest path skips PTS instead.
+        sink.set_property("drop", False)
 
         def _on_sample(appsink):
             sample = appsink.emit("pull-sample")
@@ -570,7 +626,54 @@ class WFDLPCMMuxer:
     # === Mux loop =============================================================
 
     def _ns_to_90k(self, ns: int) -> int:
-        return int(ns * RTP_CLOCK_HZ / 1_000_000_000) & 0x1FFFFFFFF
+        return ns_to_90k(ns) & PTS_MASK
+
+    def _note_program_clock(self) -> int:
+        now_ns = time.monotonic_ns()
+        if self._clock_origin_ns is None:
+            self._clock_origin_ns = now_ns
+        pcr = ns_to_90k(now_ns - self._clock_origin_ns) & PTS_MASK
+        self._pcr_90k = pcr
+        return pcr
+
+    def _video_pts_for_ns(self, pts_ns: int) -> Optional[int]:
+        """Stamp each picture on the next exact frame of the program clock.
+
+        Capture timestamps bunch and fall behind PCR during motion. Quantizing
+        those stamps and dropping the collision was punching holes the sink
+        shows as a tear that then recovers. ``pts_ns`` is ignored for spacing.
+        Every picture we accept advances one frame (1500 ticks at 60 fps).
+        """
+        del pts_ns
+        step = video_frame_ticks(self._fps)
+        if self._last_video_pts is None:
+            pts = PROGRAM_LEAD_90K
+        else:
+            pts = (self._last_video_pts + step) & PTS_MASK
+        self._last_video_pts = pts
+        return pts
+
+    def _take_audio_pts(self, frame_index: int) -> Optional[int]:
+        """LPCM PTS on the program grid, one 900-tick step per access unit.
+
+        Returns None when this unit is more than one unit behind the clock.
+        That unit is discarded and the next one carries discontinuity.
+        """
+        au = int(frame_index) // LPCM_SAMPLES_PER_AU
+        grid = AUDIO_AU_TICKS
+        if self._audio_pts_origin is None or self._audio_au_base is None:
+            target = ((self._pcr_90k + PROGRAM_LEAD_90K) // grid) * grid
+            self._audio_pts_origin = target
+            self._audio_au_base = au
+        pts = self._audio_pts_origin + (au - self._audio_au_base) * grid
+        target = ((self._pcr_90k + PROGRAM_LEAD_90K) // grid) * grid
+        if pts + grid < target:
+            self._audio_discontinuity = True
+            self._audio_pts_origin = None
+            self._audio_au_base = None
+            self.audio_aus_discarded += 1
+            return None
+        return pts & PTS_MASK
 
     def _revive_socket(self) -> None:
         """Recreate the RTP UDP socket after EBADF / close races during rebind."""
@@ -637,6 +740,7 @@ class WFDLPCMMuxer:
         try:
             dropped = self._audio_q.get_nowait()
             self._audio_packer.skip_frames(len(dropped) // LPCM_FRAME_BYTES)
+            self._audio_discontinuity = True
             self.audio_chunks_dropped += 1
             if self.audio_chunks_dropped == 1 or self.audio_chunks_dropped % 250 == 0:
                 log.warning(
@@ -659,30 +763,33 @@ class WFDLPCMMuxer:
             except queue.Empty:
                 break
             for aud_payload, frame_index in self._audio_packer.feed(aud_data):
-                # Sample-clock PTS.
-                aud_pts_90k = (
-                    (frame_index * RTP_CLOCK_HZ) // AUDIO_RATE + 9000
-                ) & 0x1FFFFFFFF
+                discont = self._audio_discontinuity
+                aud_pts_90k = self._take_audio_pts(frame_index)
+                if aud_pts_90k is None:
+                    continue
+                self._audio_discontinuity = False
                 out += _packetize_pes(
                     PID_AUD, PES_SID_AUDIO, aud_pts_90k,
                     aud_payload, self._cc_aud,
                     stuffing=LPCM_PES_STUFFING,
+                    discontinuity=discont,
                 )
                 self.audio_frames_sent += 1
         return out
 
-    def _maybe_psi(self, now: float, wall_start: float, force: bool = False) -> list[bytes]:
-        """PAT/PMT/PCR about every 100 ms (wall clock), not only on video frames."""
+    def _maybe_psi(self, now: float, force: bool = False) -> list[bytes]:
+        """PAT/PMT/PCR about every 100 ms, from the program clock."""
         out: list[bytes] = []
-        if not force and (now - self._last_psi_mono) < 0.1:
+        if not force and self._last_psi_mono and (now - self._last_psi_mono) < 0.1:
             return out
         self._last_psi_mono = now
-        pcr_90k = int((now - wall_start) * RTP_CLOCK_HZ) & 0x1FFFFFFFF
+        pcr_90k = self._pcr_90k & PTS_MASK
         out.append(_build_pat(self._cc_pat[0]))
         self._cc_pat[0] = (self._cc_pat[0] + 1) & 0x0F
         out.append(_build_pmt(self._cc_pmt[0]))
         self._cc_pmt[0] = (self._cc_pmt[0] + 1) & 0x0F
-        out.append(_pcr_packet(pcr_90k))
+        out.append(_pcr_packet(pcr_90k, self._cc_pcr[0]))
+        self._cc_pcr[0] = (self._cc_pcr[0] + 1) & 0x0F
         return out
 
     def _mux_loop(self) -> None:
@@ -692,8 +799,6 @@ class WFDLPCMMuxer:
         gc.disable()
 
         frame_counter = 0
-        wall_start: Optional[float] = None
-        pts_offset_90k: Optional[int] = None
         prev_send_time: float = time.monotonic()
 
         try:
@@ -712,26 +817,23 @@ class WFDLPCMMuxer:
                 except queue.Empty:
                     pass
 
-                # PCR: wall clock computed RIGHT NOW, epoch = first frame arrival
                 now = time.monotonic()
-                if wall_start is None:
+                if self._clock_origin_ns is None:
                     if not have_video:
-                        # Frame captured before the first video frame — discard
+                        # Audio that arrived before the first picture is not
+                        # on the program clock yet. Discard it.
                         try:
                             while True:
                                 self._audio_q.get_nowait()
                         except queue.Empty:
                             pass
                         continue
-                    wall_start = now
-                    pts_offset_90k = self._ns_to_90k(vid_pts_ns)
                     prev_send_time = now
                     self._last_psi_mono = 0.0
 
-                pcr_90k = int((now - wall_start) * RTP_CLOCK_HZ) & 0x1FFFFFFFF
+                self._note_program_clock()
                 if have_video:
-                    # PCR jitter: deviation from expected inter-frame interval
-                    frame_interval_ms = 1000.0 / 30.0   # assume 30 fps
+                    frame_interval_ms = 1000.0 / float(self._fps or 60)
                     actual_delta_ms = (now - prev_send_time) * 1000.0
                     jitter_ms = abs(actual_delta_ms - frame_interval_ms)
                     self.pcr_jitter_last_ms = jitter_ms
@@ -739,31 +841,30 @@ class WFDLPCMMuxer:
                         self.pcr_jitter_max_ms = jitter_ms
                     prev_send_time = now
 
-                    gst_pts_90k = self._ns_to_90k(vid_pts_ns)
-                    if pts_offset_90k is None:
-                        pts_offset_90k = gst_pts_90k
-                    pts_90k = (gst_pts_90k - pts_offset_90k) & 0x1FFFFFFFF
-                    if pts_90k < pcr_90k:
-                        pts_90k = (pcr_90k + 9000) & 0x1FFFFFFFF
-
+                    pts_90k = self._video_pts_for_ns(vid_pts_ns)
                     ts_out: list[bytes] = []
-
-                    # PAT + PMT
-                    ts_out += self._maybe_psi(now, wall_start)
-
-                    # Video PES
-                    ts_out += _packetize_pes(
-                        PID_VID, PES_SID_VIDEO, pts_90k,
-                        vid_data, self._cc_vid,
-                    )
-                    frame_counter += 1
-                    if self._send(ts_out):
-                        self.frames_sent += 1
+                    ts_out += self._maybe_psi(now)
+                    if pts_90k is None:
+                        n = self.video_frames_dropped_late
+                        if n == 1 or n % 250 == 0:
+                            log.warning(
+                                "dropped late or duplicate video picture (%d)",
+                                n,
+                            )
+                        if ts_out and not self._send(ts_out):
+                            self.udp_send_failures += 1
                     else:
-                        self.udp_send_failures += 1
+                        ts_out += _packetize_pes(
+                            PID_VID, PES_SID_VIDEO, pts_90k,
+                            vid_data, self._cc_vid,
+                        )
+                        frame_counter += 1
+                        if self._send(ts_out):
+                            self.frames_sent += 1
+                        else:
+                            self.udp_send_failures += 1
                 else:
-                    # PAT + PMT
-                    psi = self._maybe_psi(now, wall_start)
+                    psi = self._maybe_psi(now)
                     if psi:
                         if not self._send(psi):
                             self.udp_send_failures += 1

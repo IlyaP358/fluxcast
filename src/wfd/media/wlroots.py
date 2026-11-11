@@ -39,6 +39,36 @@ def io_watch_is_frozen(
     return cur[0] == last[0] and cur[1] == last[1]
 
 
+def bufs_size_is_storm(samples: list[int]) -> bool:
+    """Pool growth is backpressure, not a reason to restart capture.
+
+    wf-recorder grows from 4 toward 16 and pauses capture once pending
+    frames hit 14. Restarting on that line killed the pause, the next
+    encoder climbed through the same sizes, and the picture froze every
+    few seconds. A wedged encoder prints ``capture pause timeout`` and
+    the process exits; that path rebinds.
+    """
+    del samples
+    return False
+
+
+def stderr_rebind_reason(line: str) -> str | None:
+    """Why a wf-recorder stderr line should restart capture, if at all.
+
+    ``encode stall: waiting for frame`` is the encoder waiting while capture
+    is paused at the pool high-water mark. Restarting on it scheduled the
+    next pause. ``capture pause timeout`` is the encoder actually wedged.
+    """
+    low = line.lower()
+    if "capture pause timeout" in low:
+        return "encode-stall"
+    if "non monotonically" in low or "non-monotonically" in low:
+        return "dts"
+    if "buffer pool full" in low:
+        return "buffer-pool"
+    return None
+
+
 def impairment_debounce_seconds(reason: str) -> float:
     """Seconds to wait before another capture rebind for *reason*."""
     if reason == "encode-stall":
@@ -410,11 +440,9 @@ class WlrootsMixin:
         def _run() -> None:
             if proc.stderr is None:
                 return
-            import re as _re
 
             pool_hits = 0
             window_start = time.monotonic()
-            bufs_vals: list[tuple[float, int]] = []
             try:
                 for raw in iter(proc.stderr.readline, b""):
                     try:
@@ -427,38 +455,13 @@ class WlrootsMixin:
                     if now - window_start > 5.0:
                         pool_hits = 0
                         window_start = now
-                        bufs_vals = [v for v in bufs_vals if now - v[0] <= 5.0]
-                    low = line.lower()
-                    if "non monotonically" in low or "non-monotonically" in low:
-                        self._maybe_rebind_for_impairment("dts")
-                    elif "encode stall" in low:
-                        self._maybe_rebind_for_impairment("encode-stall")
-                    elif "buffer pool full" in low:
+                    reason = stderr_rebind_reason(line)
+                    if reason == "buffer-pool":
                         pool_hits += 1
                         if pool_hits >= 2:
                             self._maybe_rebind_for_impairment("buffer-pool")
-                    else:
-                        m = _re.search(r"bufs_size:\s*(\d+)", line)
-                        if m:
-                            n = int(m.group(1))
-                            bufs_vals.append((now, n))
-                            # Keep ~2s of samples for climb detection.
-                            recent = [v for v in bufs_vals if now - v[0] <= 2.0]
-                            bufs_vals = recent
-                            peak = max(v for _, v in recent) if recent else n
-                            start = recent[0][1] if recent else n
-                            storm = peak >= 14 or (peak - start) >= 6
-                            if storm:
-                                _append_latency_log(
-                                    getattr(self.config, "latency_log_path", None),
-                                    "bufs_size_storm",
-                                    peak=peak,
-                                    start=start,
-                                    samples=len(recent),
-                                    label=label,
-                                )
-                                # One strong storm is enough on continuous -D.
-                                self._maybe_rebind_for_impairment("bufs-size-storm")
+                    elif reason:
+                        self._maybe_rebind_for_impairment(reason)
             except Exception:
                 pass
             finally:
@@ -638,6 +641,18 @@ class WlrootsMixin:
                 )
         return params, desc
 
+    def _wf_recorder_env(self) -> dict[str, str]:
+        """Child env. WF_RECORDER_RATE_FILE is polled so bitrate/QP change
+        without killing the capture process."""
+        env = os.environ.copy()
+        rate = (os.environ.get("WF_RECORDER_RATE_FILE") or "").strip()
+        if not rate:
+            rate = os.path.expanduser(
+                "~/.local/state/omarchy-miracast/encode.rate"
+            )
+        env["WF_RECORDER_RATE_FILE"] = rate
+        return env
+
     def _start_wf_recorder_lpcm(self, wf_recorder: str, monitor) -> None:
         """DMA-BUF H.264 + WFD LPCM mux for LPCM-only sinks (e.g. many TVs).
 
@@ -700,6 +715,7 @@ class WlrootsMixin:
             local_ip=self.local_ip,
             local_port=self.config.source_port,
             bind_iface=self.tx_interface,
+            fps=int(self.config.fps or 60),
         )
 
         # appsink: max-buffers=1 drop=true (drop whole AUs; no intermediate queue).
@@ -710,13 +726,17 @@ class WlrootsMixin:
             "appsink name=sink sync=false max-buffers=1 drop=true"
         )
         # pw-cat → S16LE pipe; convert to S16BE for WFD LPCM.
+        # do-timestamp is required. Without PTS, audiobuffersplit errors
+        # and the audio pipe never prerolls, so the stick gets silence.
+        # drop=false: a dropped appsink buffer splices PCM. Overflow is
+        # handled in WFDLPCMMuxer, which skips the sample clock.
         aud_pipeline = (
             f"fdsrc fd={ar_fd} do-timestamp=true ! "
             "audio/x-raw,format=S16LE,rate=48000,channels=2,"
             "layout=interleaved ! "
             "audioconvert ! audio/x-raw,format=S16BE ! "
             "audiobuffersplit output-buffer-size=1920 ! "
-            "appsink name=sink sync=false max-buffers=8 drop=true"
+            "appsink name=sink sync=false max-buffers=32 drop=false"
         )
 
         try:
@@ -750,6 +770,7 @@ class WlrootsMixin:
             stdout=w_fd,
             stderr=subprocess.PIPE,
             pass_fds=(w_fd,),
+            env=self._wf_recorder_env(),
         )
         os.close(w_fd)
         self._watch_sender_stderr(wf_proc, "wf-recorder-lpcm")
@@ -1026,6 +1047,7 @@ class WlrootsMixin:
             local_ip=self.local_ip,
             local_port=self.config.source_port,
             bind_iface=self.tx_interface,
+            fps=int(self.config.fps or 60),
         )
         vid_pipeline = (
             f"fdsrc fd={r_fd} do-timestamp=true ! "
@@ -1033,13 +1055,14 @@ class WlrootsMixin:
             "video/x-h264,stream-format=byte-stream,alignment=au ! "
             "appsink name=sink sync=false max-buffers=1 drop=true"
         )
+        # do-timestamp is required so audiobuffersplit will preroll.
         aud_pipeline = (
             f"fdsrc fd={ar_fd} do-timestamp=true ! "
             "audio/x-raw,format=S16LE,rate=48000,channels=2,"
             "layout=interleaved ! "
             "audioconvert ! audio/x-raw,format=S16BE ! "
             "audiobuffersplit output-buffer-size=1920 ! "
-            "appsink name=sink sync=false max-buffers=8 drop=true"
+            "appsink name=sink sync=false max-buffers=32 drop=false"
         )
         try:
             muxer.start(vid_pipeline, aud_pipeline)
@@ -1096,7 +1119,12 @@ class WlrootsMixin:
             f"/dev/fd/{w_fd}",
         ]
 
-        wf_proc = subprocess.Popen(wf_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wf_proc = subprocess.Popen(
+            wf_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self._wf_recorder_env(),
+        )
         if wf_proc.stdout is None:
             muxer.stop()
             os.close(r_fd)
@@ -1318,7 +1346,12 @@ class WlrootsMixin:
             **budget,
         )
 
-        wf_proc = subprocess.Popen(wf_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wf_proc = subprocess.Popen(
+            wf_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self._wf_recorder_env(),
+        )
         if wf_proc.stdout is None:
             wf_proc.kill()
             raise WFDNotReady("wf-recorder did not expose stdout.")

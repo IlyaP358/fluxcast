@@ -9,8 +9,10 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wfd.media.wlroots import (  # noqa: E402
+    bufs_size_is_storm,
     impairment_debounce_seconds,
     io_watch_is_frozen,
+    stderr_rebind_reason,
 )
 
 
@@ -27,6 +29,31 @@ class IoWatchFrozenTest(unittest.TestCase):
         self.assertFalse(io_watch_is_frozen(last, (100, 201), "wchar"))
         self.assertTrue(io_watch_is_frozen(last, (999, 200), "wchar"))
         self.assertTrue(io_watch_is_frozen(last, (100, 200), "wchar"))
+
+
+class BufsSizeStormTest(unittest.TestCase):
+    def test_pool_growth_is_not_a_storm(self):
+        # 14 is wf-recorder's capture-pause high water, not a dead encoder.
+        self.assertFalse(bufs_size_is_storm([5, 6, 7, 8, 9, 10, 11]))
+        self.assertFalse(bufs_size_is_storm([5, 8, 12, 14, 16]))
+        self.assertFalse(bufs_size_is_storm([]))
+
+
+class StderrRebindReasonTest(unittest.TestCase):
+    def test_encode_wait_is_not_a_restart(self):
+        self.assertIsNone(
+            stderr_rebind_reason(
+                "encode stall: waiting for frame >1000ms (pending=4)"
+            )
+        )
+
+    def test_pause_timeout_still_rebinds(self):
+        self.assertEqual(
+            stderr_rebind_reason(
+                "capture pause timeout: encode_idle_ms=2500 pending=14"
+            ),
+            "encode-stall",
+        )
 
 
 class ImpairmentDebounceTest(unittest.TestCase):

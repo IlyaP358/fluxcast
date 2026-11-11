@@ -534,7 +534,12 @@ for port in 67 68; do
   ufw allow in on "$iface" to any port "$port" proto udp >/dev/null || true
 done
 """
-    _sudo_run(["sh", "-c", script, "fluxcast-dhcp-ufw", iface], timeout=8.0)
+    # ufw can sit on its lock. The iptables accept is already in place.
+    # A timeout here must not tear the group down.
+    try:
+        _sudo_run(["sh", "-c", script, "fluxcast-dhcp-ufw", iface], timeout=8.0)
+    except subprocess.TimeoutExpired:
+        return
 
 
 def _prepare_go_rtsp_input(iface: str) -> None:
