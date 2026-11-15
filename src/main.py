@@ -455,7 +455,15 @@ def main() -> None:
         devices = discover_devices(timeout=args.discover_timeout)
         tv = prompt_device(devices, args.device_name)
         stream_server.allow_client(device_client_ip(tv, "dlna"))
-        start_cast(tv, stream_url)
+
+        before_requests = stream_server.request_count
+        started = start_cast(
+            tv,
+            stream_url,
+            is_active=lambda: stream_server.request_count > before_requests,
+        )
+        if not started:
+            shutdown()
 
     else:  # cast protocol
         from cast import discover_devices, connect_by_ip, prompt_device, start_cast
@@ -471,6 +479,10 @@ def main() -> None:
             start_cast(tv, stream_url)
 
     print("[FluxCast] Casting started. Press Ctrl+C to stop.")
+    if args.protocol == "dlna":
+        from dlna import watch_playback
+        watch_playback(tv)
+        shutdown()
     signal.pause()
 
 

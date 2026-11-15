@@ -51,6 +51,16 @@ class StreamAccessTest(unittest.TestCase):
         finally:
             conn.close()
 
+    def _get(self, path: str) -> int:
+        conn = HTTPConnection("127.0.0.1", self.port, timeout=2)
+        try:
+            conn.request("GET", path)
+            response = conn.getresponse()
+            response.read()
+            return response.status
+        finally:
+            conn.close()
+
     def test_binds_only_to_requested_host(self):
         host, _port = self.stream_server._server.server_address
         self.assertEqual(host, "127.0.0.1")
@@ -76,6 +86,21 @@ class StreamAccessTest(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, 403)
         ctx.exception.close()
+
+    def test_counts_authorized_get_requests(self):
+        before = self.stream_server.request_count
+        self.assertEqual(self._get(f"/{self.session_id}/stream0.ts"), 200)
+        self.assertEqual(self.stream_server.request_count, before + 1)
+
+    def test_does_not_count_rejected_requests(self):
+        before = self.stream_server.request_count
+        self.assertEqual(self._get("/session-other/stream0.ts"), 404)
+        self.assertEqual(self.stream_server.request_count, before)
+
+    def test_does_not_count_head_probes_as_playback(self):
+        before = self.stream_server.request_count
+        self.assertEqual(self._status(f"/{self.session_id}/stream.m3u8"), 200)
+        self.assertEqual(self.stream_server.request_count, before)
 
     def test_rejects_before_allowed_client_is_set(self):
         locked = server.StreamServer(
